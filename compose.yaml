@@ -1,0 +1,117 @@
+name: fcapsule-lab
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: inventory
+      POSTGRES_USER: inventory
+      POSTGRES_PASSWORD: inventory
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U inventory -d inventory"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    mem_limit: 512m
+    networks: [lab]
+
+  inventory-api:
+    build: .
+    command: ["python", "-m", "app.inventory"]
+    environment:
+      SERVICE_NAME: inventory-api
+      PORT: "8081"
+      DATABASE_URL: postgresql://inventory:inventory@postgres:5432/inventory
+      INITIAL_FAILURE_MODE: normal
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8081:8081"
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:8081/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    mem_limit: 384m
+    networks: [lab]
+
+  orders-api:
+    build: .
+    command: ["python", "-m", "app.orders"]
+    environment:
+      SERVICE_NAME: orders-api
+      PORT: "8080"
+      INVENTORY_URL: http://inventory-api:8081
+      INVENTORY_TIMEOUT_SECONDS: "0.45"
+      MAX_RETRIES: "3"
+    depends_on:
+      inventory-api:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:8080/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    mem_limit: 384m
+    networks: [lab]
+
+  traffic-generator:
+    build: .
+    command: ["python", "-m", "app.traffic"]
+    environment:
+      SERVICE_NAME: traffic-generator
+      PORT: "8082"
+      ORDERS_URL: http://orders-api:8080
+      REQUESTS_PER_SECOND: "120"
+      MAX_INFLIGHT: "32"
+    depends_on:
+      orders-api:
+        condition: service_healthy
+    ports:
+      - "8082:8082"
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:8082/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    mem_limit: 256m
+    networks: [lab]
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.enable-lifecycle
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus-data:/prometheus
+    depends_on:
+      inventory-api:
+        condition: service_healthy
+      orders-api:
+        condition: service_healthy
+      traffic-generator:
+        condition: service_healthy
+    ports:
+      - "9090:9090"
+    mem_limit: 512m
+    networks: [lab]
+
+networks:
+  lab:
+    name: fcapsule-lab
+
+volumes:
+  postgres-data:
+  prometheus-data:

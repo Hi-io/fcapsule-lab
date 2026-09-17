@@ -1,0 +1,35 @@
+groups:
+  - name: fcapsule-lab
+    rules:
+      - alert: OrdersCheckoutFailureRateHigh
+        expr: |
+          sum(rate(orders_checkout_requests_total{status="503"}[30s]))
+          /
+          clamp_min(sum(rate(orders_checkout_requests_total[30s])), 0.01) > 0.15
+        for: 15s
+        labels:
+          severity: critical
+          service: orders-api
+        annotations:
+          summary: Checkout failure rate is above 15 percent.
+          description: Orders retries may be amplifying an inventory database failure.
+
+      - alert: InventoryLockTimeouts
+        expr: increase(inventory_database_failures_total{kind="lock_timeout"}[30s]) > 5
+        for: 10s
+        labels:
+          severity: warning
+          service: inventory-api
+        annotations:
+          summary: Inventory row-lock acquisition is timing out.
+          description: Reservation lock contention is preventing inventory requests from completing.
+
+      - alert: OrdersRetryAmplification
+        expr: orders_retry_amplification_ratio > 1.25
+        for: 15s
+        labels:
+          severity: warning
+          service: orders-api
+        annotations:
+          summary: Inventory calls per checkout are elevated.
+          description: Checkout is retrying a failing inventory dependency while the breaker remains closed.
