@@ -63,7 +63,7 @@ time and select **Recover all** before moving to the next one.
 | Worker memory leak | FM | An unbounded batch cache allocates 8 MiB chunks until the 160 MiB cgroup limit causes an OOM kill | Kubernetes termination reason, restart counter, memory curve, allocation logs |
 | Poison job crash loop | FM | A malformed durable MySQL queue item terminates each worker before acknowledgement | CrashLoopBackOff, repeated fatal decoder logs, durable queue context |
 | CPU saturation | PM | A compute-bound batch sustains more than 75% of the worker CPU limit without terminating the pod | cAdvisor CPU series, custom iteration counter, healthy pod without restart |
-| MySQL connection saturation | PM | The inventory pool retains 36 sessions against `max_connections=40` | connection ratio, rejected connections, checkout retries, ConfigMap value |
+| MySQL connection saturation | PM | The inventory pool retains 39 sessions against `max_connections=40` | connection ratio, rejected connections, checkout retries, ConfigMap value |
 | Inventory lock contention | PM | Concurrent InnoDB transactions lock the same inventory row beyond the timeout | lock failures, latency, retries, checkout impact |
 
 The first two are fault-management cases because Kubernetes changes workload state. The
