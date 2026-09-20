@@ -50,6 +50,25 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(result["domains"], ["logs"])
         self.assertEqual(result["components"]["cited_evidence"], 10.0)
 
+    def test_contract_rubric_accepts_structured_status_but_penalizes_false_transport_claim(self):
+        run = {
+            "status": "ready",
+            "assessment": {
+                "likely_mechanism": "Inventory schema was rejected with upstream_status 200, so this was not connectivity.",
+                "next_action": "Inspect response serialization and compare payload fields.",
+                "expected_finding": "The legacy response omits the v1 fields.",
+                "uncertainty": "One dependency path was sampled.",
+                "evidence_ids": ["L1"],
+            },
+            "context": {"evidence": [{"id": "L1", "domain": "log_template"}]},
+        }
+        correct = score_investigation(self.oracle["response-contract"], run)
+        self.assertGreaterEqual(correct["score"], 90)
+        run["assessment"]["likely_mechanism"] += " Inventory-api intermittently returned HTTP 502."
+        contradicted = score_investigation(self.oracle["response-contract"], run)
+        self.assertLess(contradicted["score"], correct["score"])
+        self.assertEqual(len(contradicted["contradictions"]), 1)
+
     def test_pipeline_and_diagnosis_are_scored_separately(self):
         run = {"alert_observed": False, "logs": {"orders": {"retained_lines": 20}},
                "minimum_retained_log_lines": 1000, "captured_domains": ["logs"]}

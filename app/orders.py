@@ -151,7 +151,7 @@ class OrdersState:
                     order_id=order_id,
                     attempt=attempt,
                     max_attempts=self.max_retries,
-                    attempt_status=int(status),
+                    effective_status=int(status), status_semantics="orders_api_decision",
                     dependency="inventory-api", timeout_seconds=self.timeout,
                 )
                 time.sleep(0.006 * attempt)

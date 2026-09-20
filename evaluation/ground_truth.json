@@ -17,11 +17,11 @@
       "mechanism": "Inventory returns HTTP 200 with a legacy document that lacks the response fields checkout requires.",
       "required_domains": ["logs"],
       "findings": [
-        {"id": "contract", "weight": 3, "all": [["response contract", "schema", "expected field"], ["inventory", "dependency"], ["http 200", "successful response", "accepted response"]]},
+        {"id": "contract", "weight": 3, "all": [["response contract", "schema", "expected field"], ["inventory", "dependency"], ["http 200", "upstream_status 200", "200 response", "schema-invalid 200", "successful response", "accepted response"]]},
         {"id": "not_transport", "weight": 1, "all": [["not a transport", "reachable", "response received", "not connectivity"]]}
       ],
-      "actions": [["rollback", "compatibility", "consumer parser", "response schema"], ["capture response", "compare payload", "contract test"]],
-      "contradictions": ["database connection ceiling caused", "oom killed"]
+      "actions": [["rollback", "compatibility", "consumer parser", "response schema", "response serialization", "inventory_response_schema"], ["capture response", "compare payload", "contract test"]],
+      "contradictions": ["database connection ceiling caused", "oom killed", "inventory-api intermittently returned http 502", "inventory-api returning 502"]
     },
     {
       "id": "reservation-token-collision", "category": "logs", "expected_alert": "LabInventoryConstraintFailures", "target_service": "inventory-api",
