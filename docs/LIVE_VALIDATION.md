@@ -193,6 +193,19 @@ benchmark. It is a review-only replay, not another end-to-end live OOM experimen
 The final product revision is `01c306d`, including the policy 1.7 review and clearer
 tool-scope instructions. Original answers are never silently rewritten.
 
+After deployment, a complete worker investigation under policy 1.7 also finished
+successfully in 94.68 seconds, using 169,846 reported tokens (160,951 input and
+8,895 completion across calls). It queried source logs and resource history,
+distinguished the credential migration, decoder-crash and buffered-export phases,
+and explicitly reported the sampled working set below the limit with an unsampled
+actual peak. It did not repeat the false component-buffer comparison. The actual
+UI displayed this result, its source citations, check activity and token count.
+The unedited response is `memory-leak/final-live-worker-investigation.json`.
+This is a new investigation of historical events through the live integrations,
+not a second injected OOM. Its mitigation wording still needs operator judgment;
+streaming/bounded buffering was proposed, not implemented or validated on a real
+production export service.
+
 ## Node Headroom During Follow-Up
 
 After the original series, available memory fell to roughly 750 MiB. The traffic
@@ -207,6 +220,12 @@ volumes were preserved; deleting or rolling out that pod would have lost its loc
 storage. Restart count advanced from zero to one and readiness recovered. Available
 memory subsequently reached about 1.30 GiB and baseline Lab traffic was resumed.
 The helper exits automatically and does not become a permanent workload.
+
+At final verification all seven Lab pods were ready, no scenario was active, MySQL
+reported one connected session and the recent checkout-503 rate was zero. Baseline
+traffic remained enabled. GO15 was Ready without memory/disk/PID pressure and had
+about 1.33 GiB available. An older informational exporter CPU-throttling alert
+remained visible; this is not a claim that the entire cluster had no firing alerts.
 
 ## Verification Boundaries
 
