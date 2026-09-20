@@ -10,8 +10,9 @@ then judge whether FCAPSule preserves the small set of evidence needed to invest
 
 - A control UI is appropriate here because scenario activation is the user's primary
   job; it is not part of the FCAPSule product UI.
-- Four main cases cover distinct FM and PM behavior. Lock contention remains as an
-  additional dependency case rather than replacing the resource cases.
+- Six cases cover termination, decoder compatibility, computation, session lifetime,
+  transaction blocking and application/schema compatibility. Their independent oracle
+  is defined before running FCAPSule in `SCENARIO_CONTRACT.md`.
 - Baseline traffic is high enough to create a meaningful log-reduction problem but has
   bounded concurrency and explicit Kubernetes limits.
 - MySQL configuration is a ConfigMap referenced by the affected inventory workload, so
@@ -21,11 +22,14 @@ then judge whether FCAPSule preserves the small set of evidence needed to invest
 
 ## Acceptance Criteria
 
-1. One Kustomize command creates all workloads healthy.
+1. Sequential deployment starts healthy without surge replicas on a constrained node.
 2. Prometheus reports the application and MySQL targets as up.
-3. OpenSearch receives several thousand lab log documents per minute.
+3. Source log counts are measured; healthy traffic produces thousands of events without
+   manufacturing errors or ignoring backpressure during failures.
 4. Every scenario starts after deployment and has a corresponding alert rule.
 5. FM scenarios create a genuine Kubernetes restart or waiting state.
 6. PM scenarios fire without restarting the affected workload.
 7. Recover all returns the lab to healthy traffic without redeployment.
 8. FCAPSule discovers current pods and can capture logs, metrics, alerts, and ConfigMaps.
+9. Start is blocked below the memory floor; leases and low-memory recovery are tested.
+10. Failed or unsupported agent conclusions remain in the evaluation record.

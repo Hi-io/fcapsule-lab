@@ -1,52 +1,40 @@
-# Proposed FCAPSule Integration
+# FCAPSule Integration
 
-FCAPSule Lab is intentionally independent. Integration should happen over observable
-boundaries rather than direct Python imports or shared application state.
+The Kubernetes lab is an external workload, not a plugin or runtime dependency.
+FCAPSule uses its normal configured Prometheus, OpenSearch and Kubernetes APIs.
+There are no lab-specific scenario IDs, expected answers or score labels in those
+application alert annotations. The control UI and evaluator know the intervention;
+the investigator must work from observed workload evidence.
 
-## Current Local Workflow
+## Live Workflow
 
-The lab provides a narrow export bridge suitable for local demonstrations:
+1. Deploy the lab and confirm healthy application traffic and Prometheus targets.
+2. Include `fcapsule-lab` in FCAPSule's configured namespace scope.
+3. Start a leased scenario through the separate lab UI or evaluation runner.
+4. Prometheus fires a symptom rule. FCAPSule captures the alert and a bounded window
+   of source logs, performance measurements and available configuration.
+5. Inspect the episode assessment, actual agent observations and retained capsule.
+6. Compare the unedited result with `SCENARIO_CONTRACT.md` outside FCAPSule.
+7. Recover the workload and allow alert windows to clear before the next run.
 
-1. Start the five services with `make up`.
-2. Enable lock contention with `make fault-on` and wait for a Prometheus rule to fire.
-3. Run `make export-case`. It queries a two-minute window from Prometheus and Docker,
-   writing the normalized case under `artifacts/`.
-4. In FCAPSule, run `fcapsule ingest-case --case <path> --app-id checkout-lab`.
-5. Open Operations and select **Build report** for the captured incident.
+Metrics preserve namespace/pod identity. OpenSearch receives stdout/stderr through
+the cluster's existing collector. MySQL exposes its own metrics through the official
+exporter; the connection pressure alert does not depend on a possibly stale gauge
+inside the failing inventory service. Cross-application dependency discovery is a
+capability to evaluate, not something the lab assumes FCAPSule already solves.
 
-The bridge transfers a one-time bounded export. It does not make FCAPSule a Docker log
-store, Prometheus replacement, or controller of this workload.
+## Evidence Ownership
 
-## Production Adapter Direction
+Prometheus owns metric history; OpenSearch owns raw logs; MySQL owns disposable
+application rows. FCAPSule owns selected evidence and incident artifacts. No source
+retention period is assumed. The evaluator's artifact folder keeps independent run
+times, expected symptom, raw workload examples and original agent assessments.
 
-Register `checkout-lab` in FCAPSule with these source endpoints:
+No distributed tracing backend is configured. Request/order identifiers help manual
+correlation but are not presented as collected distributed traces.
 
-| Domain | Lab source | Intended FCAPSule adapter behavior |
-|---|---|---|
-| PM | `http://localhost:9090` | query bounded Prometheus ranges and alert state |
-| FM | Prometheus `/api/v1/alerts` | normalize active rules to FM events |
-| Logs | `docker compose logs` or a log backend export | query/export only a bounded incident window |
-| Topology | Compose service map | record orders -> inventory -> postgres relationships |
-| Traces | not configured | record unavailable rather than invent trace context |
+## Legacy Compose Path
 
-## Capture Direction
-
-Use `make fault-on`, wait for the alert rules to fire, then have FCAPSule query a fixed
-window around the first FM alert. The collector should retrieve only the PM range and
-log window necessary for the incident. FCAPSule then runs its existing evidence pipeline
-and produces the derived archive.
-
-## Do Not Share Storage
-
-Prometheus keeps metric history. Docker or a production log platform owns raw logs.
-PostgreSQL owns application data. FCAPSule owns only application registration, incident
-metadata, selected evidence, report artifacts, source references, and optional cited AI
-briefings. The separation is intentional and should remain true when this moves to pods
-or Kubernetes.
-
-## Future Adapter Requirements
-
-Before calling this a production integration, add a Prometheus range-query adapter,
-Alertmanager or alert-state adapter, a structured-log adapter, source deep links, access
-controls, and configurable source credentials. The lab is ready to exercise those
-adapters without becoming part of FCAPSule's runtime.
+`make up`, `make fault-on` and `make export-case` still support the older PostgreSQL
+Compose workload and its one-time normalized export. That workflow is distinct from
+the live Kubernetes suite and is not the path used to validate the current agent.

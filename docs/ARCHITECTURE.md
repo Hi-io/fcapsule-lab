@@ -27,7 +27,7 @@ pod + ConfigMaps     -> Kubernetes API -> FCAPSule
 ## Failure Semantics
 
 The FM scenarios produce real Kubernetes state transitions. Memory allocation crosses a
-cgroup limit and is handled by the kernel; the poison job exits the worker process while
+cgroup limit and is handled by the kernel; an import decoder exception exits the worker process while
 leaving the MySQL queue item unacknowledged. Kubernetes then supplies restart,
 termination-reason, and CrashLoop evidence.
 
@@ -39,3 +39,19 @@ explain why the resource changed.
 Every application metric target is relabeled with pod and namespace identity. Alert
 rules preserve those labels, allowing FCAPSule to map the alert to the affected workload
 instead of guessing from a service name.
+
+## Safety and Evaluation Boundary
+
+The controller reads node-exporter MemAvailable, admits one bounded run and records its
+intervention separately from application telemetry. Both worker and inventory enforce
+local leases. MySQL import rows have a five-minute expiration checked by each consumer
+restart. Recovery releases inventory sessions before attempting queue cleanup.
+
+Kustomize disables rolling surge for Python deployments. The sequential deployment
+helper pauses traffic and pins source to a published commit. No new always-on database,
+broker or tracing backend is required. Downward API identity overrides legacy log
+defaults to avoid contradictory namespaces in captured data.
+
+The evaluator stores run records and source logs under ignored `artifacts/`; FCAPSule
+receives none of the scenario oracle through a direct integration. The system under
+test must explain symptoms using its normal observability APIs.
