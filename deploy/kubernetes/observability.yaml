@@ -1,0 +1,156 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: fcapsule-lab-applications
+  namespace: fcapsule-lab
+  labels:
+    release: prometheus
+    app.kubernetes.io/part-of: fcapsule-lab
+spec:
+  selector:
+    matchLabels:
+      fcapsule.io/app-metrics: "true"
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 10s
+      scrapeTimeout: 5s
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_namespace]
+          targetLabel: namespace
+        - sourceLabels: [__meta_kubernetes_pod_name]
+          targetLabel: pod
+        - sourceLabels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
+          targetLabel: service
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: fcapsule-lab-mysql
+  namespace: fcapsule-lab
+  labels:
+    release: prometheus
+    app.kubernetes.io/part-of: fcapsule-lab
+spec:
+  selector:
+    matchLabels:
+      fcapsule.io/mysql-metrics: "true"
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 15s
+      scrapeTimeout: 8s
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_namespace]
+          targetLabel: namespace
+        - sourceLabels: [__meta_kubernetes_pod_name]
+          targetLabel: pod
+        - targetLabel: service
+          replacement: mysql-exporter
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: fcapsule-lab-incidents
+  namespace: fcapsule-lab
+  labels:
+    release: prometheus
+    app.kubernetes.io/part-of: fcapsule-lab
+spec:
+  groups:
+    - name: fcapsule-lab.fault-management
+      rules:
+        - alert: LabWorkerOOMKilled
+          expr: |
+            kube_pod_container_status_last_terminated_reason{
+              namespace="fcapsule-lab", container="worker", reason="OOMKilled"
+            } == 1
+            and on(namespace, pod, container)
+            increase(kube_pod_container_status_restarts_total{
+              namespace="fcapsule-lab", container="worker"
+            }[5m]) > 0
+          for: 0m
+          labels:
+            severity: critical
+            service: lab-worker
+            signal_class: FM
+          annotations:
+            summary: The lab worker was OOM-killed after its batch cache exceeded the container limit.
+            description: Kubernetes restarted the worker after memory growth crossed its 160 MiB limit.
+
+        - alert: LabWorkerCrashLooping
+          expr: |
+            max_over_time(kube_pod_container_status_waiting_reason{
+              namespace="fcapsule-lab", container="worker", reason="CrashLoopBackOff"
+            }[2m]) >= 1
+          for: 20s
+          labels:
+            severity: critical
+            service: lab-worker
+            signal_class: FM
+          annotations:
+            summary: The lab worker is repeatedly crashing while processing a durable poison job.
+            description: A malformed queue item remains unacknowledged and terminates each replacement worker.
+
+    - name: fcapsule-lab.performance-management
+      rules:
+        - alert: LabWorkerCPUHigh
+          expr: |
+            sum by (namespace, pod, container) (
+              rate(container_cpu_usage_seconds_total{
+                namespace="fcapsule-lab", container="worker", image!=""
+              }[1m])
+            )
+            /
+            max by (namespace, pod, container) (
+              kube_pod_container_resource_limits{
+                namespace="fcapsule-lab", container="worker", resource="cpu", unit="core"
+              }
+            ) > 0.75
+          for: 45s
+          labels:
+            severity: warning
+            service: lab-worker
+            signal_class: PM
+          annotations:
+            summary: The lab worker has consumed more than 75 percent of its CPU limit.
+            description: A compute-bound batch is sustaining CPU pressure without terminating the pod.
+
+        - alert: LabMySQLConnectionsSaturated
+          expr: |
+            lab_mysql_threads_connected{namespace="fcapsule-lab"}
+            /
+            clamp_min(lab_mysql_max_connections{namespace="fcapsule-lab"}, 1) > 0.80
+          for: 20s
+          labels:
+            severity: critical
+            service: inventory-api
+            signal_class: PM
+          annotations:
+            summary: MySQL connection use is above 80 percent of max_connections.
+            description: The inventory connection pool is retaining sessions and leaving too little capacity for checkout traffic.
+
+        - alert: LabInventoryLockContention
+          expr: increase(inventory_database_failures_total{namespace="fcapsule-lab",kind="lock_timeout"}[2m]) > 5
+          for: 15s
+          labels:
+            severity: warning
+            service: inventory-api
+            signal_class: PM
+          annotations:
+            summary: Inventory transactions are timing out on an InnoDB row lock.
+            description: Concurrent reservations are serializing on the same inventory record and exhausting the request timeout.
+
+        - alert: LabCheckoutFailureRateHigh
+          expr: |
+            sum by (namespace, pod) (rate(orders_checkout_requests_total{namespace="fcapsule-lab",status="503"}[1m]))
+            /
+            clamp_min(sum by (namespace, pod) (rate(orders_checkout_requests_total{namespace="fcapsule-lab"}[1m])), 0.01) > 0.15
+          for: 20s
+          labels:
+            severity: critical
+            service: orders-api
+            signal_class: PM
+          annotations:
+            summary: More than 15 percent of checkout requests are failing.
+            description: Orders cannot complete inventory reservations within the configured retry and timeout budgets.

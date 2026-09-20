@@ -1,0 +1,158 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mysql
+  namespace: fcapsule-lab
+  labels:
+    app.kubernetes.io/name: mysql
+    app.kubernetes.io/part-of: fcapsule-lab
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mysql
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mysql
+        app.kubernetes.io/part-of: fcapsule-lab
+    spec:
+      containers:
+        - name: mysql
+          image: mysql:8.4
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - secretRef:
+                name: lab-mysql-credentials
+          ports:
+            - name: mysql
+              containerPort: 3306
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "mysqladmin ping -h 127.0.0.1 -uroot -p$MYSQL_ROOT_PASSWORD"]
+            initialDelaySeconds: 15
+            periodSeconds: 5
+            timeoutSeconds: 3
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "mysqladmin ping -h 127.0.0.1 -uroot -p$MYSQL_ROOT_PASSWORD"]
+            initialDelaySeconds: 40
+            periodSeconds: 15
+            timeoutSeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 600m
+              memory: 640Mi
+          volumeMounts:
+            - name: mysql-data
+              mountPath: /var/lib/mysql
+            - name: mysql-config
+              mountPath: /etc/mysql/conf.d/lab.cnf
+              subPath: lab.cnf
+            - name: mysql-init
+              mountPath: /docker-entrypoint-initdb.d
+      volumes:
+        - name: mysql-data
+          emptyDir:
+            sizeLimit: 2Gi
+        - name: mysql-config
+          configMap:
+            name: lab-mysql-config
+        - name: mysql-init
+          configMap:
+            name: lab-mysql-init
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql
+  namespace: fcapsule-lab
+  labels:
+    app.kubernetes.io/name: mysql
+    app.kubernetes.io/part-of: fcapsule-lab
+spec:
+  selector:
+    app.kubernetes.io/name: mysql
+  ports:
+    - name: mysql
+      port: 3306
+      targetPort: mysql
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mysql-exporter
+  namespace: fcapsule-lab
+  labels:
+    app.kubernetes.io/name: mysql-exporter
+    app.kubernetes.io/part-of: fcapsule-lab
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mysql-exporter
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mysql-exporter
+        app.kubernetes.io/part-of: fcapsule-lab
+    spec:
+      containers:
+        - name: exporter
+          image: prom/mysqld-exporter:v0.17.0
+          args:
+            - --config.my-cnf=/etc/mysql-exporter/.my.cnf
+            - --mysqld.address=mysql:3306
+          ports:
+            - name: metrics
+              containerPort: 9104
+          readinessProbe:
+            httpGet:
+              path: /metrics
+              port: metrics
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 20m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 96Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: credentials
+              mountPath: /etc/mysql-exporter/.my.cnf
+              subPath: exporter.my.cnf
+              readOnly: true
+      volumes:
+        - name: credentials
+          secret:
+            secretName: lab-mysql-credentials
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql-exporter
+  namespace: fcapsule-lab
+  labels:
+    app.kubernetes.io/name: mysql-exporter
+    app.kubernetes.io/part-of: fcapsule-lab
+    fcapsule.io/mysql-metrics: "true"
+spec:
+  selector:
+    app.kubernetes.io/name: mysql-exporter
+  ports:
+    - name: metrics
+      port: 9104
+      targetPort: metrics

@@ -1,0 +1,473 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inventory-api
+  namespace: fcapsule-lab
+  labels:
+    app.kubernetes.io/name: inventory-api
+    app.kubernetes.io/part-of: fcapsule-lab
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: inventory-api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: inventory-api
+        app.kubernetes.io/part-of: fcapsule-lab
+        fcapsule.io/metrics: "true"
+    spec:
+      initContainers:
+        - name: install-source
+          image: python:3.12-slim
+          command: ["python", "-m", "pip", "install", "--no-cache-dir", "--target", "/opt/lab", "https://github.com/Hi-io/fcapsule-lab/archive/refs/heads/master.zip"]
+          volumeMounts:
+            - name: source
+              mountPath: /opt/lab
+      containers:
+        - name: inventory-api
+          image: python:3.12-slim
+          command: ["python", "-m", "app.mysql_inventory"]
+          env:
+            - name: PYTHONPATH
+              value: /opt/lab
+            - name: SERVICE_NAME
+              value: inventory-api
+            - name: PORT
+              value: "8081"
+          envFrom:
+            - configMapRef:
+                name: lab-mysql-config
+            - secretRef:
+                name: lab-mysql-credentials
+          ports:
+            - name: metrics
+              containerPort: 8081
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: metrics
+            initialDelaySeconds: 20
+            periodSeconds: 15
+          resources:
+            requests:
+              cpu: 50m
+              memory: 80Mi
+            limits:
+              cpu: 400m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: source
+              mountPath: /opt/lab
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: source
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: inventory-api
+  namespace: fcapsule-lab
+  labels:
+    app.kubernetes.io/name: inventory-api
+spec:
+  selector:
+    app.kubernetes.io/name: inventory-api
+  ports:
+    - name: http
+      port: 8081
+      targetPort: metrics
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orders-api
+  namespace: fcapsule-lab
+  labels:
+    app.kubernetes.io/name: orders-api
+    app.kubernetes.io/part-of: fcapsule-lab
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: orders-api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: orders-api
+        app.kubernetes.io/part-of: fcapsule-lab
+        fcapsule.io/metrics: "true"
+    spec:
+      initContainers:
+        - name: install-source
+          image: python:3.12-slim
+          command: ["python", "-m", "pip", "install", "--no-cache-dir", "--target", "/opt/lab", "https://github.com/Hi-io/fcapsule-lab/archive/refs/heads/master.zip"]
+          volumeMounts:
+            - name: source
+              mountPath: /opt/lab
+      containers:
+        - name: orders-api
+          image: python:3.12-slim
+          command: ["python", "-m", "app.orders"]
+          env:
+            - name: PYTHONPATH
+              value: /opt/lab
+            - name: SERVICE_NAME
+              value: orders-api
+            - name: PORT
+              value: "8080"
+          envFrom:
+            - configMapRef:
+                name: lab-runtime
+          ports:
+            - name: metrics
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: metrics
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 400m
+              memory: 192Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: source
+              mountPath: /opt/lab
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: source
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: orders-api
+  namespace: fcapsule-lab
+  labels:
+    app.kubernetes.io/name: orders-api
+spec:
+  selector:
+    app.kubernetes.io/name: orders-api
+  ports:
+    - name: http
+      port: 8080
+      targetPort: metrics
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: traffic-generator
+  namespace: fcapsule-lab
+  labels:
+    app.kubernetes.io/name: traffic-generator
+    app.kubernetes.io/part-of: fcapsule-lab
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: traffic-generator
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: traffic-generator
+        app.kubernetes.io/part-of: fcapsule-lab
+        fcapsule.io/metrics: "true"
+    spec:
+      initContainers:
+        - name: install-source
+          image: python:3.12-slim
+          command: ["python", "-m", "pip", "install", "--no-cache-dir", "--target", "/opt/lab", "https://github.com/Hi-io/fcapsule-lab/archive/refs/heads/master.zip"]
+          volumeMounts:
+            - name: source
+              mountPath: /opt/lab
+      containers:
+        - name: traffic-generator
+          image: python:3.12-slim
+          command: ["python", "-m", "app.traffic"]
+          env:
+            - name: PYTHONPATH
+              value: /opt/lab
+            - name: SERVICE_NAME
+              value: traffic-generator
+            - name: PORT
+              value: "8082"
+          envFrom:
+            - configMapRef:
+                name: lab-runtime
+          ports:
+            - name: metrics
+              containerPort: 8082
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: metrics
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 40m
+              memory: 48Mi
+            limits:
+              cpu: 300m
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: source
+              mountPath: /opt/lab
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: source
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lab-worker
+  namespace: fcapsule-lab
+  labels:
+    app.kubernetes.io/name: lab-worker
+    app.kubernetes.io/part-of: fcapsule-lab
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: lab-worker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: lab-worker
+        app.kubernetes.io/part-of: fcapsule-lab
+        fcapsule.io/metrics: "true"
+    spec:
+      initContainers:
+        - name: install-source
+          image: python:3.12-slim
+          command: ["python", "-m", "pip", "install", "--no-cache-dir", "--target", "/opt/lab", "https://github.com/Hi-io/fcapsule-lab/archive/refs/heads/master.zip"]
+          volumeMounts:
+            - name: source
+              mountPath: /opt/lab
+      containers:
+        - name: worker
+          image: python:3.12-slim
+          command: ["python", "-m", "app.worker"]
+          env:
+            - name: PYTHONPATH
+              value: /opt/lab
+            - name: SERVICE_NAME
+              value: lab-worker
+            - name: PORT
+              value: "8083"
+          envFrom:
+            - configMapRef:
+                name: lab-mysql-config
+            - secretRef:
+                name: lab-mysql-credentials
+          ports:
+            - name: metrics
+              containerPort: 8083
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: metrics
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 40m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 160Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: source
+              mountPath: /opt/lab
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: source
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: lab-worker
+  namespace: fcapsule-lab
+  labels:
+    app.kubernetes.io/name: lab-worker
+spec:
+  selector:
+    app.kubernetes.io/name: lab-worker
+  ports:
+    - name: http
+      port: 8083
+      targetPort: metrics
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lab-control
+  namespace: fcapsule-lab
+  labels:
+    app.kubernetes.io/name: lab-control
+    app.kubernetes.io/part-of: fcapsule-lab
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: lab-control
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: lab-control
+        app.kubernetes.io/part-of: fcapsule-lab
+    spec:
+      initContainers:
+        - name: install-source
+          image: python:3.12-slim
+          command: ["python", "-m", "pip", "install", "--no-cache-dir", "--target", "/opt/lab", "https://github.com/Hi-io/fcapsule-lab/archive/refs/heads/master.zip"]
+          volumeMounts:
+            - name: source
+              mountPath: /opt/lab
+      containers:
+        - name: lab-control
+          image: python:3.12-slim
+          command: ["python", "-m", "app.control"]
+          env:
+            - name: PYTHONPATH
+              value: /opt/lab
+            - name: SERVICE_NAME
+              value: lab-control
+            - name: PORT
+              value: "8084"
+          envFrom:
+            - configMapRef:
+                name: lab-runtime
+            - configMapRef:
+                name: lab-mysql-config
+            - secretRef:
+                name: lab-mysql-credentials
+          ports:
+            - name: http
+              containerPort: 8084
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 20m
+              memory: 48Mi
+            limits:
+              cpu: 150m
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: source
+              mountPath: /opt/lab
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: source
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: lab-control
+  namespace: fcapsule-lab
+  labels:
+    app.kubernetes.io/name: lab-control
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: lab-control
+  ports:
+    - name: http
+      port: 8084
+      targetPort: http
+      nodePort: 30766
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: lab-app-metrics
+  namespace: fcapsule-lab
+  labels:
+    app.kubernetes.io/name: lab-app-metrics
+    app.kubernetes.io/part-of: fcapsule-lab
+    fcapsule.io/app-metrics: "true"
+spec:
+  clusterIP: None
+  selector:
+    fcapsule.io/metrics: "true"
+  ports:
+    - name: metrics
+      port: 80
+      targetPort: metrics

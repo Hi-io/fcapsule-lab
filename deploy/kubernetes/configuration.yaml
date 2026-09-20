@@ -1,0 +1,58 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: lab-mysql-credentials
+  namespace: fcapsule-lab
+type: Opaque
+stringData:
+  MYSQL_ROOT_PASSWORD: root-lab-only
+  MYSQL_DATABASE: inventory
+  MYSQL_USER: inventory
+  MYSQL_PASSWORD: inventory-lab
+  exporter.my.cnf: |
+    [client]
+    user=exporter
+    password=exporter-lab
+    host=mysql
+    port=3306
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: lab-mysql-config
+  namespace: fcapsule-lab
+data:
+  MYSQL_HOST: mysql
+  MYSQL_MAX_CONNECTIONS: "40"
+  lab.cnf: |
+    [mysqld]
+    max_connections=40
+    performance_schema=ON
+    innodb_buffer_pool_size=128M
+    slow_query_log=ON
+    long_query_time=0.75
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: lab-mysql-init
+  namespace: fcapsule-lab
+data:
+  01-exporter.sql: |
+    CREATE USER IF NOT EXISTS 'exporter'@'%' IDENTIFIED BY 'exporter-lab' WITH MAX_USER_CONNECTIONS 3;
+    GRANT PROCESS, REPLICATION CLIENT, SELECT ON *.* TO 'exporter'@'%';
+    FLUSH PRIVILEGES;
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: lab-runtime
+  namespace: fcapsule-lab
+data:
+  INVENTORY_URL: http://inventory-api:8081
+  WORKER_URL: http://lab-worker:8083
+  ORDERS_URL: http://orders-api:8080
+  REQUESTS_PER_SECOND: "25"
+  MAX_INFLIGHT: "48"
+  INVENTORY_TIMEOUT_SECONDS: "1.5"
+  MAX_RETRIES: "3"
