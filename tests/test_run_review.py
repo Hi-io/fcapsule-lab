@@ -6,6 +6,13 @@ from tools.review_run import observations, structured_logs
 
 
 class ReviewTests(unittest.TestCase):
+    def test_current_and_previous_container_overlap_is_not_a_redelivery(self):
+        with tempfile.TemporaryDirectory() as directory:
+            event = '{"@timestamp":"2026-09-20T12:00:00Z","message":"Import delivery received","job_id":7}\n'
+            (Path(directory) / "worker.log").write_text(event)
+            (Path(directory) / "worker-previous.log").write_text(event)
+            self.assertEqual(observations(Path(directory))["import_deliveries_by_job"], {"7": 1})
+
     def test_reads_raw_and_kubectl_json_but_not_traceback_text(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "inventory.log"

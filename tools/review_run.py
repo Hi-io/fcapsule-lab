@@ -36,8 +36,15 @@ def observations(folder):
     operations = collections.Counter()
     jobs = collections.Counter()
     maximum_buffer = 0
+    seen = set()
     for path in folder.glob("*.log"):
         for row in structured_logs(path):
+            # During backoff, current and --previous can return the same container log.
+            if row.get("@timestamp"):
+                identity = json.dumps(row, sort_keys=True)
+                if identity in seen:
+                    continue
+                seen.add(identity)
             if row.get("mysql_error_code") is not None:
                 codes[str(row["mysql_error_code"])] += 1
             if row.get("operation"):
@@ -47,7 +54,7 @@ def observations(folder):
             maximum_buffer = max(maximum_buffer, row.get("buffered_bytes", 0))
     return {"sql_error_codes": dict(codes), "operations": dict(operations),
             "import_deliveries_by_job": dict(jobs), "largest_logged_buffer_bytes": maximum_buffer,
-            "limitation": "Counts describe retained bounded log files, not all indexed logs. Missing records are not disproof."}
+            "limitation": "Counts describe deduplicated retained bounded log files, not all indexed logs. Missing records are not disproof."}
 
 
 def main():
