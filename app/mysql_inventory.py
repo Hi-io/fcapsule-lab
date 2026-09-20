@@ -13,9 +13,10 @@ from urllib.parse import parse_qs, urlparse
 import pymysql
 
 from app.common import JsonLogger, QuietHandler, counter_line, gauge_line, serve
+from app.safety import lease_seconds
 
 
-FAILURE_MODES = {"normal", "lock-contention", "connection-saturation"}
+FAILURE_MODES = {"normal", "lock-contention", "connection-saturation", "schema-drift"}
 
 
 class InventoryState:
@@ -35,6 +36,9 @@ class InventoryState:
         self._held_connections: list[pymysql.Connection] = []
         self._storm_stop = threading.Event()
         self._lock = threading.Lock()
+        self._operation_lock = threading.Lock()
+        self._task_stop = threading.Event()
+        self._expires_at = 0.0
 
     def connect(self, timeout: float = 2) -> pymysql.Connection:
         return pymysql.connect(
@@ -64,55 +68,78 @@ class InventoryState:
                     connection.commit()
                 self.logger.write("INFO", "Inventory MySQL schema ready", attempt=attempt)
                 threading.Thread(target=self._sample_database, daemon=True).start()
+                threading.Thread(target=self._lease_loop, daemon=True).start()
                 return
             except pymysql.MySQLError as exc:
                 self.logger.write("WARN", "Waiting for inventory MySQL", attempt=attempt, error=str(exc)[:180])
                 time.sleep(1)
         raise RuntimeError("MySQL did not become available")
 
-    def set_failure_mode(self, mode: str) -> None:
+    def set_failure_mode(self, mode: str, duration: int = 180) -> None:
         if mode not in FAILURE_MODES:
             raise ValueError(f"Unknown failure mode: {mode}")
-        if mode != "connection-saturation":
+        duration = lease_seconds(duration)
+        with self._operation_lock:
+            self._task_stop.set()
             self._release_connections()
-        with self._lock:
-            self.failure_mode = mode
-        if mode == "connection-saturation":
-            self._storm_stop.clear()
-            threading.Thread(target=self._connection_storm, daemon=True).start()
-        self.logger.write(
-            "WARN" if mode != "normal" else "INFO",
-            "Inventory failure mode changed",
-            mode=mode,
-            configured_max_connections=self.configured_max_connections,
-        )
+            self._task_stop = threading.Event()
+            self._storm_stop = self._task_stop
+            with self._lock:
+                self.failure_mode = mode
+                self._expires_at = time.monotonic() + duration if mode != "normal" else 0
+            if mode == "connection-saturation":
+                threading.Thread(target=self._connection_storm, args=(self._task_stop,), daemon=True).start()
+            elif mode == "lock-contention":
+                threading.Thread(target=self._reconcile_stock, args=(self._task_stop,), daemon=True).start()
+        self.logger.write("INFO", "Inventory configuration reloaded", query_revision="v2" if mode == "schema-drift" else "v1")
 
-    def _connection_storm(self) -> None:
+    def _lease_loop(self) -> None:
+        while True:
+            time.sleep(1)
+            if self._expires_at and time.monotonic() >= self._expires_at:
+                self.set_failure_mode("normal")
+
+    def _reconcile_stock(self, stop: threading.Event) -> None:
+        while not stop.is_set():
+            try:
+                with self.connect() as connection:
+                    with connection.cursor() as cursor:
+                        cursor.execute("SET SESSION innodb_lock_wait_timeout = 1")
+                        cursor.execute("UPDATE inventory_items SET quantity=quantity WHERE sku='sku-red-widget'")
+                        self.logger.write("INFO", "Stock reconciliation transaction opened", db_session=connection.thread_id(), sku="sku-red-widget", operation="reconcile_stock")
+                        stop.wait(15)
+                    connection.rollback()
+                    self.logger.write("INFO", "Stock reconciliation transaction closed", db_session=connection.thread_id(), disposition="rollback")
+            except pymysql.MySQLError as exc:
+                self.logger.write("WARN", "Stock reconciliation interrupted", error=str(exc)[:180])
+            stop.wait(0.1)
+
+    def _connection_storm(self, stop: threading.Event) -> None:
         target = max(4, self.configured_max_connections - 1)
-        while not self._storm_stop.is_set() and len(self._held_connections) < target:
+        while not stop.is_set() and len(self._held_connections) < target:
             try:
                 connection = self.connect()
                 with connection.cursor() as cursor:
                     cursor.execute("SELECT 1")
                 with self._lock:
+                    if stop.is_set():
+                        connection.close()
+                        break
                     self._held_connections.append(connection)
                 self.logger.write(
-                    "WARN",
-                    "Leaked database session retained by connection pool",
-                    held_connections=len(self._held_connections),
-                    configured_max_connections=self.configured_max_connections,
-                    pool_owner="inventory-runtime",
+                    "INFO", "Inventory database operation completed",
+                    db_session=connection.thread_id(), operation="availability_lookup",
+                    pool_checked_out=len(self._held_connections),
                 )
             except pymysql.MySQLError as exc:
                 self._record_failure("connection")
                 self.logger.write(
                     "ERROR",
-                    "MySQL rejected connection while inventory pool expanded",
-                    held_connections=len(self._held_connections),
-                    configured_max_connections=self.configured_max_connections,
+                    "Database session acquisition failed",
+                    mysql_error_code=exc.args[0] if exc.args else None,
                     error=str(exc)[:180],
                 )
-            time.sleep(0.08)
+            stop.wait(0.5)
 
     def _release_connections(self) -> None:
         self._storm_stop.set()
@@ -130,16 +157,15 @@ class InventoryState:
             mode = self.failure_mode
             self.active_transactions += 1
         started = time.perf_counter()
+        self.logger.write("INFO", "Reservation transaction requested", order_id=order_id, dependency="mysql", operation="reserve_stock")
         try:
             with self.connect() as connection:
                 with connection.cursor() as cursor:
-                    if mode == "lock-contention":
-                        cursor.execute("SET SESSION innodb_lock_wait_timeout = 1")
-                        cursor.execute("SELECT quantity FROM inventory_items WHERE sku=%s FOR UPDATE", ("sku-red-widget",))
-                        cursor.execute("SELECT SLEEP(1.25)")
+                    cursor.execute("SET SESSION innodb_lock_wait_timeout = 1")
+                    if mode == "schema-drift":
+                        cursor.execute("SELECT quantity - reserved_quantity FROM inventory_items WHERE sku=%s", ("sku-red-widget",))
                     else:
-                        cursor.execute("SELECT quantity FROM inventory_items WHERE sku=%s", ("sku-red-widget",))
-                    cursor.fetchone()
+                        cursor.execute("UPDATE inventory_items SET quantity=quantity-1 WHERE sku=%s AND quantity>0", ("sku-red-widget",))
                 connection.commit()
             duration = time.perf_counter() - started
             self._record_request("success")
@@ -147,20 +173,18 @@ class InventoryState:
                 "INFO",
                 "Inventory reservation committed",
                 order_id=order_id,
-                failure_mode=mode,
                 duration_ms=round(duration * 1000, 2),
             )
             return HTTPStatus.OK, {"status": "reserved", "order_id": order_id}
         except pymysql.err.OperationalError as exc:
             code = int(exc.args[0]) if exc.args else 0
-            kind = "lock_timeout" if code == 1205 else "connection"
+            kind = "lock_timeout" if code == 1205 else "query" if code == 1054 else "connection"
             self._record_request("error")
             self._record_failure(kind)
             self.logger.write(
                 "ERROR",
                 "Inventory MySQL operation failed",
                 order_id=order_id,
-                failure_mode=mode,
                 mysql_error_code=code,
                 failure_kind=kind,
                 error=str(exc)[:180],
@@ -169,7 +193,7 @@ class InventoryState:
         except pymysql.MySQLError as exc:
             self._record_request("error")
             self._record_failure("query")
-            self.logger.write("ERROR", "Inventory query failed", order_id=order_id, error=str(exc)[:180])
+            self.logger.write("ERROR", "Inventory query failed", order_id=order_id, mysql_error_code=exc.args[0] if exc.args else None, error=str(exc)[:180])
             return HTTPStatus.SERVICE_UNAVAILABLE, {"status": "query_error", "order_id": order_id}
         finally:
             with self._lock:
@@ -190,25 +214,7 @@ class InventoryState:
                     held = len(self._held_connections)
                     mode = self.failure_mode
                 utilization = round(connected / max(1, maximum), 3)
-                if mode == "connection-saturation" and held >= maximum - 4:
-                    self.logger.write(
-                        "ERROR",
-                        "Connection pool retention is exhausting MySQL capacity",
-                        pool_owner="inventory-runtime",
-                        held_connections=held,
-                        threads_connected=connected,
-                        max_connections=maximum,
-                        utilization=utilization,
-                        expected_effect="new inventory connections may be rejected",
-                    )
-                else:
-                    self.logger.write(
-                        "INFO",
-                        "MySQL capacity sample",
-                        threads_connected=connected,
-                        max_connections=maximum,
-                        utilization=utilization,
-                    )
+                self.logger.write("INFO", "MySQL capacity sample", threads_connected=connected, max_connections=maximum, pool_checked_out=held, utilization=utilization)
             except pymysql.MySQLError as exc:
                 self.logger.write("WARN", "Unable to sample MySQL capacity", error=str(exc)[:180])
             time.sleep(5)
@@ -246,10 +252,9 @@ class InventoryState:
                 *(counter_line("inventory_reservation_requests_total", "Inventory reservation requests", value, outcome=outcome) for outcome, value in requests.items()),
                 *(counter_line("inventory_database_failures_total", "Inventory database failures", value, kind=kind) for kind, value in failures.items()),
                 gauge_line("inventory_active_transactions", "Inventory MySQL transactions currently active", active),
-                gauge_line("inventory_failure_mode_info", "Current injected inventory failure mode", 1, mode=mode),
                 gauge_line("lab_mysql_threads_connected", "MySQL sessions observed by inventory", connected),
                 gauge_line("lab_mysql_max_connections", "MySQL configured connection ceiling", maximum),
-                gauge_line("lab_mysql_held_connections", "Sessions intentionally retained by the inventory pool", held),
+                gauge_line("lab_mysql_held_connections", "Inventory sessions checked out", held),
                 counter_line("inventory_log_events_total", "Structured inventory log events emitted", logs),
             ]
         )
@@ -277,7 +282,8 @@ def handler(state: InventoryState) -> type[QuietHandler]:
                 self.send_json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
                 return
             try:
-                state.set_failure_mode(str(self.body_json().get("mode", "")))
+                payload = self.body_json()
+                state.set_failure_mode(str(payload.get("mode", "")), payload.get("duration_seconds", 180))
             except (ValueError, OSError, json.JSONDecodeError) as exc:
                 self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
                 return

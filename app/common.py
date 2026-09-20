@@ -29,7 +29,7 @@ class JsonLogger:
     def __init__(self, component: str) -> None:
         self.component = component
         self.service = os.environ.get("SERVICE_NAME", component)
-        self.namespace = os.environ.get("LOG_NAMESPACE", "commerce")
+        self.namespace = os.environ.get("POD_NAMESPACE", os.environ.get("LOG_NAMESPACE", "commerce"))
         self.cluster = os.environ.get("LOG_CLUSTER", "fcapsule-lab")
         self.count = 0
         self._lock = threading.Lock()
@@ -44,6 +44,7 @@ class JsonLogger:
             "namespace": self.namespace,
             "cluster": self.cluster,
             "container": self.component,
+            "pod": os.environ.get("POD_NAME", os.environ.get("HOSTNAME", "unknown")),
             **fields,
         }
         with self._lock:
@@ -100,6 +101,8 @@ class QuietHandler(BaseHTTPRequestHandler):
 
     def body_json(self) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length", "0"))
+        if not 0 <= length <= 16384:
+            raise ValueError("Request body exceeds limit")
         if not length:
             return {}
         value = json.loads(self.rfile.read(length))

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import base64
+import hashlib
 import os
 import threading
 import time
@@ -13,6 +15,7 @@ from urllib.parse import urlparse
 import pymysql
 
 from app.common import JsonLogger, QuietHandler, counter_line, gauge_line, serve
+from app.safety import lease_seconds
 
 
 MODES = {"normal", "cpu-saturation", "memory-leak"}
@@ -28,6 +31,7 @@ class WorkerState:
         self._memory: list[bytearray] = []
         self._mode_stop = threading.Event()
         self._lock = threading.Lock()
+        self._expires_at = 0.0
         self.db = {
             "host": os.environ.get("MYSQL_HOST", "mysql"),
             "user": os.environ.get("MYSQL_USER", "inventory"),
@@ -49,71 +53,69 @@ class WorkerState:
             except pymysql.MySQLError as exc:
                 self.logger.write("WARN", "Worker waiting for MySQL", attempt=attempt, error=str(exc)[:180])
                 time.sleep(1)
-        threading.Thread(target=self._job_loop, daemon=True).start()
         threading.Thread(target=self._heartbeat_loop, daemon=True).start()
 
     def _connect(self) -> pymysql.Connection:
-        return pymysql.connect(**self.db, connect_timeout=2, autocommit=False)
+        return pymysql.connect(**self.db, connect_timeout=2, read_timeout=3, write_timeout=3, autocommit=False)
 
-    def set_mode(self, mode: str) -> None:
+    def set_mode(self, mode: str, duration: int = 180) -> None:
         if mode not in MODES:
             raise ValueError(f"Unknown worker mode: {mode}")
+        duration = lease_seconds(duration)
         self._mode_stop.set()
         self._mode_stop = threading.Event()
         self._memory = []
         with self._lock:
             self.mode = mode
             self.allocated_bytes = 0
-        self.logger.write("WARN" if mode != "normal" else "INFO", "Worker scenario changed", mode=mode)
+            self._expires_at = time.monotonic() + duration if mode != "normal" else 0
+        self.logger.write("INFO", "Batch scheduler configuration applied", export_delivery="buffered" if mode == "memory-leak" else "streaming", credential_rounds=1200000 if mode == "cpu-saturation" else 1000)
         if mode == "cpu-saturation":
             threading.Thread(target=self._burn_cpu, args=(self._mode_stop,), daemon=True).start()
         elif mode == "memory-leak":
             threading.Thread(target=self._leak_memory, args=(self._mode_stop,), daemon=True).start()
 
     def _burn_cpu(self, stop: threading.Event) -> None:
-        value = 1
         while not stop.is_set():
-            for candidate in range(1, 250000):
-                value = (value * 1664525 + candidate + 1013904223) & 0xFFFFFFFF
+            hashlib.pbkdf2_hmac("sha256", b"test-account-password", b"migration-salt", 1200000)
             with self._lock:
-                self.cpu_iterations += 250000
-            self.logger.write("WARN", "Worker batch remains CPU bound", iterations=self.cpu_iterations, checksum=value)
+                self.cpu_iterations += 1
+            self.logger.write("INFO", "Credential migration record completed", records=self.cpu_iterations, kdf="pbkdf2_sha256", rounds=1200000)
 
     def _leak_memory(self, stop: threading.Event) -> None:
-        chunk_size = 8 * 1024 * 1024
+        page = (json.dumps({"sku":"sku-red-widget", "quantity":1, "description":"Inventory ledger export"}) + "\n").encode() * 24000
+        chunk_size = len(page)
         while not stop.is_set():
-            self._memory.append(bytearray(os.urandom(chunk_size)))
+            buffer = bytearray(page)
             with self._lock:
+                if stop.is_set():
+                    break
+                self._memory.append(buffer)
                 self.allocated_bytes += chunk_size
                 allocated = self.allocated_bytes
             self.logger.write(
-                "ERROR",
-                "Unbounded batch cache retained after processing window",
-                allocated_bytes=allocated,
-                chunk_bytes=chunk_size,
-                cache_policy="retain-until-batch-complete",
+                "INFO", "Export page encoded",
+                buffered_bytes=allocated, page_bytes=chunk_size,
+                delivery="buffered", rows=24000,
             )
-            time.sleep(0.35)
+            stop.wait(0.8)
 
     def _job_loop(self) -> None:
         while True:
             try:
                 with self._connect() as connection:
                     with connection.cursor() as cursor:
+                        cursor.execute("DELETE FROM lab_jobs WHERE created_at < UTC_TIMESTAMP() - INTERVAL 300 SECOND")
+                        connection.commit()
                         cursor.execute("SELECT id, kind, payload FROM lab_jobs ORDER BY id LIMIT 1")
                         job = cursor.fetchone()
-                        if job and job[1] == "poison":
-                            for attempt in range(1, 41):
-                                self.logger.write(
-                                    "ERROR" if attempt < 40 else "FATAL",
-                                    "Poison job failed deterministic decoder validation",
-                                    job_id=job[0],
-                                    payload=job[2],
-                                    attempt=attempt,
-                                    disposition="retry_without_ack",
-                                )
-                            os._exit(17)
                         if job:
+                            self.logger.write("INFO", "Import delivery received", job_id=job[0], acknowledgement="after_commit")
+                            try:
+                                decode_job(job[2])
+                            except (ValueError, KeyError, TypeError) as exc:
+                                self.logger.write("ERROR", "Import decoder rejected document", job_id=job[0], error_type=type(exc).__name__, error=str(exc), acknowledgement="pending")
+                                raise
                             cursor.execute("DELETE FROM lab_jobs WHERE id=%s", (job[0],))
                             connection.commit()
                             with self._lock:
@@ -125,9 +127,11 @@ class WorkerState:
     def _heartbeat_loop(self) -> None:
         while True:
             with self._lock:
-                mode = self.mode
                 jobs = self.jobs
-            self.logger.write("INFO", "Worker scheduler heartbeat", mode=mode, completed_jobs=jobs)
+                expired = self._expires_at and time.monotonic() >= self._expires_at
+            if expired:
+                self.set_mode("normal")
+            self.logger.write("INFO", "Worker scheduler heartbeat", completed_jobs=jobs)
             time.sleep(1)
 
     def status(self) -> dict[str, Any]:
@@ -144,7 +148,6 @@ class WorkerState:
         state = self.status()
         return "".join(
             [
-                gauge_line("lab_worker_mode_info", "Current worker scenario", 1, mode=state["mode"]),
                 gauge_line("lab_worker_allocated_bytes", "Bytes retained by worker batch cache", state["allocated_bytes"]),
                 counter_line("lab_worker_cpu_iterations_total", "CPU-bound worker iterations", state["cpu_iterations"]),
                 counter_line("lab_worker_jobs_total", "Completed background jobs", state["completed_jobs"]),
@@ -169,7 +172,8 @@ def handler(state: WorkerState) -> type[QuietHandler]:
                 self.send_json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
                 return
             try:
-                state.set_mode(str(self.body_json().get("mode", "")))
+                payload = self.body_json()
+                state.set_mode(str(payload.get("mode", "")), payload.get("duration_seconds", 180))
             except (ValueError, OSError, json.JSONDecodeError) as exc:
                 self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
                 return
@@ -181,7 +185,13 @@ def handler(state: WorkerState) -> type[QuietHandler]:
 def main() -> None:
     state = WorkerState()
     state.initialize()
-    serve(handler(state), int(os.environ.get("PORT", "8083")))
+    threading.Thread(target=serve, args=(handler(state), int(os.environ.get("PORT", "8083"))), daemon=True).start()
+    state._job_loop()
+
+
+def decode_job(payload: str) -> dict:
+    envelope = json.loads(payload)
+    return json.loads(base64.b64decode(envelope["body"], validate=True))
 
 
 if __name__ == "__main__":

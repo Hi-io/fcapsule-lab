@@ -75,8 +75,8 @@ spec:
             service: lab-worker
             signal_class: FM
           annotations:
-            summary: The lab worker was OOM-killed after its batch cache exceeded the container limit.
-            description: Kubernetes restarted the worker after memory growth crossed its 160 MiB limit.
+            summary: A worker container terminated with OOMKilled.
+            description: The last-termination reason is OOMKilled and the restart counter increased within five minutes. Investigate memory use and workload activity.
 
         - alert: LabWorkerCrashLooping
           expr: |
@@ -89,8 +89,8 @@ spec:
             service: lab-worker
             signal_class: FM
           annotations:
-            summary: The lab worker is repeatedly crashing while processing a durable poison job.
-            description: A malformed queue item remains unacknowledged and terminates each replacement worker.
+            summary: A worker container is in restart backoff.
+            description: Kubernetes observed CrashLoopBackOff within the last two minutes. The cause is not established by this alert.
 
     - name: fcapsule-lab.performance-management
       rules:
@@ -114,21 +114,21 @@ spec:
             signal_class: PM
           annotations:
             summary: The lab worker has consumed more than 75 percent of its CPU limit.
-            description: A compute-bound batch is sustaining CPU pressure without terminating the pod.
+            description: The one-minute CPU rate exceeded 75 percent of the configured limit for 45 seconds.
 
         - alert: LabMySQLConnectionsSaturated
           expr: |
-            lab_mysql_threads_connected{namespace="fcapsule-lab"}
+            mysql_global_status_threads_connected{namespace="fcapsule-lab"}
             /
-            clamp_min(lab_mysql_max_connections{namespace="fcapsule-lab"}, 1) > 0.80
+            clamp_min(mysql_global_variables_max_connections{namespace="fcapsule-lab"}, 1) > 0.80
           for: 20s
           labels:
             severity: critical
-            service: inventory-api
+            service: mysql-exporter
             signal_class: PM
           annotations:
             summary: MySQL connection use is above 80 percent of max_connections.
-            description: The inventory connection pool is retaining sessions and leaving too little capacity for checkout traffic.
+            description: The independent MySQL exporter reports more than 80 percent of the server connection ceiling in use. Identify session owners before changing capacity.
 
         - alert: LabInventoryLockContention
           expr: increase(inventory_database_failures_total{namespace="fcapsule-lab",kind="lock_timeout"}[2m]) > 5
@@ -139,7 +139,29 @@ spec:
             signal_class: PM
           annotations:
             summary: Inventory transactions are timing out on an InnoDB row lock.
-            description: Concurrent reservations are serializing on the same inventory record and exhausting the request timeout.
+            description: More than five lock-wait timeouts were recorded within two minutes. The blocker must be investigated separately.
+
+        - alert: LabInventoryQueryFailures
+          expr: increase(inventory_database_failures_total{namespace="fcapsule-lab",kind="query"}[1m]) > 5
+          for: 15s
+          labels:
+            severity: critical
+            service: inventory-api
+            signal_class: FM
+          annotations:
+            summary: Inventory database statements are failing.
+            description: More than five database query failures were recorded within one minute. Inspect returned error codes and the deployed query contract.
+
+        - alert: LabInventoryConnectionFailures
+          expr: increase(inventory_database_failures_total{namespace="fcapsule-lab",kind="connection"}[1m]) > 5
+          for: 15s
+          labels:
+            severity: warning
+            service: inventory-api
+            signal_class: FM
+          annotations:
+            summary: Inventory cannot acquire database sessions reliably.
+            description: More than five connection failures were recorded within one minute. This can indicate capacity, reachability or authentication problems.
 
         - alert: LabCheckoutFailureRateHigh
           expr: |

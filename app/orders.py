@@ -59,13 +59,13 @@ class OrdersState:
                     break
                 self.logger.write(
                     "WARN",
-                    "Inventory reservation attempt failed while circuit breaker remains closed",
+                    "Inventory reservation attempt failed",
                     request_id=request_id,
                     order_id=order_id,
                     attempt=attempt,
                     max_attempts=self.max_retries,
                     inventory_status=int(status),
-                    breaker_state="closed",
+                    dependency="inventory-api", timeout_seconds=self.timeout,
                 )
                 time.sleep(0.006 * attempt)
         finally:
@@ -88,7 +88,7 @@ class OrdersState:
             request_id=request_id,
             order_id=order_id,
             duration_ms=round(duration * 1000, 2),
-            breaker_state="closed",
+            dependency="inventory-api",
         )
         return HTTPStatus.SERVICE_UNAVAILABLE, {"status": "inventory_unavailable", "request_id": request_id}
 
@@ -111,7 +111,6 @@ class OrdersState:
                 gauge_line("orders_retry_amplification_ratio", "Inventory attempts per checkout request", amplification),
                 gauge_line("orders_checkout_inflight", "Checkout requests currently in flight", inflight),
                 gauge_line("orders_checkout_latency_p95_seconds", "Checkout p95 response time over local observation window", p95),
-                gauge_line("orders_circuit_breaker_open", "Whether the checkout circuit breaker is open", 0),
                 counter_line("orders_log_events_total", "Structured orders log events emitted", logs),
             ]
         )
