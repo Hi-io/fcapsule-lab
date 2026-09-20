@@ -66,9 +66,15 @@ spec:
               namespace="fcapsule-lab", container="worker", reason="OOMKilled"
             } == 1
             and on(namespace, pod, container)
-            increase(kube_pod_container_status_restarts_total{
-              namespace="fcapsule-lab", container="worker"
-            }[5m]) > 0
+            (
+              increase(kube_pod_container_status_restarts_total{
+                namespace="fcapsule-lab", container="worker"
+              }[5m]) > 0
+              or on(namespace, pod, container)
+              kube_pod_container_status_waiting_reason{
+                namespace="fcapsule-lab", container="worker", reason="CrashLoopBackOff"
+              } == 1
+            )
           for: 0m
           labels:
             severity: critical
@@ -76,7 +82,7 @@ spec:
             signal_class: FM
           annotations:
             summary: A worker container terminated with OOMKilled.
-            description: The last-termination reason is OOMKilled and the restart counter increased within five minutes. Investigate memory use and workload activity.
+            description: The last termination was OOMKilled and the container is in restart backoff or its restart counter increased within five minutes. Investigate memory use and workload activity.
 
         - alert: LabWorkerCrashLooping
           expr: |
