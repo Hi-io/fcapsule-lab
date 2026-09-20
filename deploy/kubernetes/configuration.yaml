@@ -24,6 +24,8 @@ metadata:
 data:
   MYSQL_HOST: mysql
   MYSQL_MAX_CONNECTIONS: "40"
+  LOG_NAMESPACE: fcapsule-lab
+  LOG_CLUSTER: go15
   lab.cnf: |
     [mysqld]
     max_connections=40
@@ -56,3 +58,5 @@ data:
   MAX_INFLIGHT: "48"
   INVENTORY_TIMEOUT_SECONDS: "1.5"
   MAX_RETRIES: "3"
+  LOG_NAMESPACE: fcapsule-lab
+  LOG_CLUSTER: go15

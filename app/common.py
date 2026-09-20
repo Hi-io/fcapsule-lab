@@ -29,6 +29,8 @@ class JsonLogger:
     def __init__(self, component: str) -> None:
         self.component = component
         self.service = os.environ.get("SERVICE_NAME", component)
+        self.namespace = os.environ.get("LOG_NAMESPACE", "commerce")
+        self.cluster = os.environ.get("LOG_CLUSTER", "fcapsule-lab")
         self.count = 0
         self._lock = threading.Lock()
 
@@ -39,8 +41,8 @@ class JsonLogger:
             "message": message,
             "service": self.service,
             "component": self.component,
-            "namespace": "commerce",
-            "cluster": "fcapsule-lab",
+            "namespace": self.namespace,
+            "cluster": self.cluster,
             "container": self.component,
             **fields,
         }
