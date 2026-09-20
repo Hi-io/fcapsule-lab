@@ -65,6 +65,16 @@ class KubernetesLabTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 lease_seconds(value)
 
+    def test_watchdog_recovers_on_low_memory_expiry_and_missing_measurement(self):
+        for memory, expiry, reason in ((500_000_000, 99999999999, "low_host_memory"), (2_000_000_000, 0, "lease_expired"), (None, 99999999999, "memory_measurement_unavailable")):
+            state = ControlState()
+            state.active = {"expires_at": expiry, "status": "running", "minimum_available_bytes": 2_000_000_000}
+            state.recover = Mock()
+            with patch("app.control.memory_snapshot", side_effect=OSError if memory is None else None, return_value={"available_bytes": memory}), patch("app.control.time.sleep", side_effect=StopIteration):
+                with self.assertRaises(StopIteration):
+                    state.watchdog()
+            state.recover.assert_called_once_with(reason)
+
     def test_logger_uses_kubernetes_identity(self):
         out = io.StringIO()
         with patch.dict("os.environ", {"POD_NAMESPACE":"real-ns", "LOG_NAMESPACE":"stale", "POD_NAME":"worker-abc"}), redirect_stdout(out):
