@@ -9,6 +9,7 @@ traffic-generator -> orders-api -> inventory-api -> mysql
 lab-control -> worker ---------------------+     mysql-exporter
      |             |
      +-- scenario controls              durable jobs
+     +-- scoped ConfigMap update -> Kubernetes API
 
 application /metrics -> ServiceMonitor -> cluster Prometheus -> alerts
 container stdout     -> Filebeat       -> OpenSearch
@@ -26,15 +27,11 @@ pod + ConfigMaps     -> Kubernetes API -> FCAPSule
 
 ## Failure Semantics
 
-The FM scenarios produce real Kubernetes state transitions. Memory allocation crosses a
-cgroup limit and is handled by the kernel; an import decoder exception exits the worker process while
-leaving the MySQL queue item unacknowledged. Kubernetes then supplies restart,
-termination-reason, and CrashLoop evidence.
-
-The PM scenarios deliberately remain below termination boundaries. CPU is throttled at
-the configured limit, while retained MySQL sessions consume an explicit connection
-budget. This lets Prometheus fire on performance symptoms while configuration and logs
-explain why the resource changed.
+The suite exercises process failure, application contracts, real MySQL constraint and
+deadlock handling, resource pressure, dependency latency, and runtime configuration
+skew. Configuration cases persist their active values in a dedicated ConfigMap through
+a ServiceAccount that can update only that object. No Lab role can read Secrets or
+modify workloads.
 
 Every application metric target is relabeled with pod and namespace identity. Alert
 rules preserve those labels, allowing FCAPSule to map the alert to the affected workload
@@ -52,6 +49,7 @@ helper pauses traffic and pins source to a published commit. No new always-on da
 broker or tracing backend is required. Downward API identity overrides legacy log
 defaults to avoid contradictory namespaces in captured data.
 
-The evaluator stores run records and source logs under ignored `artifacts/`; FCAPSule
-receives none of the scenario oracle through a direct integration. The system under
-test must explain symptoms using its normal observability APIs.
+The evaluator stores run records, model outputs and source logs under ignored
+`artifacts/`; FCAPSule receives none of the scenario oracle through a direct
+integration. Paired runs reuse the same capsule fingerprint and restore the original
+model setting. Pipeline capture and model diagnosis are scored separately.

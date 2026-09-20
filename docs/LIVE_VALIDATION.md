@@ -1,11 +1,13 @@
 # Kubernetes Validation Record
 
-Original six-case series complete. Follow-up checks are recorded separately below.
+Historical six-case series complete. Follow-up checks are recorded separately below.
+The current Lab has since expanded to the fifteen-case paired suite documented in
+`SCENARIO_CONTRACT.md`; this file preserves the earlier run without rewriting it.
 
 ## Method
 
-This evaluation uses the six contracts in `SCENARIO_CONTRACT.md`, frozen before
-execution. It does not give those expected diagnoses to FCAPSule. The lab supplies
+This historical evaluation used the six contracts frozen at commit `b8cb1c9` before
+execution. It did not give those expected diagnoses to FCAPSule. The lab supplied
 ordinary application logs, Prometheus measurements and neutral symptom alerts.
 The product accesses them through its existing Kubernetes, OpenSearch and Prometheus
 integrations and uses the configured DeepSeek Pro provider for investigation.

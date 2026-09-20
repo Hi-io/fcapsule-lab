@@ -1,71 +1,82 @@
 # Scenario Contract and Audit
 
-Frozen before the new live evaluation. This is the evaluator's oracle, not input
-to FCAPSule. Keep it outside captured workload configuration and telemetry.
+This contract is the evaluator's oracle. It is stored in the standalone Lab and is
+never sent to FCAPSule, embedded in alert annotations, or exposed by the Lab control
+API. Application evidence remains realistic: SQL codes, request identities, timing,
+resource measurements and active Kubernetes configuration are observable.
 
-## Audit Findings
+## Evaluation Matrix
 
-The previous lab disclosed causes in alert annotations (for example, "poison job")
-and emitted explanatory error messages rather than recording ordinary execution.
-The poison job printed forty manufactured errors before calling `os._exit(17)`;
-the CPU case ran a generic arithmetic loop; contention slept inside every request.
-Mode names appeared in workload logs/metrics. Those shortcuts made diagnosis easier
-and obscured whether the investigator actually combined evidence.
+The suite contains fifteen independent mechanisms, balanced by the evidence that
+should carry the diagnosis. The grouping is not an FCAPS classification. It describes
+what an investigator must use to distinguish the root mechanism from similar symptoms.
 
-Recovery had no lease, concurrency guard or host-memory check. Repeated starts
-could leave background threads running. MySQL sampling could fail precisely at
-saturation and leave a stale connection gauge. Current tests checked strings in
-source code rather than workload behavior. High-volume traffic existed, but its
-actual rate and log coverage were not independent evaluation acceptance criteria.
-
-## Fixed Scenarios
-
-| ID | Mechanism | Independently observable success criterion | What a useful diagnosis must distinguish |
+| Group | Scenario | Decisive mechanism | Expected symptom alert |
 |---|---|---|---|
-| memory-leak | A report export buffers encoded pages until completion instead of streaming them | Worker cgroup OOM termination and restart; export page/buffer growth preceding it | Buffered export growth versus unrelated application crash; sampled memory need not contain the peak |
-| poison-job | A durable import message contains invalid Base64; the consumer's real decoder exception escapes before acknowledgement | Decoder exception, same job redelivered after process restart, restart/backoff alert | Payload/consumer handling failure versus resource termination; no claim that queue deletion happened without evidence |
-| cpu-saturation | An account credential migration uses excessive PBKDF2 work per record | Sustained CPU utilization relative to limit and progress logs, without OOM/restart | Expensive computation versus database wait or memory pressure |
-| mysql-connections | Session handles are retained after an inventory operation instead of released | MySQL connection count grows and real connection rejection occurs; orders degrade | Pool/session lifetime versus insufficient database size alone; exporter remains an independent observer |
-| lock-contention | Stock reconciliation holds an actual InnoDB row lock while subsequent reservations wait | Error 1205, increased latency/retries; blocker transaction lifecycle in inventory logs | Lock ownership/waiting versus CPU saturation or schema incompatibility |
-| schema-drift | A new inventory query expects `reserved_quantity` before its migration is applied | MySQL error 1054; reservations and checkout fail while DB remains reachable | API/schema version mismatch versus connection ceiling or row lock timeout |
+| Logs | `poison-job` | Invalid Base64 import is redelivered before acknowledgement | `LabWorkerCrashLooping` |
+| Logs | `response-contract` | A successful dependency response has the wrong document shape | `LabOrdersDependencyDocumentInvalid` |
+| Logs | `reservation-token-collision` | Different reservations reuse a unique database token | `LabInventoryConstraintFailures` |
+| Logs | `transaction-deadlock` | Transactions acquire two stock rows in opposite order | `LabInventoryDeadlockVictims` |
+| Logs | `idempotency-conflict` | Different checkout payloads bind to one idempotency record | `LabOrdersIdempotencyConflicts` |
+| Logs + metrics | `memory-leak` | Export pages remain buffered until cgroup OOM | `LabWorkerOOMKilled` |
+| Logs + metrics | `cpu-saturation` | Excessive PBKDF2 rounds consume the CPU quota | `LabWorkerCPUHigh` |
+| Logs + metrics | `mysql-connections` | Checked-out sessions remain open near `max_connections` | `LabMySQLConnectionsSaturated` |
+| Logs + metrics | `lock-contention` | Reconciliation holds the stock row while reservations wait | `LabInventoryLockContention` |
+| Logs + metrics | `downstream-latency` | Inventory latency raises checkout p95 and concurrency | `LabCheckoutLatencyHigh` |
+| Configuration | `schema-drift` | Query revision v2 precedes the `reserved_quantity` migration | `LabInventoryQueryFailures` |
+| Configuration | `dependency-route` | `INVENTORY_URL` uses port 8099 while the Service uses 8081 | `LabOrdersDependencyTransportFailures` |
+| Configuration | `timeout-budget` | A 50 ms caller timeout is below 250 ms dependency work | `LabOrdersDependencyTimeouts` |
+| Configuration | `signing-key-skew` | Caller and dependency use different signing key IDs | `LabOrdersDependencyAuthorizationFailures` |
+| Configuration | `response-schema-skew` | Orders expects response v2 while inventory emits v1 | `LabOrdersDependencySchemaRejected` |
 
-Do not alter these outcomes to match an LLM answer. Record missing alerts, missing
-evidence, unsupported claims and inconclusive answers separately. A matching word
-or a plausible summary alone is not diagnostic success. No subjective numerical
-"accuracy" score is inferred from six hand-built cases.
+Configuration cases update `ConfigMap/lab-scenario-config` through namespace-scoped
+RBAC and apply the same values to the process control surface. FCAPSule therefore sees
+the actual active Kubernetes object, not an evaluator note or a manufactured answer.
+Recovery restores the baseline ConfigMap and process settings.
 
 ## Execution Protocol
 
-1. Check actual kernel MemAvailable through node-exporter, not Kubernetes allocatable.
-2. Start healthy; observe at least two minutes of ordinary traffic before a fault.
-3. Run exactly one scenario, for at most five minutes, with automatic expiration.
-4. Save the run ID/times and intervention only in the lab evaluator record.
-5. Verify the real symptom and expected Prometheus alert independently of FCAPSule.
-6. Save FCAPSule's original assessment before any product correction; retain failures.
-7. Recover and wait for relevant alert windows to clear before another scenario.
-8. Query log counts and memory minima over the run. Volume is measured, not assumed.
+1. Verify real node `MemAvailable`; do not infer headroom from allocatable memory.
+2. Hold healthy traffic before injecting exactly one leased scenario.
+3. Record the intervention only in the ignored evaluator artifacts.
+4. Wait for the scenario-specific symptom alert and retain a post-alert evidence window.
+5. Recover the workload and wait for alert windows to clear.
+6. Capture one FCAPSule episode and its immutable `input_fingerprint`.
+7. Run each candidate model against that same episode; reject comparisons whose
+   fingerprints differ.
+8. Restore the original FCAPSule model setting even after interruption.
 
-Healthy traffic targets 25 requests/second, normally several thousand structured
-events per minute. Backpressure deliberately reduces throughput during failures;
-do not manufacture unrelated error lines just to achieve a log-count target.
+Healthy traffic targets thousands of structured records per minute. The evaluator
+records bounded retained lines and Prometheus counters; it never claims that a local
+log tail equals total indexed volume.
 
-## Resource Envelope
+## Scoring Contract
 
-The initial GO15 measurement was 7,019,782,144 total bytes and 1,514,065,920 available
-bytes, with no swap. Reuse existing pods and MySQL. Start requires at least 1 GiB
-MemAvailable; abort below 768 MiB or when the memory source cannot be read. These
-are conservative lab guardrails, not a guarantee against concurrent node workloads.
-Worker OOM is restricted by its existing 160 MiB container limit. Never deliberately
-exhaust host memory, kill unrelated pods or change cluster eviction thresholds.
+`evaluation/ground_truth.json` describes weighted causal findings, required evidence
+domains, acceptable action concepts and scenario-specific contradictions. The scorer:
 
-Alerts describe observed symptoms only. Fault names, expected answers and evaluator
-judgments must not appear in application alert descriptions or captured ConfigMaps.
-Real SQL codes, stack traces, configuration, request IDs and resource measurements
-remain visible: removing legitimate clues would be as misleading as adding answers.
+- awards 55 points for causal findings expressed through concept groups;
+- awards 20 points only for required domains cited by the final assessment;
+- awards 15 points for a relevant verification or remediation action;
+- awards 10 points for explicit uncertainty and absence of known contradictions.
 
-## Reference Semantics
+Labels are `correct_and_actionable` (90-100), `substantially_correct` (70-89),
+`partially_helpful` (45-69), `weak_or_misdirected` (1-44), and `failed` (0).
+This is a transparent task rubric, not semantic truth by keyword: every score retains
+matched criteria, citations and the unedited model output for human audit.
 
-- [Kubernetes resource limits](https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/): scheduling requests are not live free memory; container OOM differs from node eviction.
-- [Node pressure](https://kubernetes.io/docs/concepts/scheduling-eviction/node-pressure-eviction/): observe available memory and pressure independently of nominal capacity.
-- [MySQL connection ceiling](https://dev.mysql.com/doc/refman/8.4/en/too-many-connections.html): rejection is an actual server response.
-- [InnoDB error handling](https://dev.mysql.com/doc/refman/8.4/en/innodb-error-handling.html): lock timeouts require transaction cleanup; they are not automatically deadlocks.
+A separate pipeline score records whether the expected alert fired, at least the
+configured minimum log evidence was retained, a capsule fingerprint exists, and all
+required source domains were available. A missing source cannot silently become a
+model failure.
+
+## Validity Limits
+
+One run per scenario is an exploratory paired benchmark. It can show a concrete model
+difference on a fixed suite but cannot establish general accuracy. Use repetitions,
+report dispersion, preserve failures, and add future cases without changing old answers.
+Do not modify mechanisms or rubric criteria in response to a candidate model's output.
+
+The controller continues to enforce one active run, a 1 GiB admission threshold,
+automatic expiry and recovery below 768 MiB. Worker OOM remains restricted by its
+container limit; the Lab must never exhaust the node or restart unrelated services.

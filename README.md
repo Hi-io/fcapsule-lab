@@ -71,19 +71,16 @@ Worker/inventory operations have their own leases; durable import jobs expire af
 five minutes even if the controller is unavailable. This is a single-node test harness,
 not a guarantee against unrelated workloads exhausting the host.
 
-| Scenario | Signal | Real failure mechanism | Expected evidence |
-|---|---|---|---|
-| Buffered report export | FM | Serialized export pages remain buffered until completion and cross the worker's 160 MiB cgroup limit | Page/buffer growth, OOM reason, restart and sampled memory |
-| Incompatible import message | FM | Real Base64 decoding fails before acknowledging a durable job; the exception escapes the consumer | Stack trace, repeated delivery identity, restarts/backoff |
-| Credential migration backlog | PM | Expensive PBKDF2 work per account consumes the worker quota | Computation progress, CPU rate, no required restart |
-| MySQL connection saturation | PM | Completed inventory operations retain session handles | Independent exporter measurements, server rejection, checkout impact |
-| Inventory lock contention | PM | Stock reconciliation holds an actual InnoDB update lock while reservations wait | Blocking transaction lifecycle, SQL 1205, retry amplification |
-| Inventory schema mismatch | PM/FM | A query expects a column before the corresponding migration exists | Real SQL 1054, query failures, healthy reachable database |
+The evaluation catalog contains fifteen cases: five led by logs, five requiring logs
+plus performance metrics, and five where Kubernetes configuration is decisive. Cases
+cover poison-message redelivery, dependency contract changes, unique-key collisions,
+real MySQL deadlocks, idempotency conflicts, memory and CPU pressure, connection and
+lock saturation, downstream latency, schema rollout order, dependency routing, timeout
+budgets, signing-key skew and response-version skew.
 
-The first two are fault-management cases because Kubernetes changes workload state. The
-resource cases are performance-management cases: Prometheus raises an alert while the
-pod remains running, allowing FCAPSule to correlate time series, logs, and runtime
-configuration.
+The complete matrix and independently observable outcomes are frozen in the
+[scenario contract](docs/SCENARIO_CONTRACT.md). Configuration scenarios update a
+dedicated ConfigMap through narrow namespace RBAC, then restore its baseline values.
 
 Alerts state symptoms, not injected causes. Application telemetry contains ordinary
 operation names, SQL codes and identities, not scenario labels or expected answers.
@@ -95,6 +92,7 @@ must verify and what cannot be claimed from these cases. It is not sent to FCAPS
 ```bash
 python3 tools/run_scenarios.py --scenario schema-drift
 python3 tools/run_scenarios.py --scenario all
+python3 tools/evaluate_models.py --scenario all --models deepseek-v4-flash deepseek-v4-pro
 python3 tools/review_run.py artifacts/validation-<UTC>
 python3 tools/test_prometheus_rules.py --promtool /path/to/promtool
 ```
@@ -109,10 +107,12 @@ The review command saves historical Prometheus series and summarizes real SQL er
 codes, repeated import deliveries and logged export-buffer sizes. It does not score
 model prose or modify the saved answers. Log files are bounded tails; their line
 counts must not be presented as the total indexed volume.
-The local promtool check validates all eight rules and tests OOM during restart
+The local promtool check validates all seventeen rules and tests OOM during restart
 backoff, a completed OOM restart, stale OOM state, and non-OOM crashes. It does not
 start a cluster pod or modify Prometheus data.
 
+The [paired evaluation guide](docs/EVALUATION.md) explains same-capsule model
+comparison, objective rubric components, token/latency capture and validity limits.
 The [live validation record](docs/LIVE_VALIDATION.md) separates original failures,
 product corrections and follow-up checks. To compare a changed expression against
 the same historical Prometheus samples without injecting another fault:
