@@ -127,7 +127,7 @@ class ControlState:
             raise ValueError(f"Unknown scenario: {scenario_id}")
         self.logger.write("WARN", "Lab incident requested", scenario=scenario_id, signal_class=scenario["class"])
         if scenario_id == "poison-job":
-            with pymysql.connect(**self.db, connect_timeout=3, autocommit=True) as connection:
+            with pymysql.connect(**self.db, connect_timeout=3, read_timeout=3, write_timeout=3, autocommit=True) as connection:
                 with connection.cursor() as cursor:
                     cursor.execute(
                         "INSERT INTO lab_jobs (kind, payload) VALUES (%s, %s)",
@@ -151,7 +151,7 @@ class ControlState:
         except (HTTPError, URLError, TimeoutError, OSError) as exc:
             errors.append(f"inventory: {exc}")
         try:
-            with pymysql.connect(**self.db, connect_timeout=3, autocommit=True) as connection:
+            with pymysql.connect(**self.db, connect_timeout=3, read_timeout=3, write_timeout=3, autocommit=True) as connection:
                 with connection.cursor() as cursor:
                     cursor.execute("DELETE FROM lab_jobs WHERE kind IN ('poison', 'import')")
         except pymysql.MySQLError as exc:
@@ -206,16 +206,30 @@ HTML = r"""<!doctype html>
 <title>FCAPSule Lab</title><style>
 :root{--ink:#172129;--muted:#66747d;--line:#d4dadd;--paper:#fff;--bg:#f3f5f6;--nav:#11181d;--green:#167052;--amber:#9a5a12;--red:#a23838;--blue:#286a96}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 Inter,"Segoe UI",Arial,sans-serif}header{height:58px;background:var(--nav);border-bottom:3px solid var(--green);color:#fff;display:flex;align-items:center;justify-content:space-between;padding:0 24px}header strong{font-size:20px}header strong span{color:#60bf9a}header small{color:#b9c3c8;text-transform:uppercase}main{width:min(1120px,calc(100% - 32px));margin:24px auto 48px}.head{display:flex;justify-content:space-between;align-items:end;margin-bottom:18px}.head h1{margin:0;font-size:26px}.head p{margin:4px 0 0;color:var(--muted)}button{border:1px solid #16583f;border-radius:2px;background:var(--green);color:#fff;min-height:36px;padding:7px 13px;font-weight:650;cursor:pointer}button.secondary{color:var(--ink);background:#fff;border-color:#aeb8be}.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.scenario{background:var(--paper);border:1px solid var(--line);border-left:4px solid var(--blue);padding:15px}.scenario.fm{border-left-color:var(--red)}.scenario.pm{border-left-color:var(--amber)}.scenario h2{font-size:16px;margin:0 0 5px}.scenario p{color:var(--muted);margin:0 0 14px;min-height:42px}.tag{font-size:10px;font-weight:750;border:1px solid var(--line);padding:2px 5px;margin-left:6px}.actions{display:flex;gap:7px}.state{display:flex;gap:18px;align-items:center;margin-top:14px;background:#fff;border:1px solid var(--line);padding:12px}.dot{width:8px;height:8px;border-radius:50%;background:var(--green);display:inline-block;margin-right:6px}.dot.down{background:var(--red)}#notice{color:var(--muted);margin-left:auto}@media(max-width:720px){.grid{grid-template-columns:1fr}.head{align-items:start;flex-direction:column;gap:10px}.scenario p{min-height:0}.state{align-items:start;flex-direction:column;gap:7px}#notice{margin-left:0}}
+button:disabled{background:#e8edef;color:#5b6870;border-color:#cbd3d7;cursor:not-allowed}button:focus-visible,select:focus-visible{outline:2px solid var(--blue);outline-offset:3px}.scenario.active{border-color:var(--green);border-left-width:4px}.actions{align-items:center;flex-wrap:wrap}select{min-height:36px;border:1px solid #aeb8be;background:#fff;color:var(--ink);padding:5px}header small{font-size:10px}
 </style></head><body><header><strong><span>FCAPS</span>ule Lab</strong><small>Failure control</small></header><main>
 <div class="head"><div><h1>Incident scenarios</h1><p id="run-state">Checking node headroom</p></div><div class="actions"><label>Duration <select id="duration"><option value="120">2 minutes</option><option value="180" selected>3 minutes</option><option value="300">5 minutes</option></select></label><button class="secondary" id="recover">Recover all</button></div></div>
 <div class="grid" id="scenarios"></div><div class="state"><span><i class="dot" id="worker-dot"></i>Worker: <b id="worker-state">checking</b></span><span><i class="dot" id="inventory-dot"></i>Inventory: <b id="inventory-state">checking</b></span><span id="notice">Ready</span></div>
 </main><script>
 const safe=v=>String(v??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
 let scenarios={};
-async function status(){try{const r=await fetch('/api/status',{cache:'no-store'}),d=await r.json();scenarios=d.scenarios;const blocked=d.active||d.memory_error||!d.memory||d.memory.available_bytes<1073741824;document.querySelector('#run-state').textContent=(d.memory?'Node available: '+(d.memory.available_bytes/1073741824).toFixed(2)+' GiB':'Memory check unavailable')+(d.active?' | '+scenarios[d.active.scenario].title+' | '+d.active.status+' | '+Math.max(0,Math.ceil(d.active.expires_at-Date.now()/1000))+'s remaining':' | No active run');document.querySelector('#scenarios').innerHTML=Object.entries(scenarios).map(([id,s])=>`<article class="scenario ${s.class.toLowerCase()}"><h2>${safe(s.title)}<span class="tag">${safe(s.class)}</span></h2><p>${safe(s.summary)}</p><div class="actions"><button data-start="${safe(id)}" ${blocked?'disabled':''}>${d.active?.scenario===id?'Running':'Start scenario'}</button></div></article>`).join('');document.querySelectorAll('[data-start]').forEach(b=>b.onclick=()=>start(b.dataset.start));setState('worker',d.worker);setState('inventory',d.inventory)}catch(e){document.querySelector('#notice').textContent='Control API unavailable'}}
+async function status(){
+  try{
+    const r=await fetch('/api/status',{cache:'no-store'});
+    if(!r.ok) throw new Error('Control unavailable');
+    const d=await r.json();scenarios=d.scenarios;
+    const blocked=d.active||d.memory_error||!d.memory||d.memory.available_bytes<1073741824||!d.worker.reachable||!d.inventory.reachable;
+    document.querySelector('#run-state').textContent=(d.memory?'Node available: '+(d.memory.available_bytes/1073741824).toFixed(2)+' GiB':'Memory check unavailable')+(d.active?' | '+scenarios[d.active.scenario].title+' | '+d.active.status+' | '+Math.max(0,Math.ceil(d.active.expires_at-Date.now()/1000))+'s remaining':' | No active run');
+    document.querySelector('#duration').disabled=Boolean(d.active);
+    document.querySelector('#scenarios').innerHTML=Object.entries(scenarios).map(([id,s])=>`<article class="scenario ${s.class.toLowerCase()} ${d.active?.scenario===id?'active':''}"><h2>${safe(s.title)}<span class="tag">${safe(s.class)}</span></h2><p>${safe(s.summary)}</p><div class="actions"><button data-start="${safe(id)}" ${blocked?'disabled':''}>${d.active?.scenario===id?(d.active.status==='recovering'?'Recovering':'Running'):'Start scenario'}</button></div></article>`).join('');
+    document.querySelectorAll('[data-start]').forEach(b=>b.onclick=()=>start(b.dataset.start));
+    setState('worker',d.worker);setState('inventory',d.inventory);
+    document.querySelector('#notice').textContent=d.active?(d.active.status==='recovering'?'Waiting for recovery':'Run in progress'):(blocked?'Start unavailable':'Ready');
+  }catch(e){document.querySelectorAll('[data-start]').forEach(b=>b.disabled=true);document.querySelector('#notice').textContent='Control API unavailable'}
+}
 function setState(name,value){const up=value.reachable;document.querySelector(`#${name}-dot`).className='dot'+(up?'':' down');document.querySelector(`#${name}-state`).textContent=up?(value.mode||value.failure_mode||'healthy'):'unreachable'}
 async function start(id){document.querySelector('#notice').textContent='Starting '+scenarios[id].title+'...';document.querySelectorAll('[data-start]').forEach(b=>b.disabled=true);try{const r=await fetch('/api/scenarios/'+encodeURIComponent(id)+'/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({duration_seconds:Number(document.querySelector('#duration').value)})}),d=await r.json();document.querySelector('#notice').textContent=d.message||d.error||(r.ok?'Scenario started':'Failed')}catch(e){document.querySelector('#notice').textContent='Start could not be confirmed; refreshing status'}status()}
-document.querySelector('#recover').onclick=async()=>{document.querySelector('#notice').textContent='Applying recovery...';const r=await fetch('/api/recover',{method:'POST'}),d=await r.json();document.querySelector('#notice').textContent=d.message||d.error;setTimeout(status,1500)};
+document.querySelector('#recover').onclick=async()=>{document.querySelector('#notice').textContent='Applying recovery...';try{const r=await fetch('/api/recover',{method:'POST'}),d=await r.json();document.querySelector('#notice').textContent=d.message||d.error}catch(e){document.querySelector('#notice').textContent='Recovery not confirmed; checking status'}setTimeout(status,1500)};
 status();setInterval(status,5000);
 </script></body></html>"""
 
