@@ -93,6 +93,9 @@ class QuietHandler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             return
 
+    def send_html(self, status: int, body: str) -> None:
+        self.send_text(status, body, "text/html; charset=utf-8")
+
     def body_json(self) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length", "0"))
         if not length:

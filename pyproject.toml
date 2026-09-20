@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fcapsule-lab"
+version = "0.2.0"
+description = "Observable Kubernetes workloads for FCAPSule incident testing"
+requires-python = ">=3.11"
+dependencies = [
+  "psycopg[binary]>=3.2,<3.3",
+  "PyMySQL[rsa]>=1.1,<1.2",
+]
+
+[tool.setuptools.packages.find]
+include = ["app*"]

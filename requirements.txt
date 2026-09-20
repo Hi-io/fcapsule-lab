@@ -1,1 +1,2 @@
 psycopg[binary]>=3.2,<3.3
+PyMySQL[rsa]>=1.1,<1.2
