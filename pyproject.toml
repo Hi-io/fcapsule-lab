@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fcapsule-lab"
-version = "0.3.0"
+version = "0.4.0"
 description = "Observable Kubernetes workloads for FCAPSule incident testing"
 requires-python = ">=3.11"
 dependencies = [
@@ -13,7 +13,7 @@ dependencies = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["app*"]
+include = ["app*", "evaluation*"]
 
 [project.optional-dependencies]
 dev = ["PyYAML>=6,<7"]

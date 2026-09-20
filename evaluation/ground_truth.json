@@ -1,0 +1,170 @@
+{
+  "version": 1,
+  "scenarios": [
+    {
+      "id": "poison-job", "category": "logs", "expected_alert": "LabWorkerCrashLooping", "target_service": "lab-worker",
+      "mechanism": "An invalid Base64 import body is redelivered because the decoder exits before acknowledgement.",
+      "required_domains": ["logs"],
+      "findings": [
+        {"id": "decode_failure", "weight": 3, "all": [["base64", "encoding"], ["decode", "decoder", "payload"]]},
+        {"id": "redelivery", "weight": 2, "all": [["redeliver", "same job", "repeated delivery", "acknowledgement"], ["restart", "crashloop", "process exits"]]}
+      ],
+      "actions": [["quarantine", "dead letter", "remove the message", "validate payload"], ["decoder", "producer contract", "schema"]],
+      "contradictions": ["out of memory caused", "cpu saturation caused"]
+    },
+    {
+      "id": "response-contract", "category": "logs", "expected_alert": "LabOrdersDependencyDocumentInvalid", "target_service": "orders-api",
+      "mechanism": "Inventory returns HTTP 200 with a legacy document that lacks the response fields checkout requires.",
+      "required_domains": ["logs"],
+      "findings": [
+        {"id": "contract", "weight": 3, "all": [["response contract", "schema", "expected field"], ["inventory", "dependency"], ["http 200", "successful response", "accepted response"]]},
+        {"id": "not_transport", "weight": 1, "all": [["not a transport", "reachable", "response received", "not connectivity"]]}
+      ],
+      "actions": [["rollback", "compatibility", "consumer parser", "response schema"], ["capture response", "compare payload", "contract test"]],
+      "contradictions": ["database connection ceiling caused", "oom killed"]
+    },
+    {
+      "id": "reservation-token-collision", "category": "logs", "expected_alert": "LabInventoryConstraintFailures", "target_service": "inventory-api",
+      "mechanism": "Different reservations insert the same unique token and MySQL rejects subsequent transactions with error 1062.",
+      "required_domains": ["logs"],
+      "findings": [
+        {"id": "unique_constraint", "weight": 3, "all": [["1062", "duplicate entry", "unique constraint"], ["reservation", "token"]]},
+        {"id": "collision", "weight": 2, "all": [["same token", "collision", "reused"], ["different order", "concurrent reservation", "multiple reservation"]]}
+      ],
+      "actions": [["generate unique", "token generation", "idempotency key"], ["inspect constraint", "reservation_events", "deduplicate"]],
+      "contradictions": ["deadlock caused", "connection saturation caused"]
+    },
+    {
+      "id": "transaction-deadlock", "category": "logs", "expected_alert": "LabInventoryDeadlockVictims", "target_service": "inventory-api",
+      "mechanism": "Two stock reconciliation transactions lock red and blue stock rows in reverse order; MySQL selects a deadlock victim.",
+      "required_domains": ["logs"],
+      "findings": [
+        {"id": "deadlock", "weight": 3, "all": [["1213", "deadlock victim", "deadlock"], ["transaction", "rollback"]]},
+        {"id": "lock_order", "weight": 2, "all": [["lock order", "opposite order", "reverse order", "red", "blue"]]}
+      ],
+      "actions": [["consistent lock order", "same order", "retry transaction"], ["transaction", "reconciliation"]],
+      "contradictions": ["lock wait timeout 1205 is the cause", "schema mismatch caused"]
+    },
+    {
+      "id": "idempotency-conflict", "category": "logs", "expected_alert": "LabOrdersIdempotencyConflicts", "target_service": "orders-api",
+      "mechanism": "Different order payloads are bound to the same checkout idempotency record.",
+      "required_domains": ["logs"],
+      "findings": [
+        {"id": "idempotency", "weight": 3, "all": [["idempotency"], ["conflict", "collision", "reused"]]},
+        {"id": "payload_identity", "weight": 2, "all": [["different payload", "different order", "conflicting order"], ["same key", "existing record", "original order"]]}
+      ],
+      "actions": [["key generation", "scope the key", "unique key", "payload hash"], ["preserve original response", "reject conflicting reuse", "idempotency store"]],
+      "contradictions": ["inventory database caused", "network timeout caused"]
+    },
+    {
+      "id": "memory-leak", "category": "metrics", "expected_alert": "LabWorkerOOMKilled", "target_service": "lab-worker",
+      "mechanism": "A report export retains encoded pages instead of streaming them until the worker crosses its cgroup memory limit.",
+      "required_domains": ["logs", "metrics"],
+      "findings": [
+        {"id": "oom", "weight": 2, "all": [["oomkilled", "out of memory", "memory limit"], ["restart", "terminated", "cgroup"]]},
+        {"id": "growth", "weight": 3, "all": [["buffer", "retained pages", "allocated bytes"], ["export", "report"], ["growth", "increasing", "stream"]]}
+      ],
+      "actions": [["stream", "bounded buffer", "flush pages"], ["memory profile", "heap", "allocation"]],
+      "contradictions": ["poison message caused", "cpu limit caused the restart"]
+    },
+    {
+      "id": "cpu-saturation", "category": "metrics", "expected_alert": "LabWorkerCPUHigh", "target_service": "lab-worker",
+      "mechanism": "Credential migration performs excessive PBKDF2 rounds and sustains CPU near the worker limit while still making slow progress.",
+      "required_domains": ["logs", "metrics"],
+      "findings": [
+        {"id": "cpu", "weight": 2, "all": [["cpu", "throttl"], ["limit", "quota", "saturat"]]},
+        {"id": "pbkdf2", "weight": 3, "all": [["pbkdf2", "password derivation", "credential migration"], ["rounds", "expensive", "work factor"]]}
+      ],
+      "actions": [["reduce rounds", "batch", "rate limit", "move migration"], ["cpu quota", "worker capacity", "benchmark"]],
+      "contradictions": ["database lock caused", "memory leak caused"]
+    },
+    {
+      "id": "mysql-connections", "category": "metrics", "expected_alert": "LabMySQLConnectionsSaturated", "target_service": "mysql-exporter",
+      "mechanism": "Inventory retains checked-out database sessions until Threads_connected approaches max_connections and new sessions are rejected.",
+      "required_domains": ["logs", "metrics", "configuration"],
+      "findings": [
+        {"id": "capacity", "weight": 2, "all": [["threads_connected", "connections"], ["max_connections", "connection ceiling", "40"]]},
+        {"id": "retention", "weight": 3, "all": [["retained", "not released", "leak", "checked out"], ["session", "connection", "pool"]]}
+      ],
+      "actions": [["close connections", "release sessions", "pool lifecycle"], ["identify owners", "pool checked out", "connection inventory"]],
+      "contradictions": ["increase max_connections is the root fix", "row lock caused"]
+    },
+    {
+      "id": "lock-contention", "category": "metrics", "expected_alert": "LabInventoryLockContention", "target_service": "inventory-api",
+      "mechanism": "Stock reconciliation keeps an InnoDB row lock open while reservations wait, time out with 1205 and amplify retries.",
+      "required_domains": ["logs", "metrics"],
+      "findings": [
+        {"id": "timeout", "weight": 2, "all": [["1205", "lock wait timeout"], ["reservation", "transaction"]]},
+        {"id": "blocker", "weight": 3, "all": [["reconciliation", "blocking transaction", "holds"], ["row lock", "inventory_items", "sku-red-widget"]]}
+      ],
+      "actions": [["shorten transaction", "commit", "release lock"], ["blocking session", "innodb", "lock owner"]],
+      "contradictions": ["deadlock 1213 caused", "schema mismatch caused"]
+    },
+    {
+      "id": "downstream-latency", "category": "metrics", "expected_alert": "LabCheckoutLatencyHigh", "target_service": "orders-api",
+      "mechanism": "Inventory processing slows to roughly 350 ms, increasing checkout p95 and in-flight work without a resource crash.",
+      "required_domains": ["logs", "metrics"],
+      "findings": [
+        {"id": "latency", "weight": 3, "all": [["inventory", "downstream", "dependency"], ["latency", "slow", "350", "p95"]]},
+        {"id": "impact", "weight": 2, "all": [["checkout", "orders"], ["inflight", "concurrency", "retry", "response time"]]}
+      ],
+      "actions": [["trace inventory latency", "profile dependency", "dependency timing"], ["backpressure", "timeout budget", "concurrency"]],
+      "contradictions": ["oom killed", "database connection rejected"]
+    },
+    {
+      "id": "schema-drift", "category": "configuration", "expected_alert": "LabInventoryQueryFailures", "target_service": "inventory-api",
+      "mechanism": "INVENTORY_QUERY_REVISION=v2 expects reserved_quantity while the deployed table still has the v1 schema.",
+      "required_domains": ["logs", "configuration"],
+      "findings": [
+        {"id": "missing_column", "weight": 2, "all": [["1054", "unknown column"], ["reserved_quantity"]]},
+        {"id": "revision", "weight": 3, "all": [["query revision", "v2"], ["migration", "database schema", "v1"]]}
+      ],
+      "actions": [["apply migration", "rollback query revision", "disable v2"], ["deployment order", "schema compatibility"]],
+      "contradictions": ["connection saturation caused", "lock timeout caused"]
+    },
+    {
+      "id": "dependency-route", "category": "configuration", "expected_alert": "LabOrdersDependencyTransportFailures", "target_service": "orders-api",
+      "mechanism": "The active INVENTORY_URL points to inventory-api:8099 while the Service listens on 8081.",
+      "required_domains": ["logs", "configuration"],
+      "findings": [
+        {"id": "endpoint", "weight": 3, "all": [["inventory-api"], ["8099"], ["8081", "service port", "target port"]]},
+        {"id": "transport", "weight": 2, "all": [["connection refused", "transport", "cannot connect"], ["endpoint", "url", "port"]]}
+      ],
+      "actions": [["set inventory_url", "correct port", "8081"], ["test source", "service discovery", "connectivity check"]],
+      "contradictions": ["inventory pod is down", "database unavailable caused"]
+    },
+    {
+      "id": "timeout-budget", "category": "configuration", "expected_alert": "LabOrdersDependencyTimeouts", "target_service": "orders-api",
+      "mechanism": "Checkout uses a 50 ms dependency timeout while inventory takes about 250 ms to complete otherwise valid work.",
+      "required_domains": ["logs", "metrics", "configuration"],
+      "findings": [
+        {"id": "budget", "weight": 3, "all": [["0.05", "50 ms", "50ms"], ["0.25", "250 ms", "250ms", "inventory latency"], ["timeout", "budget"]]},
+        {"id": "dependency_healthy", "weight": 2, "all": [["inventory", "dependency"], ["completes", "reachable", "healthy", "late response"]]}
+      ],
+      "actions": [["increase timeout", "align timeout", "latency budget"], ["cancel work", "deadline propagation", "profile latency"]],
+      "contradictions": ["port mismatch caused", "authorization caused"]
+    },
+    {
+      "id": "signing-key-skew", "category": "configuration", "expected_alert": "LabOrdersDependencyAuthorizationFailures", "target_service": "orders-api",
+      "mechanism": "Orders sends checkout-key-v1 while inventory only accepts checkout-key-v2.",
+      "required_domains": ["logs", "configuration"],
+      "findings": [
+        {"id": "key_ids", "weight": 3, "all": [["checkout-key-v1"], ["checkout-key-v2"], ["key id", "signing", "authorization"]]},
+        {"id": "skew", "weight": 2, "all": [["mismatch", "skew", "different"], ["orders", "caller"], ["inventory", "dependency"]]}
+      ],
+      "actions": [["align key", "rotate key", "dual-key"], ["orders", "inventory"]],
+      "contradictions": ["invalid secret value is proven", "network route caused"]
+    },
+    {
+      "id": "response-schema-skew", "category": "configuration", "expected_alert": "LabOrdersDependencySchemaRejected", "target_service": "orders-api",
+      "mechanism": "Orders expects response schema v2 while inventory still emits schema v1.",
+      "required_domains": ["logs", "configuration"],
+      "findings": [
+        {"id": "versions", "weight": 3, "all": [["expected schema", "orders"], ["v2"], ["v1", "inventory"]]},
+        {"id": "contract", "weight": 2, "all": [["response contract", "schema mismatch", "field"], ["http 200", "response received", "reachable"]]}
+      ],
+      "actions": [["align schema", "compatibility parser", "rollback expected schema"], ["contract test", "version negotiation", "dual read"]],
+      "contradictions": ["transport failure caused", "database query failed"]
+    }
+  ]
+}

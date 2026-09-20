@@ -4,21 +4,20 @@ import argparse
 import json
 import shutil
 import subprocess
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
-EXPECTED = {
-    "schema-drift": "LabInventoryQueryFailures",
-    "lock-contention": "LabInventoryLockContention",
-    "mysql-connections": "LabMySQLConnectionsSaturated",
-    "cpu-saturation": "LabWorkerCPUHigh",
-    "poison-job": "LabWorkerCrashLooping",
-    "memory-leak": "LabWorkerOOMKilled",
-}
+from app.scenario_catalog import SCENARIOS
+
+EXPECTED = {key: item["expected_alert"] for key, item in SCENARIOS.items()}
 KUBECTL = shutil.which("kubectl") or "/snap/bin/kubectl"
 
 
@@ -82,13 +81,15 @@ def run_case(args, scenario, folder):
         raise RuntimeError("Healthy baseline did not hold; no fault injected")
     start = now()
     record = {"scenario": scenario, "expected_alert": EXPECTED[scenario], "baseline_at": baseline, "started_at": start,
-              "samples": [], "observed_alerts": [], "fcapsule": [], "outcome": "running"}
+              "samples": [], "observed_alerts": [], "fcapsule": [], "outcome": "running",
+              "minimum_retained_log_lines": args.minimum_log_lines}
     save(root / "run.json", record)
     try:
         record["control"] = request(args.lab + f"/api/scenarios/{scenario}/start", {"duration_seconds": args.duration})
         print(f"{now()} {scenario}: started {record['control']['run']['run_id']}", flush=True)
         deadline = time.monotonic() + args.duration
         observed = {}
+        expected_seen_at = None
         while time.monotonic() < deadline:
             status = request(args.lab + "/api/status")
             alerts = firing(args.prometheus)
@@ -97,6 +98,10 @@ def run_case(args, scenario, folder):
             record["samples"].append({"time": now(), "memory": status.get("memory"), "active": status["active"], "alerts": [item["labels"]["alertname"] for item in alerts]})
             record["observed_alerts"] = list(observed.values())
             save(root / "run.json", record)
+            if any(item["labels"]["alertname"] == EXPECTED[scenario] for item in alerts):
+                expected_seen_at = expected_seen_at or time.monotonic()
+            if expected_seen_at and time.monotonic() - expected_seen_at >= args.post_alert_hold:
+                break
             if not status["active"]:
                 last = status.get("history", [])[-1:]
                 record["early_recovery"] = last
@@ -114,7 +119,10 @@ def run_case(args, scenario, folder):
     while time.monotonic() < deadline:
         overview = request(args.fcapsule + "/api/state")["overview"]
         episodes = [episode for episode in overview["episodes"] if any(
-            signal.get("created_at", "") >= start and "fcapsule-lab" in signal.get("app_id", "") for signal in episode["signals"])]
+            signal.get("created_at", "") >= start
+            and "fcapsule-lab" in signal.get("app_id", "")
+            and EXPECTED[scenario].casefold() in json.dumps(signal).casefold()
+            for signal in episode["signals"])]
         results = []
         for episode in episodes:
             result = request(args.fcapsule + "/api/episodes/" + episode["episode_id"] + "/investigation")
@@ -141,6 +149,8 @@ def main():
     parser.add_argument("--scenario", choices=[*EXPECTED, "all"], default="all")
     parser.add_argument("--duration", type=int, default=180, choices=range(120, 301))
     parser.add_argument("--baseline", type=int, default=120)
+    parser.add_argument("--post-alert-hold", type=int, default=30)
+    parser.add_argument("--minimum-log-lines", type=int, default=1000)
     parser.add_argument("--out", type=Path, default=Path("artifacts"))
     args = parser.parse_args()
     folder = args.out / datetime.now(timezone.utc).strftime("validation-%Y%m%dT%H%M%SZ")
