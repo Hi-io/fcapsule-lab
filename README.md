@@ -95,6 +95,7 @@ must verify and what cannot be claimed from these cases. It is not sent to FCAPS
 ```bash
 python3 tools/run_scenarios.py --scenario schema-drift
 python3 tools/run_scenarios.py --scenario all
+python3 tools/review_run.py artifacts/validation-<UTC>
 ```
 
 Use `--lab`, `--prometheus` and `--fcapsule` to override the development URLs. The runner
@@ -103,6 +104,10 @@ memory samples, collects bounded workload logs and preserves FCAPSule's unedited
 assessment. Results go under ignored `artifacts/validation-<UTC>/`. Alert detection and
 diagnostic quality are separate outcomes; a ready assessment is not an accuracy score.
 The full suite takes time because alert windows must clear between cases.
+The review command saves historical Prometheus series and summarizes real SQL error
+codes, repeated import deliveries and logged export-buffer sizes. It does not score
+model prose or modify the saved answers. Log files are bounded tails; their line
+counts must not be presented as the total indexed volume.
 
 To stop ongoing traffic after testing:
 
