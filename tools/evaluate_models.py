@@ -144,45 +144,68 @@ def main() -> None:
         for repetition in range(1, args.repetitions + 1):
             for scenario_id in selected:
                 first = args.models[ordinal % len(args.models)]
-                configure_model(args.fcapsule, first, args.max_tokens)
                 case_name = scenario_id if args.repetitions == 1 else f"{scenario_id}-r{repetition}"
-                record = run_case(args, scenario_id, folder)
-                if case_name != scenario_id:
-                    (folder / scenario_id).rename(folder / case_name)
-                if not record.get("fcapsule"):
-                    raise RuntimeError(f"No FCAPSule episode captured for {scenario_id}")
-                episode_id = record["fcapsule"][0]["episode_id"]
-                outputs: dict[str, dict] = {}
-                initial = wait_for_investigation(args.fcapsule, episode_id, args.investigation_timeout)
-                if initial.get("model") == first:
-                    outputs[first] = initial
-                for model in args.models:
-                    if model in outputs:
-                        continue
-                    configure_model(args.fcapsule, model, args.max_tokens)
-                    outputs[model] = rerun(args.fcapsule, episode_id, args.investigation_timeout)
-                record["captured_domains"] = sorted(available_evidence_domains(next(iter(outputs.values()))))
-                fingerprints = {item.get("input_fingerprint") for item in outputs.values()}
-                valid = len(fingerprints) == 1 and None not in fingerprints
-                case_dir = folder / case_name
-                for model, investigation in outputs.items():
-                    model_file = model.replace("/", "_") + ".json"
-                    save(case_dir / model_file, investigation)
-                    diagnosis = score_investigation(oracle[scenario_id], investigation)
-                    pipeline = score_pipeline(oracle[scenario_id], record, investigation)
-                    result = {"scenario": scenario_id, "repetition": repetition, "category": oracle[scenario_id]["category"],
-                              "model": model, **diagnosis, "pipeline": pipeline,
-                              "pipeline_score": pipeline["score"], "elapsed_seconds": investigation.get("elapsed_seconds", 0),
-                              "usage": usage(investigation), "total_tokens": usage(investigation)["total_tokens"],
-                              "input_fingerprint": investigation.get("input_fingerprint"), "comparison_valid": valid,
-                              "episode_id": episode_id}
-                    save(case_dir / (model.replace("/", "_") + "-score.json"), result)
-                    rows.append(result)
+                record: dict = {}
+                try:
+                    configure_model(args.fcapsule, first, args.max_tokens)
+                    record = run_case(args, scenario_id, folder)
+                    if case_name != scenario_id:
+                        (folder / scenario_id).rename(folder / case_name)
+                    if not record.get("fcapsule"):
+                        raise RuntimeError(f"No FCAPSule episode captured for {scenario_id}")
+                    episode_id = record["fcapsule"][0]["episode_id"]
+                    outputs: dict[str, dict] = {}
+                    initial = wait_for_investigation(args.fcapsule, episode_id, args.investigation_timeout)
+                    if initial.get("model") == first:
+                        outputs[first] = initial
+                    for model in args.models:
+                        if model in outputs:
+                            continue
+                        configure_model(args.fcapsule, model, args.max_tokens)
+                        outputs[model] = rerun(args.fcapsule, episode_id, args.investigation_timeout)
+                    record["captured_domains"] = sorted(available_evidence_domains(next(iter(outputs.values()))))
+                    fingerprints = {item.get("input_fingerprint") for item in outputs.values()}
+                    valid = len(fingerprints) == 1 and None not in fingerprints
+                    case_dir = folder / case_name
+                    for model, investigation in outputs.items():
+                        model_file = model.replace("/", "_") + ".json"
+                        save(case_dir / model_file, investigation)
+                        diagnosis = score_investigation(oracle[scenario_id], investigation)
+                        pipeline = score_pipeline(oracle[scenario_id], record, investigation)
+                        result = {"scenario": scenario_id, "repetition": repetition, "category": oracle[scenario_id]["category"],
+                                  "model": model, **diagnosis, "pipeline": pipeline,
+                                  "pipeline_score": pipeline["score"], "elapsed_seconds": investigation.get("elapsed_seconds", 0),
+                                  "usage": usage(investigation), "total_tokens": usage(investigation)["total_tokens"],
+                                  "input_fingerprint": investigation.get("input_fingerprint"), "comparison_valid": valid,
+                                  "episode_id": episode_id}
+                        save(case_dir / (model.replace("/", "_") + "-score.json"), result)
+                        rows.append(result)
+                except (HTTPError, OSError, TimeoutError, RuntimeError) as error:
+                    case_dir = folder / case_name
+                    case_dir.mkdir(exist_ok=True)
+                    failure = {"scenario": scenario_id, "repetition": repetition,
+                               "error_type": type(error).__name__, "error": str(error),
+                               "record": record}
+                    save(case_dir / "evaluation-error.json", failure)
+                    pipeline = score_pipeline(oracle[scenario_id], record, {})
+                    for model in args.models:
+                        result = {"scenario": scenario_id, "repetition": repetition,
+                                  "category": oracle[scenario_id]["category"], "model": model,
+                                  "score": 0.0, "label": "pipeline_failed", "status": "evaluation_error",
+                                  "findings": [], "domains": [], "contradictions": [], "components": {},
+                                  "pipeline": pipeline, "pipeline_score": pipeline["score"],
+                                  "elapsed_seconds": 0, "usage": usage({}), "total_tokens": 0,
+                                  "input_fingerprint": None, "comparison_valid": False,
+                                  "episode_id": None, "evaluation_error": str(error)}
+                        save(case_dir / (model.replace("/", "_") + "-score.json"), result)
+                        rows.append(result)
+                finally:
+                    try:
+                        request(args.lab.rstrip("/") + "/api/recover", {})
+                    except OSError:
+                        pass
                 write_reports(folder, rows, args.models)
                 ordinal += 1
-    except (HTTPError, OSError, TimeoutError, RuntimeError):
-        write_reports(folder, rows, args.models)
-        raise
     finally:
         configure_model(args.fcapsule, original["model"], int(original["max_tokens"]))
         try:

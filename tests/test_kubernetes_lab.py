@@ -155,6 +155,9 @@ class KubernetesLabTests(unittest.TestCase):
             self.assertNotIn(answer, annotations)
         connections = next(rule for rule in rules if rule["alert"] == "LabMySQLConnectionsSaturated")
         self.assertIn("mysql_global_status_threads_connected", connections["expr"])
+        memory_exit = next(rule for rule in rules if rule["alert"] == "LabWorkerOOMKilled")
+        self.assertIn("kube_pod_container_status_last_terminated_exitcode", memory_exit["expr"])
+        self.assertIn("lab_worker_allocated_bytes", memory_exit["expr"])
         self.assertTrue(all(rule["for"] for rule in rules))
 
 

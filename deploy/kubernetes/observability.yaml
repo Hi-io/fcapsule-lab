@@ -62,9 +62,21 @@ spec:
       rules:
         - alert: LabWorkerOOMKilled
           expr: |
-            kube_pod_container_status_last_terminated_reason{
-              namespace="fcapsule-lab", container="worker", reason="OOMKilled"
-            } == 1
+            (
+              kube_pod_container_status_last_terminated_reason{
+                namespace="fcapsule-lab", container="worker", reason="OOMKilled"
+              } == 1
+              or on(namespace, pod, container)
+              (
+                kube_pod_container_status_last_terminated_exitcode{
+                  namespace="fcapsule-lab", container="worker"
+                } == 137
+                and on(namespace, pod, container)
+                max_over_time(lab_worker_allocated_bytes{
+                  namespace="fcapsule-lab", container="worker"
+                }[5m]) > 100000000
+              )
+            )
             and on(namespace, pod, container)
             (
               increase(kube_pod_container_status_restarts_total{
@@ -82,7 +94,7 @@ spec:
             signal_class: FM
           annotations:
             summary: A worker container terminated with OOMKilled.
-            description: The last termination was OOMKilled and the container is in restart backoff or its restart counter increased within five minutes. Investigate memory use and workload activity.
+            description: The runtime reported OOMKilled, or exit 137 followed a retained-buffer measurement above 100 MB, and the restart counter increased. Investigate memory use and workload activity.
 
         - alert: LabWorkerCrashLooping
           expr: |
