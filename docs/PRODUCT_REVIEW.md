@@ -2,30 +2,30 @@
 
 ## User Job
 
-The lab exists to let a developer or evaluator generate a believable, observable failure
-outside FCAPSule. The user should be able to start it with one Compose command, inspect
-live logs from a terminal, introduce a failure with one command, see metrics and alerts
-in Prometheus, and later compare that raw source behavior with FCAPSule's retained
-report.
+An evaluator needs to deploy a stable production-like workload, trigger one credible
+incident after baseline telemetry exists, observe thousands of noisy source records, and
+then judge whether FCAPSule preserves the small set of evidence needed to investigate.
 
-## Decisions
+## Product Decisions
 
-* Five containers are enough to model a user-facing API, a dependency API, a real
-  database, a load source, and an independent metric collector without overwhelming a
-  typical development machine.
-* The default load targets at least 10,000 logs/minute across the application services,
-  but avoids an uncontrolled infinite log-noise loop.
-* Lock contention is the default incident because it creates causal ambiguity that needs
-  FM, PM, logs, and topology to investigate. It is more representative than a hard-coded
-  endpoint exception and safer than a host-dependent OOM test.
-* Prometheus remains independent. FCAPSule consumes evidence from it later; it is not an
-  embedded FCAPSule component.
-* The lab exposes no product UI. Terminal control and the Prometheus UI are enough for
-  its narrow role. The user-facing investigation UI remains FCAPSule Operations.
+- A control UI is appropriate here because scenario activation is the user's primary
+  job; it is not part of the FCAPSule product UI.
+- Four main cases cover distinct FM and PM behavior. Lock contention remains as an
+  additional dependency case rather than replacing the resource cases.
+- Baseline traffic is high enough to create a meaningful log-reduction problem but has
+  bounded concurrency and explicit Kubernetes limits.
+- MySQL configuration is a ConfigMap referenced by the affected inventory workload, so
+  configuration evidence is obtainable through FCAPSule's existing read-only adapter.
+- The MySQL exporter complements application metrics. It verifies the database symptom
+  independently without making FCAPSule responsible for metric collection.
 
 ## Acceptance Criteria
 
-The stack is ready for a Docker-host validation when it can start five healthy
-containers, exceed the log-volume target, show three healthy Prometheus targets, trigger
-the supplied alert rules after `make fault-on`, recover after `make fault-off`, and pass
-`make verify`.
+1. One Kustomize command creates all workloads healthy.
+2. Prometheus reports the application and MySQL targets as up.
+3. OpenSearch receives several thousand lab log documents per minute.
+4. Every scenario starts after deployment and has a corresponding alert rule.
+5. FM scenarios create a genuine Kubernetes restart or waiting state.
+6. PM scenarios fire without restarting the affected workload.
+7. Recover all returns the lab to healthy traffic without redeployment.
+8. FCAPSule discovers current pods and can capture logs, metrics, alerts, and ConfigMaps.
