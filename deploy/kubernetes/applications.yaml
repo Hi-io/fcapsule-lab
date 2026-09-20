@@ -50,11 +50,16 @@ spec:
               port: metrics
             initialDelaySeconds: 5
             periodSeconds: 5
+          startupProbe:
+            httpGet:
+              path: /health
+              port: metrics
+            periodSeconds: 5
+            failureThreshold: 36
           livenessProbe:
             httpGet:
               path: /health
               port: metrics
-            initialDelaySeconds: 20
             periodSeconds: 15
           resources:
             requests:
@@ -313,11 +318,16 @@ spec:
               port: metrics
             initialDelaySeconds: 5
             periodSeconds: 5
+          startupProbe:
+            httpGet:
+              path: /health
+              port: metrics
+            periodSeconds: 5
+            failureThreshold: 36
           livenessProbe:
             httpGet:
               path: /health
               port: metrics
-            initialDelaySeconds: 15
             periodSeconds: 10
           resources:
             requests:
