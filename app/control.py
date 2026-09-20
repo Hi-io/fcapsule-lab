@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import ssl
 import threading
 import time
 import uuid
@@ -17,57 +18,15 @@ from urllib.request import Request, urlopen
 import pymysql
 
 from app.common import JsonLogger, QuietHandler, serve
+from app.scenario_catalog import DEFAULT_SCENARIO_CONFIG, SCENARIOS
 from app.safety import lease_seconds, memory_snapshot
-
-
-SCENARIOS = {
-    "memory-leak": {
-        "title": "Buffered report export",
-        "class": "FM",
-        "summary": "An export buffers pages instead of streaming them, then reaches its container memory limit.",
-        "target": "worker",
-        "mode": "memory-leak",
-    },
-    "poison-job": {
-        "title": "Incompatible import message",
-        "class": "FM",
-        "summary": "A durable import exposes an unhandled decoder exception before acknowledgement.",
-        "target": "database",
-        "mode": "poison",
-    },
-    "cpu-saturation": {
-        "title": "Credential migration backlog",
-        "class": "PM",
-        "summary": "A migration applies expensive password derivation to every record under a small CPU quota.",
-        "target": "worker",
-        "mode": "cpu-saturation",
-    },
-    "mysql-connections": {
-        "title": "MySQL connection saturation",
-        "class": "PM",
-        "summary": "The inventory pool retains sessions near max_connections and checkout failures rise.",
-        "target": "inventory",
-        "mode": "connection-saturation",
-    },
-    "lock-contention": {
-        "title": "Inventory lock contention",
-        "class": "PM",
-        "summary": "Stock reconciliation keeps a transaction open while reservations wait and callers retry.",
-        "target": "inventory",
-        "mode": "lock-contention",
-    },
-    "schema-drift": {
-        "title": "Inventory schema mismatch", "class": "PM",
-        "summary": "A new query is enabled before its database migration; MySQL rejects real reservations.",
-        "target": "inventory", "mode": "schema-drift",
-    },
-}
 
 
 class ControlState:
     def __init__(self) -> None:
         self.worker_url = os.environ.get("WORKER_URL", "http://lab-worker:8083")
         self.inventory_url = os.environ.get("INVENTORY_URL", "http://inventory-api:8081")
+        self.orders_url = os.environ.get("ORDERS_URL", "http://orders-api:8080")
         self.logger = JsonLogger("lab-control")
         self.lock = threading.RLock()
         self.active = None
@@ -106,8 +65,8 @@ class ControlState:
             self.memory = memory_snapshot()
             if self.memory["available_bytes"] < 1024 * 1024 * 1024:
                 raise ValueError("Start blocked: node MemAvailable is below 1 GiB")
-            if not all(self._health(url).get("reachable") for url in (self.worker_url, self.inventory_url)):
-                raise ValueError("Start blocked: wait until both workloads are healthy")
+            if not all(self._health(url).get("reachable") for url in (self.worker_url, self.inventory_url, self.orders_url)):
+                raise ValueError("Start blocked: wait until worker, inventory and orders are healthy")
             run = {"run_id": uuid.uuid4().hex, "scenario": scenario_id, "status": "starting",
                    "started_at": datetime.now(timezone.utc).isoformat(), "duration_seconds": duration,
                    "expires_at": time.time() + duration, "minimum_available_bytes": self.memory["available_bytes"]}
@@ -125,20 +84,49 @@ class ControlState:
         scenario = SCENARIOS.get(scenario_id)
         if not scenario:
             raise ValueError(f"Unknown scenario: {scenario_id}")
-        self.logger.write("WARN", "Lab incident requested", scenario=scenario_id, signal_class=scenario["class"])
-        if scenario_id == "poison-job":
-            with pymysql.connect(**self.db, connect_timeout=3, read_timeout=3, write_timeout=3, autocommit=True) as connection:
-                with connection.cursor() as cursor:
-                    cursor.execute(
-                        "INSERT INTO lab_jobs (kind, payload) VALUES (%s, %s)",
-                        ("import", '{"schema":"inventory.import.v2","body":"not-valid-base64!"}'),
-                    )
-            return {"ok": True, "scenario": scenario_id, "message": "Poison job added to the durable queue."}
-        if scenario["target"] == "worker":
-            result = self._post(self.worker_url + "/control/scenario", {"mode": scenario["mode"], "duration_seconds": duration})
-        else:
-            result = self._post(self.inventory_url + "/control/failure", {"mode": scenario["mode"], "duration_seconds": duration})
-        return {"ok": True, "scenario": scenario_id, "result": result}
+        config = {**DEFAULT_SCENARIO_CONFIG, **scenario.get("config", {})}
+        self._patch_scenario_config(config)
+        self.logger.write("WARN", "Bounded lab intervention started", run_id=self.active["run_id"], target_count=len(scenario["actions"]))
+        results = []
+        for action in scenario["actions"]:
+            target, mode = action["target"], action["mode"]
+            if target == "database":
+                with pymysql.connect(**self.db, connect_timeout=3, read_timeout=3, write_timeout=3, autocommit=True) as connection:
+                    with connection.cursor() as cursor:
+                        cursor.execute(
+                            "INSERT INTO lab_jobs (kind, payload) VALUES (%s, %s)",
+                            ("import", '{"schema":"inventory.import.v2","body":"not-valid-base64!"}'),
+                        )
+                results.append({"target": target, "status": "queued"})
+                continue
+            url, endpoint = {
+                "worker": (self.worker_url, "/control/scenario"),
+                "inventory": (self.inventory_url, "/control/failure"),
+                "orders": (self.orders_url, "/control/scenario"),
+            }[target]
+            results.append(self._post(url + endpoint, {
+                "mode": mode, "duration_seconds": duration, "settings": config,
+            }))
+        return {"ok": True, "scenario": scenario_id, "results": results}
+
+    def _patch_scenario_config(self, values: dict[str, str]) -> None:
+        """Persist the active settings in Kubernetes so configuration evidence is real."""
+
+        host = os.environ.get("KUBERNETES_SERVICE_HOST")
+        if not host:
+            return
+        port = os.environ.get("KUBERNETES_SERVICE_PORT_HTTPS", "443")
+        namespace = os.environ.get("POD_NAMESPACE", "fcapsule-lab")
+        token = open("/var/run/secrets/kubernetes.io/serviceaccount/token", encoding="utf-8").read().strip()
+        context = ssl.create_default_context(cafile="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt")
+        request = Request(
+            f"https://{host}:{port}/api/v1/namespaces/{namespace}/configmaps/lab-scenario-config",
+            data=json.dumps({"data": values}).encode("utf-8"), method="PATCH",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/merge-patch+json"},
+        )
+        with urlopen(request, timeout=5, context=context) as response:
+            if response.status >= 300:
+                raise OSError(f"Kubernetes configuration update returned {response.status}")
 
     def recover(self, reason: str = "operator") -> dict[str, Any]:
         with self.lock:
@@ -147,7 +135,8 @@ class ControlState:
     def _recover(self, reason: str) -> dict[str, Any]:
         errors: list[str] = []
         try:
-            self._post(self.inventory_url + "/control/failure", {"mode": "normal"})
+            self._patch_scenario_config(DEFAULT_SCENARIO_CONFIG)
+            self._post(self.inventory_url + "/control/failure", {"mode": "normal", "settings": DEFAULT_SCENARIO_CONFIG})
         except (HTTPError, URLError, TimeoutError, OSError) as exc:
             errors.append(f"inventory: {exc}")
         try:
@@ -160,6 +149,10 @@ class ControlState:
             self._post(self.worker_url + "/control/scenario", {"mode": "normal"})
         except (HTTPError, URLError, TimeoutError, OSError) as exc:
             errors.append(f"worker: {exc}")
+        try:
+            self._post(self.orders_url + "/control/scenario", {"mode": "normal", "settings": DEFAULT_SCENARIO_CONFIG})
+        except (HTTPError, URLError, TimeoutError, OSError) as exc:
+            errors.append(f"orders: {exc}")
         if self.active:
             self.active.update(status="recovering" if errors else "recovered", recovery_reason=reason)
             if not errors:
@@ -193,7 +186,9 @@ class ControlState:
         return {
             "worker": self._health(self.worker_url),
             "inventory": self._health(self.inventory_url),
-            "scenarios": SCENARIOS,
+            "orders": self._health(self.orders_url),
+            "scenarios": {key: {field: value for field, value in item.items() if field not in {"actions", "config", "expected_alert"}}
+                          for key, item in SCENARIOS.items()},
             "active": self.active,
             "history": self.history,
             "memory": self.memory,

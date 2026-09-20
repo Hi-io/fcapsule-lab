@@ -98,6 +98,50 @@ spec:
             summary: A worker container is in restart backoff.
             description: Kubernetes observed CrashLoopBackOff within the last two minutes. The cause is not established by this alert.
 
+        - alert: LabOrdersDependencyDocumentInvalid
+          expr: increase(orders_dependency_failures_total{namespace="fcapsule-lab",kind="contract_shape"}[1m]) > 5
+          for: 15s
+          labels:
+            severity: critical
+            service: orders-api
+            signal_class: FM
+          annotations:
+            summary: Checkout is rejecting inventory response documents.
+            description: More than five dependency responses failed checkout validation within one minute. Inspect the response evidence and runtime contracts.
+
+        - alert: LabInventoryConstraintFailures
+          expr: increase(inventory_transaction_failures_total{namespace="fcapsule-lab",kind="constraint"}[1m]) > 5
+          for: 15s
+          labels:
+            severity: critical
+            service: inventory-api
+            signal_class: FM
+          annotations:
+            summary: Inventory reservation transactions are violating a database constraint.
+            description: More than five reservation transactions were rejected by a database constraint within one minute.
+
+        - alert: LabInventoryDeadlockVictims
+          expr: increase(inventory_transaction_failures_total{namespace="fcapsule-lab",kind="deadlock"}[1m]) > 3
+          for: 15s
+          labels:
+            severity: warning
+            service: inventory-api
+            signal_class: FM
+          annotations:
+            summary: Inventory reconciliation transactions are being rolled back.
+            description: The database selected more than three inventory transactions as deadlock victims within one minute.
+
+        - alert: LabOrdersIdempotencyConflicts
+          expr: increase(orders_internal_failures_total{namespace="fcapsule-lab",kind="idempotency_conflict"}[1m]) > 5
+          for: 15s
+          labels:
+            severity: critical
+            service: orders-api
+            signal_class: FM
+          annotations:
+            summary: Checkout requests are conflicting with existing idempotency records.
+            description: More than five request conflicts were recorded within one minute. Inspect request identities and payload evidence.
+
     - name: fcapsule-lab.performance-management
       rules:
         - alert: LabWorkerCPUHigh
@@ -182,3 +226,58 @@ spec:
           annotations:
             summary: More than 15 percent of checkout requests are failing.
             description: Orders cannot complete inventory reservations within the configured retry and timeout budgets.
+
+        - alert: LabCheckoutLatencyHigh
+          expr: orders_checkout_latency_p95_seconds{namespace="fcapsule-lab"} > 0.25
+          for: 20s
+          labels:
+            severity: warning
+            service: orders-api
+            signal_class: PM
+          annotations:
+            summary: Checkout p95 latency is above 250 milliseconds.
+            description: The local checkout observation window has remained above the latency threshold for twenty seconds.
+
+        - alert: LabOrdersDependencyTransportFailures
+          expr: increase(orders_dependency_failures_total{namespace="fcapsule-lab",kind="transport"}[1m]) > 5
+          for: 15s
+          labels:
+            severity: critical
+            service: orders-api
+            signal_class: CM
+          annotations:
+            summary: Checkout cannot establish inventory dependency requests.
+            description: More than five dependency transport attempts failed within one minute. Inspect endpoint and service discovery evidence.
+
+        - alert: LabOrdersDependencyTimeouts
+          expr: increase(orders_dependency_failures_total{namespace="fcapsule-lab",kind="timeout"}[1m]) > 5
+          for: 15s
+          labels:
+            severity: critical
+            service: orders-api
+            signal_class: CM
+          annotations:
+            summary: Checkout inventory calls are exceeding their timeout.
+            description: More than five dependency calls exceeded the caller timeout within one minute.
+
+        - alert: LabOrdersDependencyAuthorizationFailures
+          expr: increase(orders_dependency_failures_total{namespace="fcapsule-lab",kind="authorization"}[1m]) > 5
+          for: 15s
+          labels:
+            severity: critical
+            service: orders-api
+            signal_class: CM
+          annotations:
+            summary: Inventory is rejecting checkout request authorization.
+            description: More than five inventory calls returned an authorization failure within one minute. Inspect both sides of the active request contract.
+
+        - alert: LabOrdersDependencySchemaRejected
+          expr: increase(orders_dependency_failures_total{namespace="fcapsule-lab",kind="contract_version"}[1m]) > 5
+          for: 15s
+          labels:
+            severity: critical
+            service: orders-api
+            signal_class: CM
+          annotations:
+            summary: Checkout is rejecting the inventory response schema version.
+            description: More than five dependency documents used a version that did not satisfy the active consumer contract.

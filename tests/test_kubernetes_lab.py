@@ -12,6 +12,7 @@ import yaml
 
 from app.common import JsonLogger
 from app.control import ControlState, SCENARIOS
+from app.scenario_catalog import DEFAULT_SCENARIO_CONFIG
 from app.mysql_inventory import InventoryState
 from app.safety import lease_seconds, memory_snapshot
 from app.worker import WorkerState, decode_job
@@ -21,9 +22,15 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class KubernetesLabTests(unittest.TestCase):
-    def test_six_different_execution_contracts(self):
-        self.assertEqual(set(SCENARIOS), {"memory-leak", "poison-job", "cpu-saturation", "mysql-connections", "lock-contention", "schema-drift"})
-        self.assertEqual(sum(item["class"] == "FM" for item in SCENARIOS.values()), 2)
+    def test_fifteen_balanced_execution_contracts(self):
+        self.assertEqual(len(SCENARIOS), 15)
+        self.assertEqual(
+            {group: sum(item["evidence_group"] == group for item in SCENARIOS.values())
+             for group in ("logs", "metrics", "configuration")},
+            {"logs": 5, "metrics": 5, "configuration": 5},
+        )
+        self.assertTrue(all(item["expected_alert"].startswith("Lab") for item in SCENARIOS.values()))
+        self.assertEqual(DEFAULT_SCENARIO_CONFIG["INVENTORY_QUERY_REVISION"], "v1")
 
     def test_real_decoder_accepts_valid_document_and_raises_on_invalid_encoding(self):
         value = {"sku": "example", "quantity": 4}
@@ -97,13 +104,13 @@ class KubernetesLabTests(unittest.TestCase):
 
     def test_schema_drift_executes_incompatible_query_and_records_server_code(self):
         state = InventoryState()
-        state.failure_mode = "schema-drift"
+        state.query_revision = "v2"
         state.logger = Mock()
         connection = MagicMock()
         cursor = connection.__enter__.return_value.cursor.return_value.__enter__.return_value
         cursor.execute.side_effect = [None, pymysql.err.OperationalError(1054, "Unknown column 'reserved_quantity'")]
         state.connect = Mock(return_value=connection)
-        status, _ = state.reserve("order-1")
+        status, _ = state.reserve("order-1", "checkout-key-v1")
         self.assertEqual(status, 503)
         self.assertEqual(state.db_failures["query"], 1)
         self.assertIn("reserved_quantity", cursor.execute.call_args.args[0])
