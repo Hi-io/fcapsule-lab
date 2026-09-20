@@ -113,6 +113,19 @@ The local promtool check validates all eight rules and tests OOM during restart
 backoff, a completed OOM restart, stale OOM state, and non-OOM crashes. It does not
 start a cluster pod or modify Prometheus data.
 
+The [live validation record](docs/LIVE_VALIDATION.md) separates original failures,
+product corrections and follow-up checks. To compare a changed expression against
+the same historical Prometheus samples without injecting another fault:
+
+```bash
+python3 tools/replay_rule.py --alert LabWorkerOOMKilled \
+  --time 2026-09-20T17:18:30Z --reference b8cb1c9 \
+  --out artifacts/oom-rule-replay.json
+```
+
+This needs the original samples to remain available in Prometheus. It evaluates
+expressions at a timestamp, not alert pending duration or a new live firing.
+
 To stop ongoing traffic after testing:
 
 ```bash
