@@ -87,7 +87,9 @@ class OrdersState:
                 kind = "contract_version" if payload.get("schema") and payload.get("schema") != self.expected_schema else "contract_shape"
                 self._dependency_failure(kind)
                 self.logger.write("ERROR", "Inventory response violated checkout contract", order_id=order_id,
-                                  expected_schema=self.expected_schema, observed_fields=sorted(payload))
+                                  upstream_status=int(status), expected_schema=self.expected_schema,
+                                  observed_schema=payload.get("schema", "unspecified"), observed_fields=sorted(payload),
+                                  consumer_decision="reject_as_bad_gateway")
                 return HTTPStatus.BAD_GATEWAY
             return status
         except HTTPError as exc:
@@ -149,7 +151,7 @@ class OrdersState:
                     order_id=order_id,
                     attempt=attempt,
                     max_attempts=self.max_retries,
-                    inventory_status=int(status),
+                    attempt_status=int(status),
                     dependency="inventory-api", timeout_seconds=self.timeout,
                 )
                 time.sleep(0.006 * attempt)

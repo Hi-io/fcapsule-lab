@@ -14,6 +14,7 @@ from app.common import JsonLogger
 from app.control import ControlState, SCENARIOS
 from app.scenario_catalog import DEFAULT_SCENARIO_CONFIG
 from app.mysql_inventory import InventoryState
+from app.orders import OrdersState
 from app.safety import lease_seconds, memory_snapshot
 from app.worker import WorkerState, decode_job
 
@@ -116,6 +117,22 @@ class KubernetesLabTests(unittest.TestCase):
         self.assertIn("reserved_quantity", cursor.execute.call_args.args[0])
         self.assertEqual(state.logger.write.call_args.kwargs["mysql_error_code"], 1054)
         self.assertEqual(state.active_transactions, 0)
+
+    def test_contract_rejection_preserves_upstream_status_and_consumer_decision(self):
+        response = MagicMock(status=200)
+        response.__enter__.return_value = response
+        response.read.return_value = json.dumps({"result": "accepted", "reference": "order-1"}).encode()
+        with patch.dict("os.environ", {"INVENTORY_URL": "http://inventory-api:8081"}), patch(
+            "app.orders.urlopen", return_value=response
+        ):
+            state = OrdersState()
+            state.logger = Mock()
+            status = state._attempt_inventory("order-1")
+        self.assertEqual(status, 502)
+        event = state.logger.write.call_args.kwargs
+        self.assertEqual(event["upstream_status"], 200)
+        self.assertEqual(event["consumer_decision"], "reject_as_bad_gateway")
+        self.assertEqual(event["observed_fields"], ["reference", "result"])
 
     def test_stock_reconciliation_holds_real_update_then_rolls_back(self):
         state = InventoryState()
