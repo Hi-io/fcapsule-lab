@@ -88,7 +88,7 @@ class InventoryState:
         )
 
     def _connection_storm(self) -> None:
-        target = max(4, self.configured_max_connections - 4)
+        target = max(4, self.configured_max_connections - 1)
         while not self._storm_stop.is_set() and len(self._held_connections) < target:
             try:
                 connection = self.connect()
@@ -187,13 +187,28 @@ class InventoryState:
                 with self._lock:
                     self.threads_connected = connected
                     self.server_max_connections = maximum
-                self.logger.write(
-                    "INFO",
-                    "MySQL capacity sample",
-                    threads_connected=connected,
-                    max_connections=maximum,
-                    utilization=round(connected / max(1, maximum), 3),
-                )
+                    held = len(self._held_connections)
+                    mode = self.failure_mode
+                utilization = round(connected / max(1, maximum), 3)
+                if mode == "connection-saturation" and held >= maximum - 4:
+                    self.logger.write(
+                        "ERROR",
+                        "Connection pool retention is exhausting MySQL capacity",
+                        pool_owner="inventory-runtime",
+                        held_connections=held,
+                        threads_connected=connected,
+                        max_connections=maximum,
+                        utilization=utilization,
+                        expected_effect="new inventory connections may be rejected",
+                    )
+                else:
+                    self.logger.write(
+                        "INFO",
+                        "MySQL capacity sample",
+                        threads_connected=connected,
+                        max_connections=maximum,
+                        utilization=utilization,
+                    )
             except pymysql.MySQLError as exc:
                 self.logger.write("WARN", "Unable to sample MySQL capacity", error=str(exc)[:180])
             time.sleep(5)

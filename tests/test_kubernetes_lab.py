@@ -30,6 +30,13 @@ class KubernetesLabTests(unittest.TestCase):
         self.assertIn("LabWorkerCPUHigh", observability)
         self.assertIn("LabMySQLConnectionsSaturated", observability)
 
+    def test_mysql_saturation_leaves_persistent_diagnostic_evidence(self):
+        inventory_source = (ROOT / "app" / "mysql_inventory.py").read_text(encoding="utf-8")
+
+        self.assertIn("configured_max_connections - 1", inventory_source)
+        self.assertIn("Connection pool retention is exhausting MySQL capacity", inventory_source)
+        self.assertIn('pool_owner="inventory-runtime"', inventory_source)
+
 
 if __name__ == "__main__":
     unittest.main()
