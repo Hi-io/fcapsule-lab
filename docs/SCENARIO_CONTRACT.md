@@ -44,8 +44,9 @@ exact label. Its application Pods keep `fcapsule.io/metrics=true` and remain hea
 
 After the prior `up` sample ages out, `LabApplicationMetricsDiscoveryMissing` fires.
 Its `service` label remains the logical `orders-api` workload; `target_service`
-identifies the Kubernetes `lab-app-metrics` Service whose selector is relevant to
-the investigation.
+identifies the shared Kubernetes `lab-app-metrics` Service whose selector is
+relevant to the investigation, and `target_workload` identifies the affected
+workload without pretending that the shared Service selects only one application.
 The expected investigation path is bounded and independently observable:
 
 | Evidence | What it establishes |
