@@ -17,6 +17,12 @@ the investigator must work from observed workload evidence.
 6. Compare the unedited result with `SCENARIO_CONTRACT.md` outside FCAPSule.
 7. Recover the workload and allow alert windows to clear before the next run.
 
+The optional `metrics-service-label-drift` control is not part of the scored fifteen
+scenario suite. It is a live integration check for the Prometheus discovery adapter:
+the alert is expected to lead to a selector-versus-Service-label finding while the
+workloads stay healthy. It verifies an FCAPSule capability without supplying an
+expected cause to the investigator.
+
 Metrics preserve namespace/pod identity. OpenSearch receives stdout/stderr through
 the cluster's existing collector. MySQL exposes its own metrics through the official
 exporter; the connection pressure alert does not depend on a possibly stale gauge

@@ -12,7 +12,7 @@ import yaml
 
 from app.common import JsonLogger
 from app.control import ControlState, SCENARIOS
-from app.scenario_catalog import DEFAULT_SCENARIO_CONFIG
+from app.scenario_catalog import DEFAULT_SCENARIO_CONFIG, DISCOVERY_SCENARIOS
 from app.mysql_inventory import InventoryState
 from app.orders import OrdersState
 from app.safety import lease_seconds, memory_snapshot
@@ -32,6 +32,33 @@ class KubernetesLabTests(unittest.TestCase):
         )
         self.assertTrue(all(item["expected_alert"].startswith("Lab") for item in SCENARIOS.values()))
         self.assertEqual(DEFAULT_SCENARIO_CONFIG["INVENTORY_QUERY_REVISION"], "v1")
+
+    def test_discovery_case_is_separate_from_the_diagnostic_benchmark(self):
+        self.assertEqual(set(DISCOVERY_SCENARIOS), {"metrics-service-label-drift"})
+        self.assertEqual(len(SCENARIOS), 15)
+        self.assertEqual(DISCOVERY_SCENARIOS["metrics-service-label-drift"]["expected_alert"], "LabApplicationMetricsDiscoveryMissing")
+
+    def test_discovery_run_changes_only_the_service_selector_and_recovery_restores_it(self):
+        state = ControlState()
+        state.active = {"run_id": "discovery-run"}
+        state.logger = Mock()
+        state._patch_scenario_config = Mock()
+        state._patch_metrics_service_label = Mock()
+        state._post = Mock(return_value={})
+
+        result = state._start("metrics-service-label-drift", 120)
+
+        self.assertEqual(result["results"], [{"target": "metrics-service", "status": "label updated"}])
+        state._patch_scenario_config.assert_not_called()
+        state._patch_metrics_service_label.assert_called_once_with("ture")
+        state._post.assert_not_called()
+
+        state._patch_metrics_service_label.reset_mock()
+        with patch("app.control.pymysql.connect"):
+            recovery = state._recover("test")
+        self.assertTrue(recovery["ok"])
+        state._patch_scenario_config.assert_called_once_with(DEFAULT_SCENARIO_CONFIG)
+        state._patch_metrics_service_label.assert_called_once_with("true")
 
     def test_real_decoder_accepts_valid_document_and_raises_on_invalid_encoding(self):
         value = {"sku": "example", "quantity": 4}
@@ -159,6 +186,15 @@ class KubernetesLabTests(unittest.TestCase):
         self.assertIn("kube_pod_container_status_last_terminated_exitcode", memory_exit["expr"])
         self.assertIn("lab_worker_allocated_bytes", memory_exit["expr"])
         self.assertTrue(all(rule["for"] for rule in rules))
+
+    def test_discovery_rule_and_service_monitor_use_the_real_service_label(self):
+        objects = list(yaml.safe_load_all((ROOT / "deploy/kubernetes/observability.yaml").read_text()))
+        monitor = next(item for item in objects if item["kind"] == "ServiceMonitor" and item["metadata"]["name"] == "fcapsule-lab-applications")
+        self.assertEqual(monitor["spec"]["selector"]["matchLabels"], {"fcapsule.io/app-metrics": "true"})
+        rules = [rule for obj in objects if obj["kind"] == "PrometheusRule" for group in obj["spec"]["groups"] for rule in group["rules"]]
+        discovery = next(rule for rule in rules if rule["alert"] == "LabApplicationMetricsDiscoveryMissing")
+        self.assertIn("absent_over_time", discovery["expr"])
+        self.assertIn('service="orders-api"', discovery["expr"])
 
 
 if __name__ == "__main__":

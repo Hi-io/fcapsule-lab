@@ -118,3 +118,15 @@ SCENARIOS = {
         "expected_alert": "LabOrdersDependencySchemaRejected",
     },
 }
+
+
+# This is intentionally separate from the fifteen-case diagnostic benchmark.
+# It exercises the monitoring-discovery path rather than a workload diagnosis.
+DISCOVERY_SCENARIOS = {
+    "metrics-service-label-drift": {
+        "title": "Metrics Service label drift", "class": "Discovery", "evidence_group": "discovery",
+        "summary": "Metrics are no longer discovered even though the application pods remain healthy.",
+        "service_metrics_label": "ture",
+        "expected_alert": "LabApplicationMetricsDiscoveryMissing",
+    },
+}

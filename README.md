@@ -82,6 +82,13 @@ The complete matrix and independently observable outcomes are frozen in the
 [scenario contract](docs/SCENARIO_CONTRACT.md). Configuration scenarios update a
 dedicated ConfigMap through narrow namespace RBAC, then restore its baseline values.
 
+The Lab also includes one separate operational probe, **Metrics Service label drift**.
+It changes the actual `Service` label selected by the application `ServiceMonitor`,
+while application Pods remain healthy. The resulting discovery alert is useful for
+testing FCAPSule's Prometheus target investigation, but is deliberately excluded from
+the fifteen-case model benchmark: losing a metrics target is an observability problem,
+not a workload root-cause label.
+
 Alerts state symptoms, not injected causes. Application telemetry contains ordinary
 operation names, SQL codes and identities, not scenario labels or expected answers.
 The independent [scenario contract](docs/SCENARIO_CONTRACT.md) defines what the evaluator
@@ -107,7 +114,7 @@ The review command saves historical Prometheus series and summarizes real SQL er
 codes, repeated import deliveries and logged export-buffer sizes. It does not score
 model prose or modify the saved answers. Log files are bounded tails; their line
 counts must not be presented as the total indexed volume.
-The local promtool check validates all seventeen rules and tests OOM during restart
+The local promtool check validates the rule set and tests OOM during restart
 backoff, a completed OOM restart, stale OOM state, and non-OOM crashes. It does not
 start a cluster pod or modify Prometheus data.
 
@@ -141,6 +148,13 @@ The manifests create:
 - `ServiceMonitor/fcapsule-lab-applications` with a 10-second scrape interval;
 - `ServiceMonitor/fcapsule-lab-mysql` for the official MySQL exporter;
 - `PrometheusRule/fcapsule-lab-incidents` containing FM and PM rules.
+
+They also include `LabApplicationMetricsDiscoveryMissing`, which fires when the
+`orders-api` application target has been absent for more than one minute. The
+discovery probe intentionally introduces a typo in the **Service** label selected by
+the `ServiceMonitor`; it does not change Pod labels, process configuration, or workload
+health. This gives FCAPSule a concrete path to compare the monitor selector, Service
+metadata, target state, and still-healthy Pods before recommending a monitoring fix.
 
 Relabeling preserves `namespace`, `pod`, and `service` on application metrics. This is
 important because FCAPSule uses those labels to resolve an alert to a Kubernetes

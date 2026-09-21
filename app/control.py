@@ -18,7 +18,7 @@ from urllib.request import Request, urlopen
 import pymysql
 
 from app.common import JsonLogger, QuietHandler, serve
-from app.scenario_catalog import DEFAULT_SCENARIO_CONFIG, SCENARIOS
+from app.scenario_catalog import DEFAULT_SCENARIO_CONFIG, DISCOVERY_SCENARIOS, SCENARIOS
 from app.safety import lease_seconds, memory_snapshot
 
 
@@ -81,13 +81,25 @@ class ControlState:
             return {**result, "run": dict(run)}
 
     def _start(self, scenario_id: str, duration: int) -> dict[str, Any]:
-        scenario = SCENARIOS.get(scenario_id)
+        scenario = {**SCENARIOS, **DISCOVERY_SCENARIOS}.get(scenario_id)
         if not scenario:
             raise ValueError(f"Unknown scenario: {scenario_id}")
-        config = {**DEFAULT_SCENARIO_CONFIG, **scenario.get("config", {})}
-        self._patch_scenario_config(config)
-        self.logger.write("WARN", "Bounded lab intervention started", run_id=self.active["run_id"], target_count=len(scenario["actions"]))
+        if "config" in scenario:
+            config = {**DEFAULT_SCENARIO_CONFIG, **scenario["config"]}
+            self._patch_scenario_config(config)
+        target_count = len(scenario.get("actions", [])) + int("service_metrics_label" in scenario)
+        self.logger.write(
+            "WARN", "Bounded lab intervention started", run_id=self.active["run_id"], target_count=target_count,
+        )
         results = []
+        if scenario.get("service_metrics_label"):
+            self._patch_metrics_service_label(str(scenario["service_metrics_label"]))
+            self.logger.write(
+                "WARN", "Metrics discovery intervention applied", run_id=self.active["run_id"],
+                service="lab-app-metrics",
+            )
+            results.append({"target": "metrics-service", "status": "label updated"})
+            return {"ok": True, "scenario": scenario_id, "results": results}
         for action in scenario["actions"]:
             target, mode = action["target"], action["mode"]
             if target == "database":
@@ -109,8 +121,8 @@ class ControlState:
             }))
         return {"ok": True, "scenario": scenario_id, "results": results}
 
-    def _patch_scenario_config(self, values: dict[str, str]) -> None:
-        """Persist the active settings in Kubernetes so configuration evidence is real."""
+    def _kubernetes_patch(self, resource: str, name: str, payload: dict[str, Any]) -> None:
+        """Patch only the two bounded Lab resources managed by this control surface."""
 
         host = os.environ.get("KUBERNETES_SERVICE_HOST")
         if not host:
@@ -120,13 +132,25 @@ class ControlState:
         token = open("/var/run/secrets/kubernetes.io/serviceaccount/token", encoding="utf-8").read().strip()
         context = ssl.create_default_context(cafile="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt")
         request = Request(
-            f"https://{host}:{port}/api/v1/namespaces/{namespace}/configmaps/lab-scenario-config",
-            data=json.dumps({"data": values}).encode("utf-8"), method="PATCH",
+            f"https://{host}:{port}/api/v1/namespaces/{namespace}/{resource}/{name}",
+            data=json.dumps(payload).encode("utf-8"), method="PATCH",
             headers={"Authorization": f"Bearer {token}", "Content-Type": "application/merge-patch+json"},
         )
         with urlopen(request, timeout=5, context=context) as response:
             if response.status >= 300:
                 raise OSError(f"Kubernetes configuration update returned {response.status}")
+
+    def _patch_scenario_config(self, values: dict[str, str]) -> None:
+        """Persist active settings in Kubernetes so configuration evidence is real."""
+
+        self._kubernetes_patch("configmaps", "lab-scenario-config", {"data": values})
+
+    def _patch_metrics_service_label(self, value: str) -> None:
+        """Alter the ServiceMonitor's actual Service selector target for a bounded run."""
+
+        self._kubernetes_patch(
+            "services", "lab-app-metrics", {"metadata": {"labels": {"fcapsule.io/app-metrics": value}}},
+        )
 
     def recover(self, reason: str = "operator") -> dict[str, Any]:
         with self.lock:
@@ -136,6 +160,10 @@ class ControlState:
         errors: list[str] = []
         try:
             self._patch_scenario_config(DEFAULT_SCENARIO_CONFIG)
+            self._patch_metrics_service_label("true")
+        except (HTTPError, URLError, TimeoutError, OSError) as exc:
+            errors.append(f"kubernetes: {exc}")
+        try:
             self._post(self.inventory_url + "/control/failure", {"mode": "normal", "settings": DEFAULT_SCENARIO_CONFIG})
         except (HTTPError, URLError, TimeoutError, OSError) as exc:
             errors.append(f"inventory: {exc}")
@@ -187,8 +215,11 @@ class ControlState:
             "worker": self._health(self.worker_url),
             "inventory": self._health(self.inventory_url),
             "orders": self._health(self.orders_url),
-            "scenarios": {key: {field: value for field, value in item.items() if field not in {"actions", "config", "expected_alert"}}
-                          for key, item in SCENARIOS.items()},
+            "scenarios": {
+                key: {field: value for field, value in item.items()
+                      if field not in {"actions", "config", "expected_alert", "service_metrics_label"}}
+                for key, item in {**SCENARIOS, **DISCOVERY_SCENARIOS}.items()
+            },
             "active": self.active,
             "history": self.history,
             "memory": self.memory,

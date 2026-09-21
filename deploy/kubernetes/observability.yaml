@@ -293,3 +293,16 @@ spec:
           annotations:
             summary: Checkout is rejecting the inventory response schema version.
             description: More than five dependency documents used a version that did not satisfy the active consumer contract.
+
+    - name: fcapsule-lab.monitoring-discovery
+      rules:
+        - alert: LabApplicationMetricsDiscoveryMissing
+          expr: absent_over_time(up{namespace="fcapsule-lab",service="orders-api"}[1m])
+          for: 30s
+          labels:
+            severity: warning
+            service: orders-api
+            signal_class: discovery
+          annotations:
+            summary: Application metrics are no longer being discovered.
+            description: The expected orders metrics target has been absent for more than one minute. Inspect target discovery and monitoring selectors before assuming the workload failed.

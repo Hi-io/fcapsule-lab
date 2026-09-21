@@ -34,6 +34,31 @@ RBAC and apply the same values to the process control surface. FCAPSule therefor
 the actual active Kubernetes object, not an evaluator note or a manufactured answer.
 Recovery restores the baseline ConfigMap and process settings.
 
+## Operational Discovery Probe
+
+`metrics-service-label-drift` is intentionally outside the fifteen-case diagnostic
+matrix and model score. It is an observability capability probe: the controller changes
+`Service/lab-app-metrics` from `fcapsule.io/app-metrics=true` to the typo `ture` for a
+bounded lease. The application `ServiceMonitor` selects Services, not Pods, using that
+exact label. Its application Pods keep `fcapsule.io/metrics=true` and remain healthy.
+
+After the prior `up` sample ages out, `LabApplicationMetricsDiscoveryMissing` fires.
+The expected investigation path is bounded and independently observable:
+
+| Evidence | What it establishes |
+|---|---|
+| Alert rule | The symptom is missing application metrics, not an asserted application failure. |
+| Prometheus target state | The orders target is absent or no longer selected. |
+| `ServiceMonitor` selector | Discovery requires `fcapsule.io/app-metrics=true` on a Service. |
+| `Service/lab-app-metrics` metadata | The actual Service label is `ture`, which does not satisfy the selector. |
+| Pod health and labels | Workload Pods remain ready and retain their unrelated metrics label. |
+| Recovery | Restoring the Service label re-enables target discovery. |
+
+An investigation may say that the label mismatch is observed and that it explains the
+missing target. It must not infer a workload outage only because observability coverage
+was lost. Allow at least 90 seconds for the one-minute absence window and 30-second
+alert hold before judging the result.
+
 ## Execution Protocol
 
 1. Verify real node `MemAvailable`; do not infer headroom from allocatable memory.
