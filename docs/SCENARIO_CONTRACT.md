@@ -43,6 +43,9 @@ bounded lease. The application `ServiceMonitor` selects Services, not Pods, usin
 exact label. Its application Pods keep `fcapsule.io/metrics=true` and remain healthy.
 
 After the prior `up` sample ages out, `LabApplicationMetricsDiscoveryMissing` fires.
+Its `service` label remains the logical `orders-api` workload; `target_service`
+identifies the Kubernetes `lab-app-metrics` Service whose selector is relevant to
+the investigation.
 The expected investigation path is bounded and independently observable:
 
 | Evidence | What it establishes |

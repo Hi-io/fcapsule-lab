@@ -302,6 +302,7 @@ spec:
           labels:
             severity: warning
             service: orders-api
+            target_service: lab-app-metrics
             signal_class: discovery
           annotations:
             summary: Application metrics are no longer being discovered.
