@@ -1,6 +1,7 @@
 import unittest
 
 from unittest.mock import patch
+from types import SimpleNamespace
 
 from tools.run_scenarios import alert_identity, expected_alerts, fresh_expected_alerts, request_investigation, wait_for_expected_clear
 
@@ -59,6 +60,13 @@ class ScenarioRunnerAlertTests(unittest.TestCase):
             wait_for_expected_clear(args, "LabWorkerCrashLooping")
 
         sleep.assert_called_once_with(5)
+
+    def test_recovery_window_allows_kubernetes_restart_backoff(self):
+        args = SimpleNamespace(lab="http://lab")
+        with patch("tools.run_scenarios.healthy", return_value=False), patch("tools.run_scenarios.time.monotonic", side_effect=[0, 0, 480]), patch("tools.run_scenarios.time.sleep"):
+            with self.assertRaisesRegex(RuntimeError, "Previous workload did not recover"):
+                from tools.run_scenarios import settle
+                settle(args)
 
 
 if __name__ == "__main__":

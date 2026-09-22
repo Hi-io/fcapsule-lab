@@ -79,7 +79,10 @@ def healthy(lab):
 
 
 def settle(args):
-    deadline = time.monotonic() + getattr(args, "settle_timeout", 180)
+    # Kubernetes CrashLoopBackOff recovery can legitimately take roughly five
+    # minutes after a poison workload has been cleared. This is independent of
+    # Prometheus alert resolution, which is handled per scenario below.
+    deadline = time.monotonic() + getattr(args, "settle_timeout", 480)
     while time.monotonic() < deadline:
         # Prometheus may legitimately retain an unrelated alert while the workload
         # itself has recovered. Scenario-specific freshness is checked separately.
