@@ -64,6 +64,15 @@ def fresh_expected_alerts(alerts, expected, baseline):
             if alert_identity(alert) not in baseline_identities]
 
 
+def request_investigation(fcapsule, episode_id, requested):
+    """Start one fresh bounded assessment for newly captured recurrence evidence."""
+    url = fcapsule.rstrip("/") + "/api/episodes/" + episode_id + "/investigation"
+    if episode_id not in requested:
+        requested.add(episode_id)
+        return request(url, {})
+    return request(url)
+
+
 def healthy(lab):
     state = request(lab + "/api/status")
     return not state["active"] and all(state[key].get("reachable") for key in ("worker", "inventory"))
@@ -150,6 +159,7 @@ def run_case(args, scenario, folder):
     log_query = 'sum(increase({__name__=~"(orders|inventory|traffic_generator|lab_worker)_log_events_total",namespace="fcapsule-lab"}[' + str(args.duration + args.baseline) + 's]))'
     record["emitted_log_estimate"] = request(args.prometheus + "/api/v1/query?" + urlencode({"query": log_query}))
     deadline = time.monotonic() + 240
+    requested_investigations = set()
     while time.monotonic() < deadline:
         overview = request(args.fcapsule + "/api/state")["overview"]
         episodes = [episode for episode in overview["episodes"] if any(
@@ -159,7 +169,7 @@ def run_case(args, scenario, folder):
             for signal in episode["signals"])]
         results = []
         for episode in episodes:
-            result = request(args.fcapsule + "/api/episodes/" + episode["episode_id"] + "/investigation")
+            result = request_investigation(args.fcapsule, episode["episode_id"], requested_investigations)
             save(root / (episode["episode_id"] + ".json"), result)
             results.append({"episode_id": episode["episode_id"], "status": result["status"], "attempt": result.get("attempt"), "usage": result.get("usage")})
         record["fcapsule"] = results

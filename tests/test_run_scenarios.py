@@ -1,6 +1,8 @@
 import unittest
 
-from tools.run_scenarios import alert_identity, expected_alerts, fresh_expected_alerts
+from unittest.mock import patch
+
+from tools.run_scenarios import alert_identity, expected_alerts, fresh_expected_alerts, request_investigation
 
 
 def alert(name, *, active_at="2026-09-23T00:00:00Z", pod="orders-1"):
@@ -37,6 +39,16 @@ class ScenarioRunnerAlertTests(unittest.TestCase):
             fresh_expected_alerts([restarted], "LabCheckoutLatencyHigh", baseline),
             [restarted],
         )
+
+    def test_recurrence_starts_one_fresh_investigation_then_reads_the_same_run(self):
+        requested = set()
+        with patch("tools.run_scenarios.request", side_effect=[{"status": "queued"}, {"status": "ready"}]) as call:
+            queued = request_investigation("http://fcapsule", "episode-1", requested)
+            ready = request_investigation("http://fcapsule", "episode-1", requested)
+
+        self.assertEqual((queued["status"], ready["status"]), ("queued", "ready"))
+        self.assertEqual(call.call_args_list[0].args, ("http://fcapsule/api/episodes/episode-1/investigation", {}))
+        self.assertEqual(call.call_args_list[1].args, ("http://fcapsule/api/episodes/episode-1/investigation",))
 
 
 if __name__ == "__main__":
