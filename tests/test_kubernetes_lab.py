@@ -183,7 +183,9 @@ class KubernetesLabTests(unittest.TestCase):
         connections = next(rule for rule in rules if rule["alert"] == "LabMySQLConnectionsSaturated")
         self.assertIn("mysql_global_status_threads_connected", connections["expr"])
         memory_exit = next(rule for rule in rules if rule["alert"] == "LabWorkerOOMKilled")
-        self.assertIn("kube_pod_container_status_last_terminated_exitcode", memory_exit["expr"])
+        self.assertIn("kube_pod_container_status_last_terminated_reason", memory_exit["expr"])
+        self.assertIn('reason="OOMKilled"', memory_exit["expr"])
+        self.assertNotIn("restarts_total", memory_exit["expr"])
         self.assertIn("lab_worker_allocated_bytes", memory_exit["expr"])
         self.assertTrue(all(rule["for"] for rule in rules))
 

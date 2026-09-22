@@ -7,6 +7,7 @@ import subprocess
 import sys
 import time
 from datetime import datetime, timezone
+from urllib.error import HTTPError, URLError
 from pathlib import Path
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -28,8 +29,19 @@ def now():
 def request(url, payload=None):
     req = Request(url, data=json.dumps(payload).encode() if payload is not None else None,
                   headers={"Content-Type": "application/json"})
-    with urlopen(req, timeout=20) as response:
-        return json.loads(response.read())
+    # Status reads are idempotent. A short retry keeps one temporary proxy or
+    # API-server reset from invalidating a complete evaluation case. Mutations
+    # deliberately remain single-shot to avoid duplicating a fault injection.
+    attempts = 3 if payload is None else 1
+    for attempt in range(attempts):
+        try:
+            with urlopen(req, timeout=20) as response:
+                return json.loads(response.read())
+        except (URLError, OSError, TimeoutError) as error:
+            if attempt + 1 == attempts:
+                raise error
+            time.sleep(attempt + 1)
+    raise RuntimeError("Unreachable request retry state")
 
 
 def save(path, value):
@@ -102,6 +114,17 @@ def wait_for_expected_clear(args, expected):
     raise RuntimeError(f"Expected alert {expected} did not resolve before its next evaluation")
 
 
+def wait_for_lab_quiet(args):
+    """Do not inject a new benchmark fault while a prior Lab alert is firing."""
+    deadline = time.monotonic() + getattr(args, "lab_quiet_timeout", 420)
+    while time.monotonic() < deadline:
+        if not firing(args.prometheus):
+            return
+        time.sleep(5)
+    names = sorted({item.get("labels", {}).get("alertname", "unknown") for item in firing(args.prometheus)})
+    raise RuntimeError("Prior Lab alerts did not resolve before the next evaluation: " + ", ".join(names))
+
+
 def collect_workload_logs(root, start):
     counts = {}
     for name in ("orders-api", "inventory-api", "lab-worker", "traffic-generator", "mysql", "mysql-exporter"):
@@ -121,6 +144,7 @@ def run_case(args, scenario, folder):
     root.mkdir()
     print(f"{now()} {scenario}: healthy baseline ({args.baseline}s)", flush=True)
     settle(args)
+    wait_for_lab_quiet(args)
     wait_for_expected_clear(args, EXPECTED[scenario])
     baseline = now()
     time.sleep(args.baseline)
@@ -209,6 +233,7 @@ def main():
     parser.add_argument("--baseline", type=int, default=120)
     parser.add_argument("--post-alert-hold", type=int, default=30)
     parser.add_argument("--minimum-log-lines", type=int, default=1000)
+    parser.add_argument("--lab-quiet-timeout", type=int, default=420)
     parser.add_argument("--out", type=Path, default=Path("artifacts"))
     args = parser.parse_args()
     folder = args.out / datetime.now(timezone.utc).strftime("validation-%Y%m%dT%H%M%SZ")

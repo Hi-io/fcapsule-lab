@@ -3,7 +3,7 @@ import unittest
 from unittest.mock import patch
 from types import SimpleNamespace
 
-from tools.run_scenarios import alert_identity, expected_alerts, fresh_expected_alerts, request_investigation, wait_for_expected_clear
+from tools.run_scenarios import alert_identity, expected_alerts, fresh_expected_alerts, request_investigation, wait_for_expected_clear, wait_for_lab_quiet
 
 
 def alert(name, *, active_at="2026-09-23T00:00:00Z", pod="orders-1"):
@@ -67,6 +67,13 @@ class ScenarioRunnerAlertTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "Previous workload did not recover"):
                 from tools.run_scenarios import settle
                 settle(args)
+
+    def test_waits_until_all_lab_alerts_are_quiet_between_cases(self):
+        args = SimpleNamespace(prometheus="http://prometheus", lab_quiet_timeout=10)
+        with patch("tools.run_scenarios.firing", side_effect=[[alert("LabWorkerCPUHigh")], []]), patch("tools.run_scenarios.time.sleep") as sleep:
+            wait_for_lab_quiet(args)
+
+        sleep.assert_called_once_with(5)
 
 
 if __name__ == "__main__":

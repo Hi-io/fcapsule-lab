@@ -137,7 +137,7 @@ def main() -> None:
     parser.add_argument("--models", nargs="+", default=["deepseek-v4-flash", "deepseek-v4-pro"])
     parser.add_argument("--scenario", choices=[*SCENARIOS, "all"], default="all")
     parser.add_argument("--repetitions", type=int, default=1)
-    parser.add_argument("--duration", type=int, default=120)
+    parser.add_argument("--duration", type=int, default=180)
     parser.add_argument("--baseline", type=int, default=45)
     parser.add_argument("--post-alert-hold", type=int, default=30)
     parser.add_argument("--minimum-log-lines", type=int, default=1000)
