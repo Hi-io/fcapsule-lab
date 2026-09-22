@@ -59,6 +59,16 @@ class ScenarioRunnerAlertTests(unittest.TestCase):
         self.assertEqual(call.call_args_list[0].args, ("http://fcapsule/api/episodes/episode-1/investigation", {}))
         self.assertEqual(call.call_args_list[1].args, ("http://fcapsule/api/episodes/episode-1/investigation",))
 
+    def test_investigation_can_focus_a_new_signal_inside_a_correlated_episode(self):
+        requested = set()
+        with patch("tools.run_scenarios.request", return_value={"status": "queued"}) as call:
+            request_investigation("http://fcapsule", "episode-1", requested, "incident-new")
+
+        self.assertEqual(
+            call.call_args.args,
+            ("http://fcapsule/api/episodes/episode-1/investigation", {"incident_id": "incident-new"}),
+        )
+
     def test_start_confirms_an_active_run_after_a_connection_reset(self):
         active = {"scenario": "signing-key-skew", "run_id": "run-1", "status": "running"}
         with patch("tools.run_scenarios.request", side_effect=[ConnectionResetError("reset"), {"active": active}]):

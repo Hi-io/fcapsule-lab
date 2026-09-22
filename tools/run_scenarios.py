@@ -76,12 +76,13 @@ def fresh_expected_alerts(alerts, expected, baseline):
             if alert_identity(alert) not in baseline_identities]
 
 
-def request_investigation(fcapsule, episode_id, requested):
+def request_investigation(fcapsule, episode_id, requested, incident_id=None):
     """Start one fresh bounded assessment for newly captured recurrence evidence."""
     url = fcapsule.rstrip("/") + "/api/episodes/" + episode_id + "/investigation"
-    if episode_id not in requested:
-        requested.add(episode_id)
-        return request(url, {})
+    request_key = (episode_id, incident_id or "")
+    if request_key not in requested:
+        requested.add(request_key)
+        return request(url, {"incident_id": incident_id} if incident_id else {})
     return request(url)
 
 
@@ -226,14 +227,24 @@ def run_case(args, scenario, folder):
     requested_investigations = set()
     while time.monotonic() < deadline:
         overview = request(args.fcapsule + "/api/state")["overview"]
-        episodes = [episode for episode in overview["episodes"] if any(
-            signal.get("created_at", "") >= start
-            and "fcapsule-lab" in signal.get("app_id", "")
-            and EXPECTED[scenario].casefold() in json.dumps(signal).casefold()
-            for signal in episode["signals"])]
+        episodes = []
+        for episode in overview["episodes"]:
+            matches = [
+                signal for signal in episode["signals"]
+                if signal.get("created_at", "") >= start
+                and "fcapsule-lab" in signal.get("app_id", "")
+                and EXPECTED[scenario].casefold() in json.dumps(signal).casefold()
+            ]
+            if matches:
+                episodes.append((episode, max(matches, key=lambda signal: signal.get("created_at", ""))))
         results = []
-        for episode in episodes:
-            result = request_investigation(args.fcapsule, episode["episode_id"], requested_investigations)
+        for episode, signal in episodes:
+            result = request_investigation(
+                args.fcapsule,
+                episode["episode_id"],
+                requested_investigations,
+                signal.get("incident_id"),
+            )
             save(root / (episode["episode_id"] + ".json"), result)
             results.append({"episode_id": episode["episode_id"], "status": result["status"], "attempt": result.get("attempt"), "usage": result.get("usage")})
         record["fcapsule"] = results
