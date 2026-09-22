@@ -246,7 +246,13 @@ def run_case(args, scenario, folder):
                 signal.get("incident_id"),
             )
             save(root / (episode["episode_id"] + ".json"), result)
-            results.append({"episode_id": episode["episode_id"], "status": result["status"], "attempt": result.get("attempt"), "usage": result.get("usage")})
+            results.append({
+                "episode_id": episode["episode_id"],
+                "incident_id": signal.get("incident_id"),
+                "status": result["status"],
+                "attempt": result.get("attempt"),
+                "usage": result.get("usage"),
+            })
         record["fcapsule"] = results
         save(root / "run.json", record)
         if results and all(item["status"] in {"ready", "incomplete", "inconclusive", "not_configured"} for item in results):

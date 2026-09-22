@@ -49,9 +49,9 @@ def wait_for_investigation(fcapsule: str, episode_id: str, timeout: int) -> dict
     raise TimeoutError(f"Investigation {episode_id} did not finish; last status={latest.get('status')}")
 
 
-def rerun(fcapsule: str, episode_id: str, timeout: int) -> dict:
+def rerun(fcapsule: str, episode_id: str, timeout: int, incident_id: str | None = None) -> dict:
     url = fcapsule.rstrip("/") + f"/api/episodes/{episode_id}/investigation"
-    request(url, {})
+    request(url, {"incident_id": incident_id} if incident_id else {})
     return wait_for_investigation(fcapsule, episode_id, timeout)
 
 
@@ -170,15 +170,21 @@ def main() -> None:
                     if not record.get("fcapsule"):
                         raise RuntimeError(f"No FCAPSule episode captured for {scenario_id}")
                     episode_id = record["fcapsule"][0]["episode_id"]
+                    incident_id = record["fcapsule"][0].get("incident_id")
                     outputs: dict[str, dict] = {}
                     initial = wait_for_investigation(args.fcapsule, episode_id, args.investigation_timeout)
+                    # Source ingestion may launch a generic episode briefing before
+                    # the evaluation runner sees the new incident. Let it settle,
+                    # then make one focused revision for the exact captured signal.
+                    if incident_id and initial.get("primary_incident_id") != incident_id:
+                        initial = rerun(args.fcapsule, episode_id, args.investigation_timeout, incident_id)
                     if initial.get("model") == first:
                         outputs[first] = initial
                     for model in args.models:
                         if model in outputs:
                             continue
                         configure_model(args.fcapsule, model, args.max_tokens)
-                        outputs[model] = rerun(args.fcapsule, episode_id, args.investigation_timeout)
+                        outputs[model] = rerun(args.fcapsule, episode_id, args.investigation_timeout, incident_id)
                     record["captured_domains"] = sorted(available_evidence_domains(next(iter(outputs.values()))))
                     fingerprints = {item.get("input_fingerprint") for item in outputs.values()}
                     valid = len(fingerprints) == 1 and None not in fingerprints
