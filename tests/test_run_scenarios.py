@@ -3,7 +3,15 @@ import unittest
 from unittest.mock import patch
 from types import SimpleNamespace
 
-from tools.run_scenarios import alert_identity, expected_alerts, fresh_expected_alerts, request_investigation, wait_for_expected_clear, wait_for_lab_quiet
+from tools.run_scenarios import (
+    alert_identity,
+    expected_alerts,
+    fresh_expected_alerts,
+    request_investigation,
+    start_scenario,
+    wait_for_expected_clear,
+    wait_for_lab_quiet,
+)
 
 
 def alert(name, *, active_at="2026-09-23T00:00:00Z", pod="orders-1"):
@@ -50,6 +58,14 @@ class ScenarioRunnerAlertTests(unittest.TestCase):
         self.assertEqual((queued["status"], ready["status"]), ("queued", "ready"))
         self.assertEqual(call.call_args_list[0].args, ("http://fcapsule/api/episodes/episode-1/investigation", {}))
         self.assertEqual(call.call_args_list[1].args, ("http://fcapsule/api/episodes/episode-1/investigation",))
+
+    def test_start_confirms_an_active_run_after_a_connection_reset(self):
+        active = {"scenario": "signing-key-skew", "run_id": "run-1", "status": "running"}
+        with patch("tools.run_scenarios.request", side_effect=[ConnectionResetError("reset"), {"active": active}]):
+            result = start_scenario("http://lab", "signing-key-skew", 180)
+
+        self.assertEqual(result["run"], active)
+        self.assertIn("confirmed", result["message"])
 
     def test_waits_for_only_the_expected_alert_to_clear(self):
         args = type("Args", (), {"prometheus": "http://prometheus", "alert_clear_timeout": 5})()

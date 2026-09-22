@@ -85,6 +85,32 @@ def request_investigation(fcapsule, episode_id, requested):
     return request(url)
 
 
+def start_scenario(lab, scenario, duration):
+    """Confirm a fault injection after a transient control-plane reset.
+
+    The control surface keeps the active run in memory before it fans out to the
+    workloads. After an ambiguous POST failure, observing that matching run is
+    safer than blindly injecting the same fault a second time.
+    """
+
+    url = lab + f"/api/scenarios/{scenario}/start"
+    error = None
+    for attempt in range(3):
+        try:
+            return request(url, {"duration_seconds": duration})
+        except (URLError, OSError, TimeoutError) as exc:
+            error = exc
+            status = request(lab + "/api/status")
+            active = status.get("active") or {}
+            if active.get("scenario") == scenario:
+                return {"ok": True, "message": "Scenario start confirmed after transient reset.", "run": active}
+            if active:
+                raise RuntimeError("A different Lab scenario became active after a failed start request") from exc
+            if attempt < 2:
+                time.sleep(attempt + 1)
+    raise error
+
+
 def healthy(lab):
     state = request(lab + "/api/status")
     return not state["active"] and all(state[key].get("reachable") for key in ("worker", "inventory"))
@@ -161,7 +187,7 @@ def run_case(args, scenario, folder):
               "baseline_firing_alerts": baseline_alerts}
     save(root / "run.json", record)
     try:
-        record["control"] = request(args.lab + f"/api/scenarios/{scenario}/start", {"duration_seconds": args.duration})
+        record["control"] = start_scenario(args.lab, scenario, args.duration)
         print(f"{now()} {scenario}: started {record['control']['run']['run_id']}", flush=True)
         deadline = time.monotonic() + args.duration
         observed = {}
