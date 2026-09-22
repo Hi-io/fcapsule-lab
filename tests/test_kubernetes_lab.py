@@ -185,8 +185,8 @@ class KubernetesLabTests(unittest.TestCase):
         memory_exit = next(rule for rule in rules if rule["alert"] == "LabWorkerOOMKilled")
         self.assertIn("kube_pod_container_status_last_terminated_reason", memory_exit["expr"])
         self.assertIn('reason="OOMKilled"', memory_exit["expr"])
+        self.assertIn("kube_pod_container_status_last_terminated_timestamp", memory_exit["expr"])
         self.assertNotIn("restarts_total", memory_exit["expr"])
-        self.assertIn("lab_worker_allocated_bytes", memory_exit["expr"])
         self.assertTrue(all(rule["for"] for rule in rules))
 
     def test_discovery_rule_and_service_monitor_use_the_real_service_label(self):
