@@ -2,7 +2,7 @@ import unittest
 
 from unittest.mock import patch
 
-from tools.run_scenarios import alert_identity, expected_alerts, fresh_expected_alerts, request_investigation
+from tools.run_scenarios import alert_identity, expected_alerts, fresh_expected_alerts, request_investigation, wait_for_expected_clear
 
 
 def alert(name, *, active_at="2026-09-23T00:00:00Z", pod="orders-1"):
@@ -49,6 +49,16 @@ class ScenarioRunnerAlertTests(unittest.TestCase):
         self.assertEqual((queued["status"], ready["status"]), ("queued", "ready"))
         self.assertEqual(call.call_args_list[0].args, ("http://fcapsule/api/episodes/episode-1/investigation", {}))
         self.assertEqual(call.call_args_list[1].args, ("http://fcapsule/api/episodes/episode-1/investigation",))
+
+    def test_waits_for_only_the_expected_alert_to_clear(self):
+        args = type("Args", (), {"prometheus": "http://prometheus", "alert_clear_timeout": 5})()
+        with patch("tools.run_scenarios.firing", side_effect=[
+            [alert("LabWorkerCrashLooping"), alert("LabWorkerCPUHigh")],
+            [alert("LabWorkerCPUHigh")],
+        ]), patch("tools.run_scenarios.time.sleep") as sleep:
+            wait_for_expected_clear(args, "LabWorkerCrashLooping")
+
+        sleep.assert_called_once_with(5)
 
 
 if __name__ == "__main__":

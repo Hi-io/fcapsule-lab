@@ -89,6 +89,16 @@ def settle(args):
     raise RuntimeError("Previous workload did not recover before the next case; no fault injected")
 
 
+def wait_for_expected_clear(args, expected):
+    """Wait only for the prior lifecycle of this case's own alert to resolve."""
+    deadline = time.monotonic() + getattr(args, "alert_clear_timeout", 180)
+    while time.monotonic() < deadline:
+        if not expected_alerts(firing(args.prometheus), expected):
+            return
+        time.sleep(5)
+    raise RuntimeError(f"Expected alert {expected} did not resolve before its next evaluation")
+
+
 def collect_workload_logs(root, start):
     counts = {}
     for name in ("orders-api", "inventory-api", "lab-worker", "traffic-generator", "mysql", "mysql-exporter"):
@@ -108,6 +118,7 @@ def run_case(args, scenario, folder):
     root.mkdir()
     print(f"{now()} {scenario}: healthy baseline ({args.baseline}s)", flush=True)
     settle(args)
+    wait_for_expected_clear(args, EXPECTED[scenario])
     baseline = now()
     time.sleep(args.baseline)
     if not healthy(args.lab):
