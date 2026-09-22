@@ -42,18 +42,42 @@ def firing(prometheus):
             and alert["labels"].get("alertname", "").startswith("Lab")]
 
 
+def alert_identity(alert):
+    """Identify one Prometheus alert lifecycle without relying on replica labels."""
+    labels = alert.get("labels", {})
+    return (
+        labels.get("alertname", ""),
+        labels.get("pod", ""),
+        labels.get("container", ""),
+        labels.get("service", ""),
+        alert.get("activeAt", ""),
+    )
+
+
+def expected_alerts(alerts, expected):
+    return [alert for alert in alerts if alert.get("labels", {}).get("alertname") == expected]
+
+
+def fresh_expected_alerts(alerts, expected, baseline):
+    baseline_identities = {alert_identity(alert) for alert in baseline}
+    return [alert for alert in expected_alerts(alerts, expected)
+            if alert_identity(alert) not in baseline_identities]
+
+
 def healthy(lab):
     state = request(lab + "/api/status")
     return not state["active"] and all(state[key].get("reachable") for key in ("worker", "inventory"))
 
 
 def settle(args):
-    deadline = time.monotonic() + 480
+    deadline = time.monotonic() + getattr(args, "settle_timeout", 180)
     while time.monotonic() < deadline:
-        if healthy(args.lab) and not firing(args.prometheus):
+        # Prometheus may legitimately retain an unrelated alert while the workload
+        # itself has recovered. Scenario-specific freshness is checked separately.
+        if healthy(args.lab):
             return
-        time.sleep(10)
-    raise RuntimeError("Previous workload/alert window did not recover; no next case started")
+        time.sleep(5)
+    raise RuntimeError("Previous workload did not recover before the next case; no fault injected")
 
 
 def collect_workload_logs(root, start):
@@ -77,28 +101,38 @@ def run_case(args, scenario, folder):
     settle(args)
     baseline = now()
     time.sleep(args.baseline)
-    if not healthy(args.lab) or firing(args.prometheus):
+    if not healthy(args.lab):
         raise RuntimeError("Healthy baseline did not hold; no fault injected")
+    baseline_alerts = firing(args.prometheus)
+    baseline_expected = expected_alerts(baseline_alerts, EXPECTED[scenario])
+    if baseline_expected:
+        raise RuntimeError(f"Expected alert {EXPECTED[scenario]} was already firing before fault injection")
     start = now()
     record = {"scenario": scenario, "expected_alert": EXPECTED[scenario], "baseline_at": baseline, "started_at": start,
               "samples": [], "observed_alerts": [], "fcapsule": [], "outcome": "running",
-              "minimum_retained_log_lines": args.minimum_log_lines}
+              "minimum_retained_log_lines": args.minimum_log_lines,
+              "baseline_firing_alerts": baseline_alerts}
     save(root / "run.json", record)
     try:
         record["control"] = request(args.lab + f"/api/scenarios/{scenario}/start", {"duration_seconds": args.duration})
         print(f"{now()} {scenario}: started {record['control']['run']['run_id']}", flush=True)
         deadline = time.monotonic() + args.duration
         observed = {}
+        observed_expected = {}
         expected_seen_at = None
         while time.monotonic() < deadline:
             status = request(args.lab + "/api/status")
             alerts = firing(args.prometheus)
             for alert in alerts:
-                observed[alert["labels"]["alertname"] + str(alert["labels"].get("pod"))] = alert
+                observed[alert_identity(alert)] = alert
+            fresh_expected = fresh_expected_alerts(alerts, EXPECTED[scenario], baseline_expected)
+            for alert in fresh_expected:
+                observed_expected[alert_identity(alert)] = alert
             record["samples"].append({"time": now(), "memory": status.get("memory"), "active": status["active"], "alerts": [item["labels"]["alertname"] for item in alerts]})
             record["observed_alerts"] = list(observed.values())
+            record["observed_expected_alerts"] = list(observed_expected.values())
             save(root / "run.json", record)
-            if any(item["labels"]["alertname"] == EXPECTED[scenario] for item in alerts):
+            if fresh_expected:
                 expected_seen_at = expected_seen_at or time.monotonic()
             if expected_seen_at and time.monotonic() - expected_seen_at >= args.post_alert_hold:
                 break
@@ -107,7 +141,7 @@ def run_case(args, scenario, folder):
                 record["early_recovery"] = last
                 break
             time.sleep(10)
-        record["alert_observed"] = any(item["labels"]["alertname"] == EXPECTED[scenario] for item in observed.values())
+        record["alert_observed"] = bool(observed_expected)
     finally:
         record["recovery"] = request(args.lab + "/api/recover", {})
         record["fault_ended_at"] = now()
