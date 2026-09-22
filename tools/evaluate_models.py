@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import statistics
 import sys
@@ -62,18 +63,31 @@ def usage(run: dict) -> dict:
             "complete": value.get("complete", False)}
 
 
+def observation_fingerprint(run: dict) -> str:
+    """Identify bounded source observations without treating them as model output."""
+
+    checks = [
+        {"tool": item.get("tool"), "arguments": item.get("arguments", {}),
+         "status": item.get("status"), "result": item.get("result", {})}
+        for item in run.get("checks", []) if isinstance(item, dict)
+    ]
+    encoded = json.dumps(checks, sort_keys=True, default=str, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
 def write_reports(folder: Path, rows: list[dict], models: list[str]) -> None:
     columns = ["scenario", "category", "model", "score", "label", "pipeline_score",
-               "elapsed_seconds", "total_tokens", "input_fingerprint", "comparison_valid"]
+               "elapsed_seconds", "total_tokens", "input_fingerprint", "observation_fingerprint",
+               "comparison_valid", "live_observations_equivalent"]
     with (folder / "results.csv").open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=columns)
         writer.writeheader()
         writer.writerows({key: row.get(key) for key in columns} for row in rows)
 
     lines = ["# FCAPSule Paired Model Evaluation", "",
-             "Every model in a scenario used the same retained FCAPSule input fingerprint. Ground truth was held by the Lab and was never sent to the investigator.", "",
-             "| Scenario | Evidence | " + " | ".join(models) + " | Valid |",
-             "|---|---|" + "---:|" * len(models) + "---|"]
+             "Every model in a scenario used the same retained FCAPSule input fingerprint. Ground truth was held by the Lab and was never sent to the investigator. Sequential live checks can observe changed source state; the record makes that visible.", "",
+             "| Scenario | Evidence | " + " | ".join(models) + " | Same capsule | Same live observations |",
+             "|---|---|" + "---:|" * len(models) + "---|---|"]
     for scenario in SCENARIOS:
         members = [row for row in rows if row["scenario"] == scenario]
         values = {}
@@ -84,8 +98,10 @@ def write_reports(folder: Path, rows: list[dict], models: list[str]) -> None:
                 values[model] = f"{mean:.1f}" + (f" mean / {len(model_rows)} runs" if len(model_rows) > 1 else f" ({model_rows[0]['label']})")
         valid = bool(members) and all(row["comparison_valid"] for row in members) and all(
             any(row["model"] == model for row in members) for model in models)
+        equivalent = valid and len({row.get("observation_fingerprint") for row in members}) == 1
         lines.append(f"| {scenario} | {SCENARIOS[scenario]['evidence_group']} | "
-                     + " | ".join(values.get(model, "missing") for model in models) + f" | {'yes' if valid else 'no'} |")
+                     + " | ".join(values.get(model, "missing") for model in models)
+                     + f" | {'yes' if valid else 'no'} | {'yes' if equivalent else 'no'} |")
     lines.extend(["", "## Aggregate", ""])
     for model in models:
         members = [row for row in rows if row["model"] == model]
@@ -109,7 +125,7 @@ def write_reports(folder: Path, rows: list[dict], models: list[str]) -> None:
             else:
                 wins[models[0] if difference > 0 else models[1]] += 1
         lines.append(f"- Paired outcomes: `{models[0]}` {wins[models[0]]} wins, `{models[1]}` {wins[models[1]]} wins, {wins['ties']} ties.")
-    lines.extend(["", "Scores are diagnostic rubric coverage, not a universal model accuracy claim. One run per case is an exploratory paired benchmark; use `--repetitions` for variance estimates.", ""])
+    lines.extend(["", "Scores are diagnostic rubric coverage, not a universal model accuracy claim. A same-capsule pair with different live-observation fingerprints is contextual, not a strict identical-input comparison. One run per case is exploratory; use `--repetitions` for variance estimates.", ""])
     (folder / "REPORT.md").write_text("\n".join(lines), encoding="utf-8")
 
 
@@ -166,6 +182,8 @@ def main() -> None:
                     record["captured_domains"] = sorted(available_evidence_domains(next(iter(outputs.values()))))
                     fingerprints = {item.get("input_fingerprint") for item in outputs.values()}
                     valid = len(fingerprints) == 1 and None not in fingerprints
+                    observation_fingerprints = {model: observation_fingerprint(value) for model, value in outputs.items()}
+                    observations_equivalent = len(set(observation_fingerprints.values())) == 1
                     case_dir = folder / case_name
                     for model, investigation in outputs.items():
                         model_file = model.replace("/", "_") + ".json"
@@ -176,7 +194,9 @@ def main() -> None:
                                   "model": model, **diagnosis, "pipeline": pipeline,
                                   "pipeline_score": pipeline["score"], "elapsed_seconds": investigation.get("elapsed_seconds", 0),
                                   "usage": usage(investigation), "total_tokens": usage(investigation)["total_tokens"],
-                                  "input_fingerprint": investigation.get("input_fingerprint"), "comparison_valid": valid,
+                                  "input_fingerprint": investigation.get("input_fingerprint"),
+                                  "observation_fingerprint": observation_fingerprints[model],
+                                  "comparison_valid": valid, "live_observations_equivalent": observations_equivalent,
                                   "episode_id": episode_id}
                         save(case_dir / (model.replace("/", "_") + "-score.json"), result)
                         rows.append(result)
@@ -195,7 +215,8 @@ def main() -> None:
                                   "findings": [], "domains": [], "contradictions": [], "components": {},
                                   "pipeline": pipeline, "pipeline_score": pipeline["score"],
                                   "elapsed_seconds": 0, "usage": usage({}), "total_tokens": 0,
-                                  "input_fingerprint": None, "comparison_valid": False,
+                                  "input_fingerprint": None, "observation_fingerprint": None,
+                                  "comparison_valid": False, "live_observations_equivalent": False,
                                   "episode_id": None, "evaluation_error": str(error)}
                         save(case_dir / (model.replace("/", "_") + "-score.json"), result)
                         rows.append(result)

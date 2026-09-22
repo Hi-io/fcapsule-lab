@@ -2,6 +2,7 @@ import unittest
 
 from app.scenario_catalog import SCENARIOS
 from evaluation.scoring import load_ground_truth, score_investigation, score_pipeline
+from tools.evaluate_models import observation_fingerprint
 
 
 class EvaluationTests(unittest.TestCase):
@@ -18,6 +19,24 @@ class EvaluationTests(unittest.TestCase):
         self.assertNotIn("mechanism", SCENARIOS["timeout-budget"])
         self.assertTrue(all(self.oracle[key]["expected_alert"] == value["expected_alert"]
                             for key, value in SCENARIOS.items()))
+
+    def test_observation_fingerprint_is_stable_and_excludes_model_assessment(self):
+        run = {
+            "checks": [{"tool": "search_logs", "arguments": {"query": "timeout"},
+                        "status": "ok", "result": {"count": 4}}],
+            "assessment": {"likely_mechanism": "first model wording"},
+        }
+        same_observations = {
+            "checks": list(run["checks"]),
+            "assessment": {"likely_mechanism": "different model wording"},
+        }
+        changed_observations = {
+            "checks": [{"tool": "search_logs", "arguments": {"query": "timeout"},
+                        "status": "ok", "result": {"count": 5}}],
+        }
+
+        self.assertEqual(observation_fingerprint(run), observation_fingerprint(same_observations))
+        self.assertNotEqual(observation_fingerprint(run), observation_fingerprint(changed_observations))
 
     def test_concept_groups_accept_paraphrases_and_require_all_parts(self):
         run = {
