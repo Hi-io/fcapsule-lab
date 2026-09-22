@@ -96,6 +96,23 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(pipeline["score"], 40)
         self.assertFalse(pipeline["checks"]["expected_alert"])
 
+    def test_grounded_abstention_is_recorded_separately_from_a_pipeline_failure(self):
+        run = {
+            "status": "inconclusive",
+            "assessment": {
+                "provenance": "deterministic_abstention",
+                "likely_mechanism": "No mechanism is asserted.",
+                "next_action": "Review retained evidence and reassess.",
+                "expected_finding": "A cited observation supports a mechanism.",
+                "uncertainty": "No validated model conclusion is available.",
+                "evidence_ids": ["L1"],
+            },
+            "context": {"evidence": [{"id": "L1", "domain": "log_template"}]},
+        }
+        result = score_investigation(self.oracle["response-contract"], run)
+        self.assertEqual(result["status"], "inconclusive")
+        self.assertEqual(result["label"], "inconclusive_with_retained_evidence")
+
 
 if __name__ == "__main__":
     unittest.main()

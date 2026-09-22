@@ -23,7 +23,7 @@ from evaluation.scoring import available_evidence_domains, load_ground_truth, sc
 from tools.run_scenarios import run_case, save
 
 
-TERMINAL = {"ready", "incomplete", "not_configured"}
+TERMINAL = {"ready", "incomplete", "inconclusive", "not_configured"}
 
 
 def request(url: str, payload: dict | None = None) -> dict:

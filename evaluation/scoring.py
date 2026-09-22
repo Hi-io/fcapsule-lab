@@ -93,7 +93,7 @@ def evidence_domains(investigation: dict[str, Any]) -> set[str]:
 
 def score_investigation(scenario: dict[str, Any], investigation: dict[str, Any]) -> dict[str, Any]:
     status = investigation.get("status", "missing")
-    if status not in {"ready", "incomplete"} or not investigation.get("assessment"):
+    if status not in {"ready", "incomplete", "inconclusive"} or not investigation.get("assessment"):
         return {"score": 0.0, "label": "failed", "status": status, "findings": [],
                 "domains": [], "contradictions": [], "components": {}}
 
@@ -116,8 +116,11 @@ def score_investigation(scenario: dict[str, Any], investigation: dict[str, Any])
     contradictions = [phrase for phrase in scenario.get("contradictions", []) if phrase.casefold() in text]
     safety_score = (5 if normalize(assessment.get("uncertainty")) else 0) + (5 if not contradictions else 0)
     total = round(max(0.0, finding_score + evidence_score + action_score + safety_score), 1)
-    label = ("correct_and_actionable" if total >= 90 else "substantially_correct" if total >= 70
-             else "partially_helpful" if total >= 45 else "weak_or_misdirected")
+    if assessment.get("provenance") == "deterministic_abstention":
+        label = "inconclusive_with_retained_evidence"
+    else:
+        label = ("correct_and_actionable" if total >= 90 else "substantially_correct" if total >= 70
+                 else "partially_helpful" if total >= 45 else "weak_or_misdirected")
     return {
         "score": total, "label": label, "status": status, "findings": findings,
         "domains": sorted(domains), "required_domains": sorted(required),
