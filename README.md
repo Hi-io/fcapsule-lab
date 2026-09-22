@@ -43,6 +43,7 @@ Requirements:
 python3 -m pip install '.[dev]'
 python3 tools/deploy_kubernetes.py --node-exporter http://<node-ip>:9100
 make k8s-status
+python3 tools/verify_stack.py
 ```
 
 The deployment helper pins the published local commit, checks real host memory, pauses

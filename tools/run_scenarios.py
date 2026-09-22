@@ -130,7 +130,7 @@ def run_case(args, scenario, folder):
             results.append({"episode_id": episode["episode_id"], "status": result["status"], "attempt": result.get("attempt"), "usage": result.get("usage")})
         record["fcapsule"] = results
         save(root / "run.json", record)
-        if results and all(item["status"] in {"ready", "incomplete", "not_configured"} for item in results):
+        if results and all(item["status"] in {"ready", "incomplete", "inconclusive", "not_configured"} for item in results):
             break
         time.sleep(10)
     record["outcome"] = "symptom_alert_observed" if record.get("alert_observed") else "expected_alert_missing"
