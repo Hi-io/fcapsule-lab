@@ -114,7 +114,12 @@ Each workload occurrence waits for a quiet alert baseline, records 45 seconds of
 health, injects one owned lease, waits for the specific fresh symptom plus 30 seconds
 of evidence, recovers, confirms baseline ConfigMap/Service/monitor and node safety,
 retains bounded logs and real Prometheus range results, and reads the automatic
-assessment. It never forces a new baseline model call to obtain a better answer.
+assessment. A run accepts a terminal assessment only when its actual
+`context.alerts` includes that run's exact incident ID; primary-incident metadata
+or a mention in prose is not enough. Stale terminal revisions remain in
+`raw-assessments/` while the runner waits within its existing timeout. A timeout
+does not select a stale baseline or start another model request.
+It never forces a new baseline model call to obtain a better answer.
 Missing/ambiguous fresh signals, old delayed captures, missing reports, incomplete
 assessments, and changed models remain explicit failures or limitations.
 
@@ -156,6 +161,14 @@ that a historical matching symptom was reused and its original intervention was
 not independently repeated. Original records are not modified. A prior of the
 wrong model, unresolved signal, absent capsule or wrong origin is rejected.
 The earlier record is referenced by path, not rewritten as a new occurrence.
+Only this read-only import permits a terminal assessment without the selected
+old member in `context.alerts`. It records
+`assessment_context_policy: retained_prior_read_only` and the actual
+`assessment_context_contains_incident` result. A missing member marks
+`comparison_valid: false`: the capsule can demonstrate retained history, but the
+assessment is not a fresh diagnostic comparison for that incident.
+`assessment_matches_incident` continues to describe primary-incident equality,
+which is distinct from actual context membership.
 
 After two genuinely separate captured episodes:
 

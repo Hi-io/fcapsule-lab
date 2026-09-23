@@ -273,5 +273,109 @@ class DemoRunnerTests(unittest.TestCase):
             self.assertEqual(runner.history_round(root, 2), root / "round-2")
 
 
+class AssessmentProvenanceTests(unittest.TestCase):
+    def record(self):
+        return {"fcapsule": "http://product", "episode_id": "reused-episode",
+                "incident_id": "new-incident", "model_config": config()}
+
+    def assessment(self, status="ready", incident_id="new-incident"):
+        return {"status": status, "model": config()["model"], "primary_incident_id": "old-incident",
+                "context": {"alerts": [{"incident_id": incident_id}]}}
+
+    def test_membership_requires_exact_structured_alert_not_primary_or_prose(self):
+        contexts = (None, [], {}, {"alerts": None}, {"alerts": {}}, {"alerts": "new-incident"},
+                    {"alerts": [None, "new-incident", {}, {"incident_id": "new-incident-suffix"}]})
+        for context in contexts:
+            with self.subTest(context=context):
+                value = {"context": context, "primary_incident_id": "new-incident",
+                         "assessment": "new-incident", "alerts": [{"incident_id": "new-incident"}]}
+                self.assertFalse(runner.assessment_contains_incident(value, "new-incident"))
+        self.assertFalse(runner.assessment_contains_incident({}, "new-incident"))
+        self.assertTrue(runner.assessment_contains_incident(self.assessment(), "new-incident"))
+
+    def test_run_waits_past_stale_terminal_and_current_running_revision(self):
+        stale = {**self.assessment(incident_id="old-incident"), "revision_id": "r1"}
+        running = {**self.assessment("running"), "revision_id": "r2"}
+        current = {**self.assessment(), "revision_id": "r2"}
+        current["context"]["alerts"].insert(0, {"incident_id": "old-incident"})
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            record = self.record()
+            with patch.object(runner, "request", side_effect=[stale, running, current, {}]) as api, \
+                 patch.object(runner.media.time, "monotonic", side_effect=[0, 0, 1, 2]), \
+                 patch.object(runner.media.time, "sleep"):
+                self.assertEqual(runner.await_assessment(record, root, seconds=3), current)
+            self.assertEqual(runner.read(root / "investigation-before.json"), current)
+            self.assertEqual(len(list((root / "raw-assessments").iterdir())), 3)
+            saved = runner.read(root / "run.json")
+            self.assertTrue(saved["assessment_context_contains_incident"])
+            self.assertFalse(saved["assessment_matches_incident"])
+            self.assertEqual(saved["assessment_context_policy"], "current_incident_required")
+            self.assertEqual(api.call_count, 4)
+            self.assertTrue(all(len(call.args) == 1 and not call.kwargs for call in api.call_args_list))
+
+    def test_stale_only_times_out_without_selecting_baseline_or_triggering_request(self):
+        stale = self.assessment(incident_id="old-incident")
+        # Even primary metadata naming the new incident cannot replace actual context.
+        stale["primary_incident_id"] = "new-incident"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.object(runner, "request", return_value=stale) as api, \
+                 patch.object(runner.media.time, "monotonic", side_effect=[0, 0, 1]), \
+                 patch.object(runner.media.time, "sleep"), \
+                 self.assertRaisesRegex(TimeoutError, "context.alerts; no retry started"):
+                runner.await_assessment(self.record(), root, seconds=1)
+            api.assert_called_once_with("http://product/api/episodes/reused-episode/investigation")
+            self.assertEqual([runner.read(p) for p in (root / "raw-assessments").iterdir()], [stale])
+            self.assertFalse((root / "investigation-before.json").exists())
+            self.assertFalse((root / "report.json").exists())
+
+    def test_matching_terminal_failures_are_preserved_not_forced_to_ready(self):
+        for status in runner.TERMINAL:
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                value = self.assessment(status)
+                record = self.record()
+                with patch.object(runner, "request", side_effect=[value, {}]) as api:
+                    self.assertEqual(runner.await_assessment(record, root), value)
+                self.assertEqual(runner.read(root / "run.json")["assessment_status"], status)
+                self.assertEqual(api.call_count, 2)
+
+    def test_retain_prior_explicitly_permits_old_context_but_is_read_only_and_disclosed(self):
+        incident = "incident-labinventoryqueryfailures-prior"
+        state = {"overview": {"episodes": [{"episode_id": "reused-episode", "signals": [{
+            "incident_id": incident, "status": "resolved", "app_id": "node:fcapsule-lab:inventory-api",
+            "started_at": "2026-09-22T12:00:00Z", "ended_at": "2026-09-22T12:03:00Z"}]}]}}
+        running = self.assessment("running", "another-member")
+        terminal = self.assessment(incident_id="another-member")
+        report = {"record": {"capsule_id": "prior-capsule"}}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "import"
+            args = SimpleNamespace(out=root, incident_id=incident, fcapsule="http://product",
+                                   lab="http://lab", prometheus="http://prom")
+            with patch.object(runner, "preflight", return_value={"model_config": config()}) as preflight, \
+                 patch.object(runner, "request", side_effect=[state, running, terminal, report, {"capsule": {}}, {}]) as api, \
+                 patch.object(runner.media.time, "monotonic", side_effect=[0, 0, 1]), \
+                 patch.object(runner.media.time, "sleep"):
+                runner.retain_prior(args)
+            preflight.assert_called_once_with(args, root, require_owned=False)
+            self.assertTrue(all(len(call.args) == 1 and not call.kwargs for call in api.call_args_list))
+            self.assertEqual(api.call_count, 6)
+            self.assertEqual(runner.read(root / "investigation-before.json"), terminal)
+            saved = runner.read(root / "run.json")
+            self.assertEqual(saved["incident_id"], incident)
+            self.assertEqual(saved["capsule_id"], "prior-capsule")
+            self.assertEqual(saved["assessment_context_policy"], "retained_prior_read_only")
+            self.assertFalse(saved["assessment_context_contains_incident"])
+            self.assertFalse(saved["comparison_valid"])
+
+    def test_retained_prior_exception_still_rejects_changed_model(self):
+        value = {**self.assessment(incident_id="another-member"), "model": "different-model"}
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(runner, "request", side_effect=[value, {}]), \
+                 self.assertRaisesRegex(RuntimeError, "different model"):
+                runner.await_assessment(self.record(), Path(directory), allow_retained_prior=True)
+
+
 if __name__ == "__main__":
     unittest.main()

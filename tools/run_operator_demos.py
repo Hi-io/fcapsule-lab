@@ -221,10 +221,22 @@ def retain_revisions(record, output):
             "limitation": "Older automatic revisions may be missing; do not report last-run usage as total usage"})
 
 
-def await_assessment(record, root, seconds=360):
+def assessment_contains_incident(value, incident_id):
+    context = value.get("context")
+    alerts = context.get("alerts") if isinstance(context, dict) else None
+    return isinstance(alerts, list) and any(
+        isinstance(alert, dict) and alert.get("incident_id") == incident_id for alert in alerts
+    )
+
+
+def await_assessment(record, root, seconds=360, *, allow_retained_prior=False):
     base = record["fcapsule"] + "/api/episodes/" + quote(record["episode_id"], safe="")
+    description = ("Retained assessment did not finish; no retry started" if allow_retained_prior else
+                   "No terminal assessment includes the run incident in context.alerts; no retry started")
     value = media.wait_for(lambda: retain_assessment(root, request(base + "/investigation")),
-                           lambda v: v.get("status") in TERMINAL, seconds, "Automatic assessment did not finish; no retry started")
+                           lambda v: v.get("status") in TERMINAL and
+                           (allow_retained_prior or assessment_contains_incident(v, record["incident_id"])),
+                           seconds, description)
     save(root / "investigation-before.json", value)
     report = request(record["fcapsule"] + "/api/incidents/" + quote(record["incident_id"], safe="") + "/report")
     save(root / "report.json", report)
@@ -237,6 +249,10 @@ def await_assessment(record, root, seconds=360):
         retain_revisions(record, root)
     record["assessment_status"] = value.get("status")
     record["assessment_matches_incident"] = value.get("primary_incident_id") == record["incident_id"]
+    record["assessment_context_contains_incident"] = assessment_contains_incident(value, record["incident_id"])
+    record["assessment_context_policy"] = "retained_prior_read_only" if allow_retained_prior else "current_incident_required"
+    if not record["assessment_context_contains_incident"]:
+        record["comparison_valid"] = False
     record["usage"] = value.get("usage")
     record["quality"] = "requires_human_review"
     if value.get("model") != record["model_config"]["model"]:
@@ -625,7 +641,7 @@ def retain_prior(args):
         "origin": "existing retained matching symptom; historical injection not independently reverified",
         "retained_at": now()}
     save(root / "run.json", record)
-    await_assessment(record, root, seconds=30)
+    await_assessment(record, root, seconds=30, allow_retained_prior=True)
     if not record.get("capsule_id"):
         raise ValueError("Previous capsule is unavailable; do not substitute an invented prior")
     save(root / "recovery.json", {"at": now(), "restored": True,
