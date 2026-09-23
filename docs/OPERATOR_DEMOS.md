@@ -58,7 +58,7 @@ a different operator's active run. These are controller changes, not fault copie
 
 The deployment maintainer owns publishing, targeted deployment and live evaluation. Do not run
 `run`, `attach`, `reassess` or `history` before coordination. They require `--execute`.
-`plan`, `preflight` and `retain-prior` are read-only against the cluster and product
+`plan`, `preflight`, `retain-prior` and `history-status` are read-only against the cluster and product
 (local evidence files are written). No command changes provider settings or invokes
 provider validation. No automatic retry of an injection, upload or model request.
 
@@ -184,6 +184,30 @@ outage. The second episode's raw investigation is saved separately so automatic
 history lookup can be audited. Operator retrieval or a ready retained-only answer
 does not prove automatic historical reuse. Missing history context remains a gap.
 
+The accepted review is polled by exact review and episode ID from
+`GET /api/incidents/{earlier_incident_id}/report.source_disconnected_reviews`.
+The episode investigation endpoint does not expose that list. Completion comes
+from the review's top-level `status`, not `result.status`; `result.sufficiency`
+describes the retained answer separately. A terminal failure remains a failure.
+
+After an accepted request times out locally, reconcile its saved
+`history-review/review-request.json` without another POST or provider request:
+
+```powershell
+& $python tools/run_operator_demos.py history-status --case-dir local_reports/demo-UNIQUE/query-rollout-history
+```
+
+No `--execute` is required. This validates the saved attempt, round identities and
+previously retrieved capsule hash, then reads the original review and current
+recurrence investigation. It writes a fresh `history-review/status/UNIQUE/`
+directory and prints its path. The original attempt, accepted response and any
+earlier results remain unchanged. Raw polled review snapshots are retained.
+`evaluation.json` records terminal `status`, `completed`, review ID, completion
+time, answer sufficiency and usage; completion is not a diagnostic success claim.
+Absent/mismatched accepted IDs fail closed. Missing reviews time out without a
+replacement review or automatic retry. Capsule validation here checks the original
+retrieved snapshot, not a fresh capsule download.
+
 ## Images And Explicit Reassessments
 
 Visually inspect the fault PNGs for identity, time window, graph series or target
@@ -275,12 +299,20 @@ citations are pipeline states only. Sum usage across all automatic revisions,
 explicit follow-ups and vision calls, not only the last successful answer.
 
 Configured Pro limits are frozen at preflight and checked before each case and
-paid action, with ceilings 3600 completion, 12000 total, 2100 prompt tokens and one
+paid action, with ceilings 3600 completion, 12000 total, 3200 prompt tokens and one
 check. The runner never increases them. The product can independently initiate
 more than one automatic member revision; this harness cannot enforce a global
 provider spend cap. Review raw revision histories and stop manually if spending
 limits require it. No claims about five-case correctness or source-outage resilience
 are warranted until the operator completes the real run and reviews the results.
+
+The 3200 per-call prompt ceiling leaves more room for the bounded two-image
+evidence ledger, without guaranteeing all evidence fits. Lower configured budgets
+remain valid. The frozen configuration must still match exactly.
+A prior 2100-prompt run cannot be attached or reassessed under 3200
+as a same-budget comparison. Budget changes require a separately recorded run or
+explicitly budget-changed follow-up, with the difference disclosed. Do not rewrite
+the original `run.json` or its frozen `model_config` to bypass this guard.
 
 ## Local Verification
 

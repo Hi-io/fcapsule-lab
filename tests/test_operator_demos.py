@@ -118,12 +118,39 @@ class DemoRunnerTests(unittest.TestCase):
         with patch.object(runner, "request", return_value=config()) as api:
             frozen = runner.configuration("http://product")
         self.assertEqual(frozen["max_checks"], 1)
+        self.assertEqual(frozen["max_prompt_tokens"], 3200)
+        self.assertEqual(frozen["max_total_tokens"], 12000)
+        self.assertEqual(frozen["max_tokens"], 3600)
         self.assertEqual(len(api.call_args.args), 1)
-        for key, value in (("model", "deepseek-v4-flash"), ("max_checks", 2), ("max_total_tokens", 12001), ("max_prompt_tokens", 2101)):
+        for key, value in (("model", "deepseek-v4-flash"), ("max_checks", 2), ("max_total_tokens", 12001),
+                           ("max_tokens", 3601), ("max_prompt_tokens", 3201)):
             with patch.object(runner, "request", return_value={**config(), key: value}), self.assertRaises(ValueError):
                 runner.configuration("http://product")
         with patch.object(runner, "request", return_value=config()), self.assertRaisesRegex(ValueError, "changed"):
             runner.configuration("http://product", {**frozen, "max_tokens": 2000})
+
+    def test_prompt_ceiling_accepts_separate_budgets_but_never_mixes_frozen_configs(self):
+        for budget, other in ((2100, 3200), (3200, 2100)):
+            with self.subTest(budget=budget), patch.object(runner, "request", return_value={**config(), "max_prompt_tokens": budget}):
+                frozen = runner.configuration("http://product")
+                self.assertEqual(frozen["max_prompt_tokens"], budget)
+                self.assertEqual(runner.configuration("http://product", frozen), frozen)
+                with self.assertRaisesRegex(ValueError, "changed; refuse a mixed comparison"):
+                    runner.configuration("http://product", {**frozen, "max_prompt_tokens": other})
+
+    def test_old_run_budget_change_blocks_paid_followup_without_rewriting_record(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            frozen = {key: config()[key] for key in runner.CONFIG_KEYS}
+            frozen["max_prompt_tokens"] = 2100
+            runner.save(root / "run.json", {"outcome": "captured", "fcapsule": "http://product", "model_config": frozen})
+            runner.save(root / "recovery.json", {"restored": True})
+            original = (root / "run.json").read_bytes()
+            with patch.object(runner, "request", return_value=config()) as api, \
+                 self.assertRaisesRegex(ValueError, "changed; refuse a mixed comparison"):
+                runner.paid_context(SimpleNamespace(execute=True, case_dir=root))
+            api.assert_called_once_with("http://product/api/settings/ai")
+            self.assertEqual((root / "run.json").read_bytes(), original)
 
     def test_node_placement_memory_and_owned_activity_fail_closed(self):
         runner.safety(sample(), "worker-1")
@@ -271,6 +298,113 @@ class DemoRunnerTests(unittest.TestCase):
             runner.save(root / "round-1/reference.json", {"path": str(original)})
             self.assertEqual(runner.history_round(root, 1), original)
             self.assertEqual(runner.history_round(root, 2), root / "round-2")
+
+
+class HistoryReviewPollingTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.capsule = {"capsule": {"retained": "observations"}}
+        self.queued = {"review_id": "accepted-review", "episode_id": "earlier-episode", "status": "queued"}
+        self.ready = {**self.queued, "status": "ready", "completed_at": "2026-09-23T13:50:28Z",
+                      "result": {"sufficiency": "partially_sufficient", "answer": "Retained observations only"}}
+        self.reviews = iter([self.ready])
+        for ordinal, identity in ((1, "earlier"), (2, "recurrence")):
+            folder = self.root / f"round-{ordinal}"
+            folder.mkdir()
+            runner.save(folder / "run.json", {"case": "query-rollout-history", "outcome": "captured",
+                "incident_id": identity + "-incident", "episode_id": identity + "-episode",
+                "fcapsule": "http://product", "model_config": config(), "capsule_id": identity + "-capsule",
+                "capsule_sha256": runner.digest(self.capsule["capsule"])})
+            runner.save(folder / "recovery.json", {"restored": True})
+        configuration = patch.object(runner, "configuration", return_value=config())
+        self.configuration = configuration.start()
+        self.addCleanup(configuration.stop)
+        requests = patch.object(runner, "request", side_effect=self.api)
+        self.requests = requests.start()
+        self.addCleanup(requests.stop)
+
+    def api(self, url, payload=None):
+        if url == "http://product/api/episodes/earlier-episode/source-review":
+            self.assertEqual(payload, {"question": runner.QUESTIONS})
+            return self.queued
+        self.assertIsNone(payload)
+        if url == "http://product/api/capsules/earlier-capsule": return self.capsule
+        if url == "http://product/api/incidents/earlier-incident/report":
+            return {"investigation": {"status": "ready"}, "source_disconnected_reviews": [
+                {**self.ready, "review_id": "unrelated-review"}, next(self.reviews)]}
+        if url == "http://product/api/episodes/recurrence-episode/investigation":
+            return {"status": "ready", "checks": []}
+        if url == "http://product/artifacts/earlier-capsule/investigation_revisions.json": return {}
+        self.fail("Unexpected endpoint, including any episode investigation used for review polling: " + url)
+
+    def accepted_attempt(self):
+        output = self.root / "history-review"
+        output.mkdir()
+        runner.save(output / "attempt.json", {"earlier_incident_id": "earlier-incident",
+            "recurrence_incident_id": "recurrence-incident", "earlier_capsule_id": "earlier-capsule"})
+        runner.save(output / "review-request.json", self.queued)
+        runner.save(output / "earlier-capsule-retrieved.json", self.capsule)
+        return output
+
+    def test_history_polls_report_contract_and_uses_top_level_review_status(self):
+        self.reviews = iter([{**self.queued, "result": {"status": "ready"}}, self.ready])
+        with patch.object(runner.media.time, "sleep"):
+            runner.history(SimpleNamespace(case_dir=self.root, execute=True))
+        output = self.root / "history-review"
+        self.assertEqual(runner.read(output / "source-review.json"), self.ready)
+        self.assertEqual(len(list((output / "raw-reviews").iterdir())), 2)
+        evaluation = runner.read(output / "evaluation.json")
+        self.assertEqual(evaluation["status"], "ready")
+        self.assertTrue(evaluation["completed"])
+        self.assertEqual(evaluation["sufficiency"], "partially_sufficient")
+        self.assertEqual(evaluation["review_id"], "accepted-review")
+        self.assertEqual(sum(len(call.args) == 2 for call in self.requests.call_args_list), 1)
+
+    def test_history_status_get_only_preserves_all_original_attempt_files(self):
+        original = self.accepted_attempt()
+        runner.save(original / "source-review.json", {"status": "running"})
+        runner.save(original / "evaluation.json", {"status": "incomplete", "error": "old timeout"})
+        saved = {path: path.read_bytes() for path in original.iterdir()}
+        runner.history_status(SimpleNamespace(case_dir=self.root))
+        self.configuration.assert_not_called()
+        self.assertTrue(all(len(call.args) == 1 and not call.kwargs for call in self.requests.call_args_list))
+        for path, contents in saved.items(): self.assertEqual(path.read_bytes(), contents)
+        output = next((original / "status").iterdir())
+        self.assertEqual(runner.read(output / "source-review.json"), self.ready)
+        self.assertEqual(runner.read(output / "review-request.json"), self.queued)
+        self.assertEqual(runner.read(output / "reconciliation.json")["provider_requests"], 0)
+
+    def test_failed_review_is_completed_but_never_promoted_to_ready(self):
+        original = self.accepted_attempt()
+        self.reviews = iter([{**self.queued, "status": "incomplete", "result": None}])
+        runner.history_status(SimpleNamespace(case_dir=self.root))
+        evaluation = runner.read(next((original / "status").iterdir()) / "evaluation.json")
+        self.assertEqual(evaluation["status"], "incomplete")
+        self.assertTrue(evaluation["completed"])
+        self.assertIsNone(evaluation["sufficiency"])
+
+    def test_reconcile_rejects_mismatched_accepted_identity_without_requests(self):
+        original = self.accepted_attempt()
+        for queued in ({"episode_id": "earlier-episode"}, {**self.queued, "episode_id": "other"}):
+            runner.save(original / "review-request.json", queued)
+            with self.assertRaisesRegex(ValueError, "do not match"):
+                runner.history_status(SimpleNamespace(case_dir=self.root))
+        self.requests.assert_not_called()
+
+    def test_missing_review_times_out_without_retry_or_replacing_original_outputs(self):
+        original = self.accepted_attempt()
+        self.reviews = iter([{**self.ready, "episode_id": "wrong-episode"}])
+        with patch.object(runner.media.time, "monotonic", side_effect=[0, 0, 160]), \
+             patch.object(runner.media.time, "sleep"), \
+             self.assertRaisesRegex(TimeoutError, "history-status, do not repeat the POST"):
+            runner.history_status(SimpleNamespace(case_dir=self.root))
+        self.requests.assert_called_once_with("http://product/api/incidents/earlier-incident/report")
+        self.assertEqual(runner.read(original / "review-request.json"), self.queued)
+        output = next((original / "status").iterdir())
+        self.assertFalse((output / "evaluation.json").exists())
+        self.assertEqual([runner.read(path) for path in (output / "raw-reviews").iterdir()], [{}])
 
 
 class AttachmentWorkflowTests(unittest.TestCase):
