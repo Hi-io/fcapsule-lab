@@ -5,7 +5,7 @@ import threading
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
-from unittest.mock import Mock, MagicMock, patch
+from unittest.mock import Mock, MagicMock, call, patch
 
 import pymysql
 import yaml
@@ -135,8 +135,8 @@ class KubernetesLabTests(unittest.TestCase):
         state.query_revision = "v2"
         state.logger = Mock()
         connection = MagicMock()
-        cursor = connection.__enter__.return_value.cursor.return_value.__enter__.return_value
-        cursor.execute.side_effect = [None, pymysql.err.OperationalError(1054, "Unknown column 'reserved_quantity'")]
+        cursor = connection.cursor.return_value.__enter__.return_value
+        cursor.execute.side_effect = [None, None, pymysql.err.OperationalError(1054, "Unknown column 'reserved_quantity'")]
         state.connect = Mock(return_value=connection)
         status, _ = state.reserve("order-1", "checkout-key-v1")
         self.assertEqual(status, 503)
@@ -161,18 +161,20 @@ class KubernetesLabTests(unittest.TestCase):
         self.assertEqual(event["consumer_decision"], "reject_as_bad_gateway")
         self.assertEqual(event["observed_fields"], ["reference", "result"])
 
-    def test_stock_reconciliation_holds_real_update_then_rolls_back(self):
+    def test_stock_reconciliation_holds_real_row_locks_then_rolls_back_on_cancel(self):
         state = InventoryState()
         state.logger = Mock()
         stop = threading.Event()
         state.logger.write.side_effect = lambda *args, **kwargs: stop.set()
         connection = MagicMock()
-        opened = connection.__enter__.return_value
+        cursor = connection.cursor.return_value.__enter__.return_value
+        cursor.fetchone.side_effect = [(10,), (12,)]
         state.connect = Mock(return_value=connection)
         state._reconcile_stock(stop)
-        cursor = opened.cursor.return_value.__enter__.return_value
-        self.assertIn("UPDATE inventory_items", cursor.execute.call_args.args[0])
-        opened.rollback.assert_called_once()
+        statements = [call.args[0] for call in cursor.execute.call_args_list]
+        self.assertTrue(any("FOR UPDATE" in statement for statement in statements))
+        cursor.executemany.assert_not_called()
+        connection.rollback.assert_called_once()
 
     def test_alerts_report_symptoms_without_injected_answers(self):
         objects = list(yaml.safe_load_all((ROOT / "deploy/kubernetes/observability.yaml").read_text()))
