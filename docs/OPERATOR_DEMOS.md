@@ -299,12 +299,20 @@ citations are pipeline states only. Sum usage across all automatic revisions,
 explicit follow-ups and vision calls, not only the last successful answer.
 
 Configured Pro limits are frozen at preflight and checked before each case and
-paid action, with ceilings 3600 completion, 12000 total, 2100 prompt tokens and one
+paid action, with ceilings 3600 completion, 12000 total, 3200 prompt tokens and one
 check. The runner never increases them. The product can independently initiate
 more than one automatic member revision; this harness cannot enforce a global
 provider spend cap. Review raw revision histories and stop manually if spending
 limits require it. No claims about five-case correctness or source-outage resilience
 are warranted until the operator completes the real run and reviews the results.
+
+The 3200 per-call prompt ceiling leaves more room for the bounded two-image
+evidence ledger, without guaranteeing all evidence fits. Lower configured budgets
+remain valid. The frozen configuration must still match exactly.
+A prior 2100-prompt run cannot be attached or reassessed under 3200
+as a same-budget comparison. Budget changes require a separately recorded run or
+explicitly budget-changed follow-up, with the difference disclosed. Do not rewrite
+the original `run.json` or its frozen `model_config` to bypass this guard.
 
 ## Local Verification
 

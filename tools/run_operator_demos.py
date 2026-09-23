@@ -32,7 +32,7 @@ from tools.run_scenarios import firing, now, request, save, wait_for_lab_quiet
 
 TERMINAL = media.TERMINAL
 CONFIG_KEYS = ("provider", "model", "max_tokens", "max_total_tokens", "max_prompt_tokens", "max_checks")
-MAXIMUMS = {"max_tokens": 3600, "max_total_tokens": 12000, "max_prompt_tokens": 2100, "max_checks": 1}
+MAXIMUMS = {"max_tokens": 3600, "max_total_tokens": 12000, "max_prompt_tokens": 3200, "max_checks": 1}
 SIGNALS = {**SCENARIOS, **DISCOVERY_SCENARIOS}
 SIGNALS["mysql-exporter-scrape-path"] = {"expected_alert": media.ALERT}
 QUESTIONS = (

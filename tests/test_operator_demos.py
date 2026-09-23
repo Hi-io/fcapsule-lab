@@ -118,12 +118,39 @@ class DemoRunnerTests(unittest.TestCase):
         with patch.object(runner, "request", return_value=config()) as api:
             frozen = runner.configuration("http://product")
         self.assertEqual(frozen["max_checks"], 1)
+        self.assertEqual(frozen["max_prompt_tokens"], 3200)
+        self.assertEqual(frozen["max_total_tokens"], 12000)
+        self.assertEqual(frozen["max_tokens"], 3600)
         self.assertEqual(len(api.call_args.args), 1)
-        for key, value in (("model", "deepseek-v4-flash"), ("max_checks", 2), ("max_total_tokens", 12001), ("max_prompt_tokens", 2101)):
+        for key, value in (("model", "deepseek-v4-flash"), ("max_checks", 2), ("max_total_tokens", 12001),
+                           ("max_tokens", 3601), ("max_prompt_tokens", 3201)):
             with patch.object(runner, "request", return_value={**config(), key: value}), self.assertRaises(ValueError):
                 runner.configuration("http://product")
         with patch.object(runner, "request", return_value=config()), self.assertRaisesRegex(ValueError, "changed"):
             runner.configuration("http://product", {**frozen, "max_tokens": 2000})
+
+    def test_prompt_ceiling_accepts_separate_budgets_but_never_mixes_frozen_configs(self):
+        for budget, other in ((2100, 3200), (3200, 2100)):
+            with self.subTest(budget=budget), patch.object(runner, "request", return_value={**config(), "max_prompt_tokens": budget}):
+                frozen = runner.configuration("http://product")
+                self.assertEqual(frozen["max_prompt_tokens"], budget)
+                self.assertEqual(runner.configuration("http://product", frozen), frozen)
+                with self.assertRaisesRegex(ValueError, "changed; refuse a mixed comparison"):
+                    runner.configuration("http://product", {**frozen, "max_prompt_tokens": other})
+
+    def test_old_run_budget_change_blocks_paid_followup_without_rewriting_record(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            frozen = {key: config()[key] for key in runner.CONFIG_KEYS}
+            frozen["max_prompt_tokens"] = 2100
+            runner.save(root / "run.json", {"outcome": "captured", "fcapsule": "http://product", "model_config": frozen})
+            runner.save(root / "recovery.json", {"restored": True})
+            original = (root / "run.json").read_bytes()
+            with patch.object(runner, "request", return_value=config()) as api, \
+                 self.assertRaisesRegex(ValueError, "changed; refuse a mixed comparison"):
+                runner.paid_context(SimpleNamespace(execute=True, case_dir=root))
+            api.assert_called_once_with("http://product/api/settings/ai")
+            self.assertEqual((root / "run.json").read_bytes(), original)
 
     def test_node_placement_memory_and_owned_activity_fail_closed(self):
         runner.safety(sample(), "worker-1")
