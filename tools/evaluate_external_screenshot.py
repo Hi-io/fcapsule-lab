@@ -104,6 +104,13 @@ def require_safe(data, minimum=1024**3):
         raise RuntimeError("Lab must be idle with healthy services and readable memory")
     if not data["pods"] or any(not p["containers"] or not all(c["ready"] for c in p["containers"]) for p in data["pods"]):
         raise RuntimeError("Lab pod readiness check failed")
+    require_node_headroom(data, minimum)
+
+
+def require_node_headroom(data, minimum=1024**3):
+    """Host safety is independent of the workload symptoms deliberately injected."""
+    if not data.get("pods"):
+        raise RuntimeError("No scheduled Lab pods available for host safety checks")
     readings = data["memory"]["data"]["result"]
     for node in {pod["node"] for pod in data["pods"]}:
         addresses = data.get("node_addresses", {}).get(node, [])
