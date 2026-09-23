@@ -97,8 +97,14 @@ def safety(data, lab_node, owner=None, minimum=1024**3):
     active = data["lab"].get("active")
     if active and active.get("run_id") != owner:
         raise RuntimeError("Another operator owns the active run")
-    checked = {**data, "lab": {**data["lab"], "active": None}}
-    media.require_safe(checked, minimum)
+    if owner is None:
+        media.require_safe(data, minimum)
+    else:
+        # Readiness can degrade under the owned fault. Preserve that observation;
+        # do not confuse intentional application failure with unsafe node pressure.
+        if data["lab"].get("memory_error"):
+            raise RuntimeError("Hosting-node memory is unavailable")
+        media.require_node_headroom(data, minimum)
     if {p["node"] for p in data["pods"]} != {lab_node}:
         raise RuntimeError(f"All Lab pods must remain pinned to {lab_node}; no scheduling changes performed")
     readings = data["memory_age"]["data"]["result"]
@@ -358,10 +364,13 @@ def run_suite(args):
                "quality": "not_evaluated", "live_source_outage_induced": False}
     save(root / "suite.json", summary)
     try:
+        print("Waiting for a quiet Lab alert baseline before preflight...", flush=True)
+        wait_for_lab_quiet(args)
         checked = preflight(args, root)
         if any(DEMO_CASES[case].get("capture") for case in selected):
             subprocess.run([args.node, "-e", "require(process.env.PLAYWRIGHT_MODULE || 'playwright')"], check=True, timeout=15)
         for case in selected:
+            print(f"Starting demo: {case}", flush=True)
             first_ordinal = 1
             if case == "query-rollout-history" and args.previous_round:
                 previous = read(args.previous_round / "run.json")
@@ -388,6 +397,7 @@ def run_suite(args):
                 summary["rounds"].append({"case": case, "round": ordinal, "path": str(round_dir),
                     "outcome": record["outcome"], "episode_id": record.get("episode_id"), "usage": record.get("usage")})
                 save(root / "suite.json", summary)
+                print(f"{case}: captured, recovered; assessment {record.get('assessment_status', 'unknown')}", flush=True)
                 if case == "query-rollout-history" and ordinal == 2:
                     prior = read(history_round(root / case, 1) / "run.json")
                     if record["episode_id"] == prior["episode_id"]:

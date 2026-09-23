@@ -144,6 +144,20 @@ class DemoRunnerTests(unittest.TestCase):
         data["config"] = {"data": {**DEFAULT_SCENARIO_CONFIG, "INVENTORY_TIMEOUT_SECONDS": "2.0"}}
         with self.assertRaises(RuntimeError): runner.baseline_config(data)
 
+    def test_owned_fault_keeps_degraded_health_but_never_ignores_host_pressure(self):
+        data = sample()
+        data["lab"]["inventory"] = {"reachable": False, "error": "Connection refused"}
+        data["pods"][0]["containers"][0]["ready"] = False
+        with self.assertRaises(RuntimeError):
+            runner.safety(data, "worker-1")
+        data["lab"]["active"] = {"run_id": "ours"}
+        runner.safety(data, "worker-1", "ours")
+        self.assertFalse(data["lab"]["inventory"]["reachable"])
+        self.assertFalse(data["pods"][0]["containers"][0]["ready"])
+        data["memory"]["data"]["result"][0]["value"][1] = "100"
+        with self.assertRaises(RuntimeError):
+            runner.safety(data, "worker-1", "ours")
+
     def test_delayed_old_signal_is_not_fresh_and_missing_reports_are_not_ready(self):
         signal = {"incident_id": "incident-LabInventoryQueryFailures-x", "created_at": "2026-09-23T12:00:30Z",
                   "started_at": "2026-09-23T11:59:00Z", "app_id": "go15:fcapsule-lab:inventory-api", "report_ready": 1}
@@ -215,6 +229,20 @@ class DemoRunnerTests(unittest.TestCase):
             for status in ("incomplete", "ready", "ready"):
                 runner.retain_assessment(root, {"revision_id": "r", "status": status})
             self.assertEqual(len(list((root / "raw-assessments").iterdir())), 2)
+
+    def test_run_waits_for_prior_alert_resolution_before_preflight(self):
+        with tempfile.TemporaryDirectory() as directory:
+            args = SimpleNamespace(execute=True, out=Path(directory) / "run", case="checkout-deadline")
+            calls = []
+            def preflight(*_):
+                calls.append("preflight")
+                raise ValueError("Stop before injection")
+            with patch.object(runner, "wait_for_lab_quiet", side_effect=lambda _: calls.append("quiet")), \
+                 patch.object(runner, "preflight", side_effect=preflight), \
+                 self.assertRaisesRegex(ValueError, "Stop before injection"):
+                runner.run_suite(args)
+            self.assertEqual(calls, ["quiet", "preflight"])
+            self.assertEqual(runner.read(args.out / "suite.json")["outcome"], "incomplete")
 
     def test_history_wait_uses_latest_membership_start_not_old_episode_start(self):
         now = datetime(2026, 9, 23, 12, tzinfo=timezone.utc).timestamp()

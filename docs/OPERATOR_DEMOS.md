@@ -66,6 +66,10 @@ Pass the agreed hosting node explicitly with **`--lab-node NODE`** and preserve 
 exporter source and current scrape settings. The runner checks every scheduled Lab
 Pod, real MemAvailable and measurement freshness on that node. Do not use another
 node's headroom as a proxy. Admission requires 1 GiB; during fault sampling the floor is 768 MiB.
+Healthy services and pod readiness are required before injection and after recovery.
+During an owned fault, degraded application health is recorded as evidence, not
+treated as node pressure. Ownership, placement, fresh measured memory and the
+768 MiB safety floor remain enforced throughout the fault.
 The Lab controller and workload leases remain independent safeguards. No new Pods,
 OOM cases, CPU stress, traffic scaling or shared-source outage is introduced.
 

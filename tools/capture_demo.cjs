@@ -13,6 +13,22 @@ function graphUrl(base, query) {
   return url.href;
 }
 
+async function waitForGraph(page) {
+  const graph = page.getByRole('tabpanel', { name: 'Graph', exact: true });
+  await graph.waitFor({ state: 'visible', timeout: 15000 });
+  // uPlot uses <th> for legend entries, not ARIA cells. Scope to the graph
+  // legend so metric names in the expression editor cannot satisfy readiness.
+  const labels = graph.locator('table.u-legend .u-label');
+  for (const metric of ['mysql_global_status_threads_connected', 'mysql_global_variables_max_connections']) {
+    await labels.filter({ hasText: new RegExp('^' + metric + '\\{') }).first().waitFor({ state: 'visible', timeout: 15000 });
+  }
+  const canvas = graph.locator('canvas').first();
+  await canvas.waitFor({ state: 'visible', timeout: 15000 });
+  if (!await canvas.evaluate(element => element.width > 0 && element.height > 0)) {
+    throw new Error('Prometheus graph canvas has no rendered dimensions');
+  }
+}
+
 async function capture(base, output, spec) {
   if (fs.existsSync(output) || fs.existsSync(output + '.json')) throw new Error('Capture already exists');
   if (spec.view === 'targets') {
@@ -26,11 +42,7 @@ async function capture(base, output, spec) {
     const viewport = { width: 1440, height: 980 };
     const page = await browser.newPage({ viewport });
     await page.goto(graphUrl(base, spec.query), { waitUntil: 'domcontentloaded', timeout: 25000 });
-    await page.getByRole('tab', { name: 'Graph', exact: true }).waitFor();
-    // Both real series must be visible; a ready page or empty graph is insufficient.
-    for (const metric of ['mysql_global_status_threads_connected', 'mysql_global_variables_max_connections']) {
-      await page.getByRole('cell').filter({ hasText: metric }).first().waitFor({ timeout: 15000 });
-    }
+    await waitForGraph(page);
     fs.mkdirSync(path.dirname(output), { recursive: true });
     const observedAt = new Date().toISOString();
     await page.screenshot({ path: output, fullPage: true });
@@ -42,7 +54,7 @@ async function capture(base, output, spec) {
   } finally { await browser.close(); }
 }
 
-module.exports = { graphUrl };
+module.exports = { graphUrl, waitForGraph };
 if (require.main === module) {
   const [base, output, encoded] = process.argv.slice(2);
   Promise.resolve().then(() => capture(base, output, JSON.parse(encoded))).catch(error => {
