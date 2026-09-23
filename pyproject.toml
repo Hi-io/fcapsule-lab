@@ -15,5 +15,8 @@ dependencies = [
 [tool.setuptools.packages.find]
 include = ["app*", "evaluation*"]
 
+[tool.setuptools.package-data]
+app = ["*.js"]
+
 [project.optional-dependencies]
 dev = ["PyYAML>=6,<7"]

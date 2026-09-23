@@ -97,6 +97,17 @@ must verify and what cannot be claimed from these cases. It is not sent to FCAPS
 
 ## Run a Recorded Evaluation
 
+For the separate practical five-case operator demo (two external Prometheus images
+and distinct-episode retained history), see [Operator demos](docs/OPERATOR_DEMOS.md).
+Preview the execution catalog without network access:
+
+```bash
+python tools/run_operator_demos.py plan
+```
+
+Live execution and paid evidence reviews require explicit `--execute` after operator
+coordination. The runner never changes FCAPSule's configured Pro model or budgets.
+
 ```bash
 python3 tools/run_scenarios.py --scenario schema-drift
 python3 tools/run_scenarios.py --scenario all
