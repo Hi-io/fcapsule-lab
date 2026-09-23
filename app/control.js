@@ -6,14 +6,16 @@ function canStart(state) {
     ['worker', 'inventory', 'orders'].every(name => state[name]?.reachable));
 }
 
-function selections(state, catalog) {
-  return Object.entries(state?.[catalog] || {}).map(([id, item]) => ({ ...item, id, scenario: item.scenario || id }));
+function selections(state) {
+  return Object.entries(state?.scenarios || {}).map(([id, item]) => ({ ...item, id, scenario: id }));
 }
 
 function sourceUrl(base, id) {
-  const url = new URL(id === 'connection-pressure' ? '/query' : '/targets', base);
+  const graph = ['mysql-connections', 'connection-pressure'].includes(id);
+  if (!graph && !['metrics-service-label-drift', 'mysql-exporter-scrape-path', 'exporter-scrape'].includes(id)) return null;
+  const url = new URL(graph ? '/query' : '/targets', base);
   if (!['http:', 'https:'].includes(url.protocol)) return null;
-  if (id === 'connection-pressure') {
+  if (graph) {
     url.searchParams.set('g0.expr', '{__name__=~"mysql_global_status_threads_connected|mysql_global_variables_max_connections",namespace="fcapsule-lab"}');
     url.searchParams.set('g0.tab', 'graph'); url.searchParams.set('g0.range_input', '10m');
   }
@@ -28,7 +30,7 @@ if (typeof document !== 'undefined') {
   const notice = text => { $('#notice').textContent = text; };
 
   function render() {
-    const items = selections(state, $('#catalog').value);
+    const items = selections(state);
     const nextShape = JSON.stringify(items) + state?.prometheus_url;
     // Preserve focused controls and tab order during status polling.
     if (shape !== nextShape) {
@@ -41,18 +43,18 @@ if (typeof document !== 'undefined') {
         const actions = document.createElement('div'); actions.className = 'actions';
         if (item.runner_only) {
           const label = document.createElement('span'); label.textContent = 'External screenshot runner';
-          const plan = document.createElement('a'); plan.href = '/api/demos/' + encodeURIComponent(item.id) + '/plan';
-          plan.download = item.id + '-plan.json'; plan.textContent = 'Download run plan';
+          const plan = document.createElement('a'); plan.href = '/api/scenarios/' + encodeURIComponent(item.id) + '/plan';
+          plan.textContent = 'Open run instructions';
           actions.append(label, plan);
         } else {
           const start = document.createElement('button'); start.dataset.start = item.id;
           start.addEventListener('click', () => startScenario(item)); actions.append(start);
         }
-        if (['connection-pressure', 'exporter-scrape', 'metrics-discovery'].includes(item.id)) {
+        if (['mysql-connections', 'mysql-exporter-scrape-path', 'metrics-service-label-drift'].includes(item.id)) {
           const href = sourceUrl(state.prometheus_url, item.id);
           if (href) {
             const link = document.createElement('a'); link.href = href; link.target = '_blank'; link.rel = 'noopener noreferrer';
-            link.textContent = item.id === 'connection-pressure' ? 'Prometheus graph' : 'Prometheus targets'; actions.append(link);
+            link.textContent = ['mysql-connections'].includes(item.id) ? 'Prometheus graph' : 'Prometheus targets'; actions.append(link);
           }
         }
         article.append(title, summary, actions); fragment.append(article);
@@ -115,7 +117,6 @@ if (typeof document !== 'undefined') {
     await status(); busy = false; render(); notice(message);
   }
 
-  $('#catalog').addEventListener('change', render);
   $('#recover').addEventListener('click', async () => {
     if (busy || !available) return;
     busy = true; render(); notice('Applying recovery');

@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 import time
+import uuid
 from datetime import datetime, timezone
 from urllib.error import HTTPError, URLError
 from pathlib import Path
@@ -20,6 +21,7 @@ from app.scenario_catalog import SCENARIOS
 
 EXPECTED = {key: item["expected_alert"] for key, item in SCENARIOS.items()}
 KUBECTL = shutil.which("kubectl") or "/snap/bin/kubectl"
+TERMINAL = {"ready", "incomplete", "inconclusive", "not_configured", "failed", "blocked"}
 
 
 def now():
@@ -77,44 +79,45 @@ def fresh_expected_alerts(alerts, expected, baseline):
 
 
 def request_investigation(fcapsule, episode_id, requested, incident_id=None):
-    """Start one fresh bounded assessment for newly captured recurrence evidence."""
+    """Prefer the automatic pass; issue one explicit correction only if membership is missing."""
     url = fcapsule.rstrip("/") + "/api/episodes/" + episode_id + "/investigation"
     request_key = (episode_id, incident_id or "")
+    current = request(url)
+    if current.get("status") not in TERMINAL:
+        return current
+    if not incident_id:
+        return current
+    if incident_id and any(isinstance(item, dict) and item.get("incident_id") == incident_id
+                           for item in ((current.get("context") or {}).get("alerts") or [])):
+        return current
     if request_key not in requested:
         requested.add(request_key)
         return request(url, {"incident_id": incident_id} if incident_id else {})
-    return request(url)
+    return current
 
 
-def start_scenario(lab, scenario, duration):
-    """Confirm a fault injection after a transient control-plane reset.
-
-    The control surface keeps the active run in memory before it fans out to the
-    workloads. After an ambiguous POST failure, observing that matching run is
-    safer than blindly injecting the same fault a second time.
-    """
-
-    url = lab + f"/api/scenarios/{scenario}/start"
-    error = None
-    for attempt in range(3):
-        try:
-            return request(url, {"duration_seconds": duration})
-        except (URLError, OSError, TimeoutError) as exc:
-            error = exc
-            status = request(lab + "/api/status")
-            active = status.get("active") or {}
-            if active.get("scenario") == scenario:
-                return {"ok": True, "message": "Scenario start confirmed after transient reset.", "run": active}
-            if active:
-                raise RuntimeError("A different Lab scenario became active after a failed start request") from exc
-            if attempt < 2:
-                time.sleep(attempt + 1)
-    raise error
+def start_scenario(lab, scenario, duration, request_id=None):
+    """Make one owned mutation request; reconcile transport ambiguity without retry."""
+    request_id = request_id or uuid.uuid4().hex
+    try:
+        result = request(lab + f"/api/scenarios/{scenario}/start",
+                         {"duration_seconds": duration, "request_id": request_id})
+    except (URLError, OSError, TimeoutError) as exc:
+        status = request(lab + "/api/status")
+        active = status.get("active") or {}
+        if active.get("run_id") == request_id and active.get("scenario") == scenario:
+            return {"ok": True, "message": "The original owned start was confirmed after a lost response.", "run": active}
+        if active:
+            raise RuntimeError("A different Lab run is active; no second injection was attempted") from exc
+        raise RuntimeError("Start response was lost and no matching owned run exists; no reinjection attempted") from exc
+    if result.get("run", {}).get("run_id") != request_id:
+        raise RuntimeError("Lab did not acknowledge the requested ownership ID")
+    return result
 
 
 def healthy(lab):
     state = request(lab + "/api/status")
-    return not state["active"] and all(state[key].get("reachable") for key in ("worker", "inventory"))
+    return not state["active"] and all(state[key].get("reachable") for key in ("worker", "inventory", "orders"))
 
 
 def settle(args):
@@ -182,13 +185,16 @@ def run_case(args, scenario, folder):
     if baseline_expected:
         raise RuntimeError(f"Expected alert {EXPECTED[scenario]} was already firing before fault injection")
     start = now()
+    owner_run_id = uuid.uuid4().hex
     record = {"scenario": scenario, "expected_alert": EXPECTED[scenario], "baseline_at": baseline, "started_at": start,
               "samples": [], "observed_alerts": [], "fcapsule": [], "outcome": "running",
+              "owner_run_id": owner_run_id,
               "minimum_retained_log_lines": args.minimum_log_lines,
               "baseline_firing_alerts": baseline_alerts}
     save(root / "run.json", record)
     try:
-        record["control"] = start_scenario(args.lab, scenario, args.duration)
+        save(root / "injection-attempt.json", {"at": start, "owner_run_id": owner_run_id, "scenario": scenario})
+        record["control"] = start_scenario(args.lab, scenario, args.duration, owner_run_id)
         print(f"{now()} {scenario}: started {record['control']['run']['run_id']}", flush=True)
         deadline = time.monotonic() + args.duration
         observed = {}
@@ -217,7 +223,10 @@ def run_case(args, scenario, folder):
             time.sleep(10)
         record["alert_observed"] = bool(observed_expected)
     finally:
-        record["recovery"] = request(args.lab + "/api/recover", {})
+        if record.get("control", {}).get("run", {}).get("run_id") == owner_run_id:
+            record["recovery"] = request(args.lab + "/api/recover", {"expected_run_id": owner_run_id})
+        else:
+            record["recovery"] = {"ok": True, "message": "No owned run was confirmed; no recovery write attempted."}
         record["fault_ended_at"] = now()
         save(root / "run.json", record)
     record["logs"] = collect_workload_logs(root, baseline)
@@ -233,7 +242,8 @@ def run_case(args, scenario, folder):
                 signal for signal in episode["signals"]
                 if signal.get("created_at", "") >= start
                 and "fcapsule-lab" in signal.get("app_id", "")
-                and EXPECTED[scenario].casefold() in json.dumps(signal).casefold()
+                and EXPECTED[scenario].casefold() in str(signal.get("incident_id", "")).casefold()
+                and signal.get("report_ready")
             ]
             if matches:
                 episodes.append((episode, max(matches, key=lambda signal: signal.get("created_at", ""))))
@@ -252,16 +262,27 @@ def run_case(args, scenario, folder):
                 "status": result["status"],
                 "attempt": result.get("attempt"),
                 "usage": result.get("usage"),
+                "assessment_context_contains_incident": any(
+                    isinstance(item, dict) and item.get("incident_id") == signal.get("incident_id")
+                    for item in ((result.get("context") or {}).get("alerts") or [])),
             })
         record["fcapsule"] = results
         save(root / "run.json", record)
-        if results and all(item["status"] in {"ready", "incomplete", "inconclusive", "not_configured"} for item in results):
+        if results and all(item["status"] in {"ready", "incomplete", "inconclusive", "not_configured", "failed", "blocked"}
+                           and item["assessment_context_contains_incident"] for item in results):
             break
         time.sleep(10)
-    record["outcome"] = "symptom_alert_observed" if record.get("alert_observed") else "expected_alert_missing"
+    record["assessment_pipeline_complete"] = bool(record.get("fcapsule")) and all(
+        item.get("assessment_context_contains_incident") and item.get("status") in
+        {"ready", "incomplete", "inconclusive", "not_configured", "failed", "blocked"}
+        for item in record.get("fcapsule", []))
+    record["outcome"] = ("captured" if record.get("alert_observed") and record["assessment_pipeline_complete"]
+                         else "assessment_or_alert_incomplete")
     record["finished_at"] = now()
     save(root / "run.json", record)
     print(f"{now()} {scenario}: {record['outcome']}; agent states {[item['status'] for item in record['fcapsule']]}", flush=True)
+    if not record.get("recovery", {}).get("ok"):
+        raise RuntimeError("Owned recovery was not confirmed; stop the suite before another case")
     settle(args)
     return record
 

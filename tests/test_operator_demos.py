@@ -10,9 +10,9 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from app.control import ControlState, handler, HTML
+from app.control import CONTROL_OWNER, ControlState, handler, HTML
 from app.demo_catalog import DEMO_CASES, public_demos
-from app.scenario_catalog import DEFAULT_SCENARIO_CONFIG, SCENARIOS
+from app.scenario_catalog import DEFAULT_SCENARIO_CONFIG, DISCOVERY_SCENARIOS, SCENARIOS, public_scenarios
 from tools import run_operator_demos as runner
 
 
@@ -52,12 +52,17 @@ class DemoCatalogTests(unittest.TestCase):
         finally:
             server.shutdown(); thread.join(); server.server_close()
 
-    def test_five_distinct_mechanisms_no_extra_benchmark_faults(self):
+    def test_unified_catalog_contains_all_unique_mechanisms_and_legacy_workflows(self):
         self.assertEqual(len(SCENARIOS), 15)
         self.assertEqual(len(DEMO_CASES), 5)
+        self.assertEqual(len(set(SCENARIOS) | set(DISCOVERY_SCENARIOS)), 17)
+        self.assertTrue(set(c["scenario"] for c in DEMO_CASES.values()).issubset(set(SCENARIOS) | set(DISCOVERY_SCENARIOS)))
         self.assertEqual(len({c["scenario"] for c in DEMO_CASES.values()}), 5)
         self.assertEqual(sum("capture" in c for c in DEMO_CASES.values()), 2)
         self.assertEqual(DEMO_CASES["query-rollout-history"]["rounds"], 2)
+        self.assertEqual(len(public_scenarios()), 17)
+        self.assertEqual(runner.scenario_rounds("mysql-connections"), 1)
+        self.assertEqual(runner.capture_spec("mysql-connections")["view"], "graph")
 
     def test_public_catalog_does_not_expose_oracle(self):
         text = json.dumps(public_demos())
@@ -70,11 +75,30 @@ class DemoCatalogTests(unittest.TestCase):
             if "config" in case or case["actions"][0]["target"] == "database":
                 continue
             state = ControlState()
-            state.active = {"run_id": "test"}; state.logger = Mock(); state._post = Mock(return_value={})
+            state.active = {"run_id": "a" * 32}; state.logger = Mock()
+            state._post = Mock(return_value={"run_id": "a" * 32})
             state._patch_scenario_config = Mock()
             state._start(name, 120)
             self.assertEqual(state._post.call_args.args[1]["settings"], DEFAULT_SCENARIO_CONFIG)
+            self.assertEqual(state._post.call_args.args[1]["run_id"], "a" * 32)
             state._patch_scenario_config.assert_not_called()
+
+    def test_application_control_ack_must_match_owned_run(self):
+        state = ControlState()
+        state._post = Mock(return_value={"run_id": "b" * 32})
+        with self.assertRaisesRegex(ValueError, "did not acknowledge"):
+            state._post_for_run("http://app/control", {"mode": "normal"}, "a" * 32)
+
+    def test_recovery_sends_and_verifies_same_run_id(self):
+        state = ControlState(); state.logger = Mock()
+        state.active = {"run_id": "a" * 32, "targets": ["worker"],
+                        "baseline_settings": DEFAULT_SCENARIO_CONFIG}
+        state._restore_owned_fields = Mock()
+        state._post = Mock(return_value={"run_id": "a" * 32})
+        state._clear_run_claim = Mock()
+        result = state.recover()
+        self.assertTrue(result["ok"])
+        self.assertEqual(state._post.call_args.args[1], {"mode": "normal", "run_id": "a" * 32})
 
     def test_owned_recovery_never_resets_another_run(self):
         state = ControlState(); state._recover = Mock()
@@ -99,13 +123,94 @@ class DemoCatalogTests(unittest.TestCase):
             result = state.start("mysql-connections", 120, "a" * 32)
         self.assertEqual(result["run"]["run_id"], "a" * 32)
 
-    def test_config_recovery_failure_does_not_skip_service_recovery(self):
+    def test_recovery_does_not_reset_workloads_after_config_conflict(self):
         state = ControlState(); state.logger = Mock(); state._post = Mock()
-        state._patch_scenario_config = Mock(side_effect=OSError("config unavailable"))
-        state._patch_metrics_service_label = Mock()
-        with patch("app.control.pymysql.connect"):
-            self.assertFalse(state.recover()["ok"])
-        state._patch_metrics_service_label.assert_called_once_with("true")
+        state.active = {"run_id": "a" * 32, "targets": ["inventory", "orders"],
+                        "baseline_settings": DEFAULT_SCENARIO_CONFIG}
+        state._restore_owned_fields = Mock(side_effect=[ValueError("concurrent edit"), None])
+        state._clear_run_claim = Mock()
+        connection = Mock()
+        with patch("app.control.pymysql.connect", return_value=connection):
+            result = state.recover()
+        self.assertFalse(result["ok"])
+        state._post.assert_not_called()
+        state._clear_run_claim.assert_not_called()
+
+    def test_unowned_recovery_is_a_noop(self):
+        state = ControlState(); state.logger = Mock(); state._post = Mock()
+        state._kubernetes_get = Mock(return_value=None)
+        with patch("app.control.pymysql.connect") as connect:
+            result = state.recover("startup")
+        self.assertTrue(result["ok"])
+        self.assertIn("no recovery writes", result["message"].lower())
+        state._post.assert_not_called()
+        connect.assert_not_called()
+
+    def test_config_field_restore_is_scoped_to_owned_value_and_detects_edits(self):
+        state = ControlState(); state.active = {"run_id": "a" * 32}
+        original = {"metadata": {"resourceVersion": "7", "annotations": {CONTROL_OWNER: "a" * 32}},
+                    "data": {"SETTING": "operator-baseline", "UNRELATED": "keep"}}
+        state._kubernetes_get = Mock(return_value=original)
+        state._kubernetes_patch = Mock()
+        state._patch_scenario_config({"SETTING": "fault-value"})
+        payload = state._kubernetes_patch.call_args.args[2]
+        self.assertEqual(payload["data"], {"SETTING": "fault-value"})
+        self.assertEqual(payload["metadata"]["resourceVersion"], "7")
+        self.assertIn("UNRELATED", original["data"])
+
+        changed = {"metadata": {"resourceVersion": "8", "annotations": {
+            CONTROL_OWNER: "a" * 32, "fcapsule.io/lab-control-field-owner": "a" * 32,
+            "fcapsule.io/lab-control-field-baseline": '{"SETTING":"operator-baseline"}',
+            "fcapsule.io/lab-control-field-applied": '{"SETTING":"fault-value"}'}},
+            "data": {"SETTING": "fault-value", "UNRELATED": "keep"}}
+        state._kubernetes_get = Mock(return_value=changed)
+        state._kubernetes_patch.reset_mock()
+        state._restore_owned_fields("configmaps", "lab-scenario-config", "data", "a" * 32)
+        restore = state._kubernetes_patch.call_args.args[2]
+        self.assertEqual(restore["data"], {"SETTING": "operator-baseline"})
+        self.assertIsNone(restore["metadata"]["annotations"]["fcapsule.io/lab-control-field-owner"])
+
+        changed["data"]["SETTING"] = "new-operator-value"
+        state._kubernetes_patch.reset_mock()
+        with self.assertRaisesRegex(ValueError, "changed during the run"):
+            state._restore_owned_fields("configmaps", "lab-scenario-config", "data", "a" * 32)
+        state._kubernetes_patch.assert_not_called()
+
+    def test_persisted_run_recovers_only_valid_owned_journal(self):
+        state = ControlState()
+        state._kubernetes_get = Mock(return_value={"metadata": {"annotations": {
+            CONTROL_OWNER: "a" * 32, "fcapsule.io/lab-control-targets": '["database"]',
+            "fcapsule.io/lab-control-baseline-settings": '{"MAX_RETRIES":"2"}',
+            "fcapsule.io/lab-control-expires-at": "2000000000",
+            "fcapsule.io/lab-control-job-id": "7"}}})
+        self.assertEqual(state._persisted_run()["job_id"], 7)
+        self.assertEqual(state._persisted_run()["targets"], ["database"])
+        state._kubernetes_get.return_value["metadata"]["annotations"]["fcapsule.io/lab-control-targets"] = "not-json"
+        with self.assertRaisesRegex(ValueError, "journal is incomplete"):
+            state._persisted_run()
+
+    def test_service_selector_recovery_targets_only_the_owned_nested_label(self):
+        state = ControlState(); state.active = {"run_id": "a" * 32}
+        current = {"metadata": {"resourceVersion": "12", "labels": {
+            "fcapsule.io/app-metrics": "true", "unrelated": "keep"}, "annotations": {}}}
+        state._kubernetes_get = Mock(return_value=current)
+        state._kubernetes_patch = Mock()
+        state._patch_metrics_service_label("ture")
+        patch = state._kubernetes_patch.call_args.args[2]
+        self.assertEqual(patch["metadata"]["labels"], {"fcapsule.io/app-metrics": "ture"})
+        self.assertNotIn("unrelated", patch["metadata"]["labels"])
+
+        current["metadata"]["annotations"] = {
+            "fcapsule.io/lab-control-field-owner": "a" * 32,
+            "fcapsule.io/lab-control-field-baseline": '{"fcapsule.io/app-metrics":"true"}',
+            "fcapsule.io/lab-control-field-applied": '{"fcapsule.io/app-metrics":"ture"}',
+        }
+        current["metadata"]["labels"]["fcapsule.io/app-metrics"] = "ture"
+        state._kubernetes_patch.reset_mock()
+        state._restore_owned_fields("services", "lab-app-metrics", "labels", "a" * 32)
+        restore = state._kubernetes_patch.call_args.args[2]
+        self.assertEqual(restore["metadata"]["labels"], {"fcapsule.io/app-metrics": "true"})
+        self.assertIsNone(restore["metadata"]["annotations"]["fcapsule.io/lab-control-field-owner"])
 
 
 class DemoRunnerTests(unittest.TestCase):

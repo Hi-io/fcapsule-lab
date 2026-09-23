@@ -12,7 +12,7 @@ import yaml
 
 from app.common import JsonLogger
 from app.control import ControlState, SCENARIOS
-from app.scenario_catalog import DEFAULT_SCENARIO_CONFIG, DISCOVERY_SCENARIOS
+from app.scenario_catalog import DEFAULT_SCENARIO_CONFIG, DISCOVERY_SCENARIOS, public_scenarios
 from app.mysql_inventory import InventoryState
 from app.orders import OrdersState
 from app.safety import lease_seconds, memory_snapshot
@@ -33,10 +33,22 @@ class KubernetesLabTests(unittest.TestCase):
         self.assertTrue(all(item["expected_alert"].startswith("Lab") for item in SCENARIOS.values()))
         self.assertEqual(DEFAULT_SCENARIO_CONFIG["INVENTORY_QUERY_REVISION"], "v1")
 
-    def test_discovery_case_is_separate_from_the_diagnostic_benchmark(self):
-        self.assertEqual(set(DISCOVERY_SCENARIOS), {"metrics-service-label-drift"})
+    def test_all_scenarios_are_in_one_operator_catalog_while_benchmark_membership_stays_stable(self):
+        self.assertEqual(set(DISCOVERY_SCENARIOS), {"metrics-service-label-drift", "mysql-exporter-scrape-path"})
         self.assertEqual(len(SCENARIOS), 15)
         self.assertEqual(DISCOVERY_SCENARIOS["metrics-service-label-drift"]["expected_alert"], "LabApplicationMetricsDiscoveryMissing")
+        catalog = public_scenarios()
+        self.assertEqual(len(catalog), 17)
+        self.assertTrue(catalog["mysql-exporter-scrape-path"]["runner_only"])
+        for item in catalog.values():
+            self.assertNotIn("expected_alert", item)
+            self.assertNotIn("actions", item)
+            self.assertNotIn("config", item)
+
+    def test_external_runner_only_scenario_cannot_be_started_through_controller(self):
+        state = ControlState()
+        with self.assertRaisesRegex(ValueError, "external runner"):
+            state.start("mysql-exporter-scrape-path")
 
     def test_discovery_run_changes_only_the_service_selector_and_recovery_restores_it(self):
         state = ControlState()
@@ -57,8 +69,8 @@ class KubernetesLabTests(unittest.TestCase):
         with patch("app.control.pymysql.connect"):
             recovery = state._recover("test")
         self.assertTrue(recovery["ok"])
-        state._patch_scenario_config.assert_called_once_with(DEFAULT_SCENARIO_CONFIG)
-        state._patch_metrics_service_label.assert_called_once_with("true")
+        state._patch_scenario_config.assert_not_called()
+        state._patch_metrics_service_label.assert_not_called()
 
     def test_real_decoder_accepts_valid_document_and_raises_on_invalid_encoding(self):
         value = {"sku": "example", "quantity": 4}
@@ -186,6 +198,7 @@ class KubernetesLabTests(unittest.TestCase):
         self.assertIn("kube_pod_container_status_last_terminated_reason", memory_exit["expr"])
         self.assertIn('reason="OOMKilled"', memory_exit["expr"])
         self.assertIn("kube_pod_container_status_last_terminated_timestamp", memory_exit["expr"])
+        self.assertNotIn("last_terminated_exitcode", memory_exit["expr"])
         self.assertNotIn("restarts_total", memory_exit["expr"])
         self.assertTrue(all(rule["for"] for rule in rules))
 

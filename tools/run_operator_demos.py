@@ -1,4 +1,4 @@
-"""Five operator demos, with explicit mutation and paid-call gates.
+"""Run scenario evaluations with explicit mutation and paid-call gates.
 
 Plan/preflight are read-only. Every run uses fresh output directories; ambiguous
 POSTs and failed assessments are never automatically retried. Oracle data stays
@@ -26,7 +26,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.demo_catalog import DEMO_CASES
-from app.scenario_catalog import DEFAULT_SCENARIO_CONFIG, DISCOVERY_SCENARIOS, SCENARIOS
+from app.scenario_catalog import DEFAULT_SCENARIO_CONFIG, DISCOVERY_SCENARIOS, SCENARIOS, public_scenarios
 from tools import evaluate_external_screenshot as media
 from tools.run_scenarios import firing, now, request, save, wait_for_lab_quiet
 
@@ -144,11 +144,28 @@ def preflight(args, root, require_owned=True):
 
 
 def capture(args, root, case):
-    spec = DEMO_CASES[case].get("capture")
+    spec = capture_spec(case)
+    if case == "mysql-connections":
+        spec = {"view": "graph", "query":
+                '{__name__=~"mysql_global_status_threads_connected|mysql_global_variables_max_connections",namespace="fcapsule-lab"}'}
     if not spec:
         return
     subprocess.run([args.node, str(ROOT / "tools/capture_demo.cjs"), args.prometheus,
                     str(root / "fault.png"), json.dumps(spec)], check=True, timeout=55)
+
+
+def capture_spec(case):
+    spec = DEMO_CASES.get(case, {}).get("capture")
+    if spec:
+        return spec
+    if case == "mysql-connections":
+        return {"view": "graph", "query":
+                '{__name__=~"mysql_global_status_threads_connected|mysql_global_variables_max_connections",namespace="fcapsule-lab"}'}
+    return None
+
+
+def scenario_rounds(case):
+    return DEMO_CASES.get(case, {}).get("rounds", 1)
 
 
 def collect_logs(root, start):
@@ -170,9 +187,12 @@ def promql(case):
         "checkout_latency": 'orders_checkout_latency_p95_seconds{namespace="fcapsule-lab"}',
         "target_up": 'up{namespace="fcapsule-lab"}',
     }
-    if case == "connection-pressure":
-        expressions["sessions_and_limit"] = DEMO_CASES[case]["capture"]["query"]
-    if case == "query-rollout-history":
+    if case in {"connection-pressure", "mysql-connections"}:
+        spec = DEMO_CASES.get(case, {}).get("capture") or {
+            "query": '{__name__=~"mysql_global_status_threads_connected|mysql_global_variables_max_connections",namespace="fcapsule-lab"}'}
+        expressions["sessions_and_limit"] = spec["query"]
+        expressions["inventory_session_ownership"] = 'inventory_mysql_client_sessions_active{namespace="fcapsule-lab"}'
+    if case in {"query-rollout-history", "schema-drift"}:
         expressions["query_errors"] = 'increase(inventory_database_failures_total{namespace="fcapsule-lab",kind="query"}[1m])'
     if case == "checkout-deadline":
         expressions["dependency_timeouts"] = 'increase(orders_dependency_failures_total{namespace="fcapsule-lab",kind="timeout"}[1m])'
@@ -280,7 +300,7 @@ def recover_owned(args, root, owner):
 
 
 def run_workload(args, case, root, config):
-    scenario = DEMO_CASES[case]["scenario"]
+    scenario = DEMO_CASES.get(case, {}).get("scenario", case)
     expected = SIGNALS[scenario]["expected_alert"]
     before = snapshot(args, root, "before")
     safety(before, args.lab_node)
@@ -301,7 +321,7 @@ def run_workload(args, case, root, config):
     if firing(args.prometheus):
         raise RuntimeError("New alert appeared during healthy baseline; no injection performed")
     record["started_at"] = now()
-    duration = DEMO_CASES[case]["duration_seconds"]
+    duration = DEMO_CASES.get(case, {}).get("duration_seconds", 180)
     save(root / "run.json", record)
     try:
         # Persist ownership before the single POST, including ambiguous failures.
@@ -363,7 +383,7 @@ def run_exporter(args, root, config):
     probe.out = root
     media.run(probe)
     record = read(root / "run.json")
-    record.update(case="exporter-scrape", model_config=config)
+    record.update(case="exporter-scrape", scenario="mysql-exporter-scrape-path", model_config=config)
     save(root / "run.json", record)
     collect_logs(root, record["started_at"])
     retain_metrics(args, root, "exporter-scrape", record["started_at"])
@@ -375,7 +395,7 @@ def run_suite(args):
     require_execute(args)
     root = args.out.resolve()
     root.mkdir(parents=True, exist_ok=False)
-    selected = list(DEMO_CASES) if args.case == "all" else [args.case]
+    selected = ([*SCENARIOS, *DISCOVERY_SCENARIOS] if args.case == "all" else [args.case])
     summary = {"started_at": now(), "cases": selected, "rounds": [], "outcome": "running",
                "quality": "not_evaluated", "live_source_outage_induced": False}
     save(root / "suite.json", summary)
@@ -383,10 +403,11 @@ def run_suite(args):
         print("Waiting for a quiet Lab alert baseline before preflight...", flush=True)
         wait_for_lab_quiet(args)
         checked = preflight(args, root)
-        if any(DEMO_CASES[case].get("capture") for case in selected):
+        if any(capture_spec(case) for case in selected):
             subprocess.run([args.node, "-e", "require(process.env.PLAYWRIGHT_MODULE || 'playwright')"], check=True, timeout=15)
         for case in selected:
             print(f"Starting demo: {case}", flush=True)
+            case_failed = False
             first_ordinal = 1
             if case == "query-rollout-history" and args.previous_round:
                 previous = read(args.previous_round / "run.json")
@@ -396,30 +417,42 @@ def run_suite(args):
                 reference.mkdir(parents=True)
                 save(reference / "reference.json", {"path": str(args.previous_round.resolve()), "reused_existing_episode": True})
                 first_ordinal = 2
-            for ordinal in range(1, DEMO_CASES[case]["rounds"] + 1):
+            for ordinal in range(1, scenario_rounds(case) + 1):
                 if ordinal < first_ordinal:
                     continue
                 wait_for_lab_quiet(args)
-                if case == "query-rollout-history" and ordinal == 2:
+                if not case_failed and case == "query-rollout-history" and ordinal == 2:
                     wait_history_gap(args, root / case)
                 configuration(args.fcapsule, checked["model_config"])
                 round_dir = root / case / ("round-" + str(ordinal))
                 round_dir.parent.mkdir(exist_ok=True)
-                if case == "exporter-scrape":
-                    record = run_exporter(args, round_dir, checked["model_config"])
-                else:
-                    round_dir.mkdir()
-                    record = run_workload(args, case, round_dir, checked["model_config"])
-                summary["rounds"].append({"case": case, "round": ordinal, "path": str(round_dir),
-                    "outcome": record["outcome"], "episode_id": record.get("episode_id"), "usage": record.get("usage")})
+                try:
+                    if case in {"exporter-scrape", "mysql-exporter-scrape-path"}:
+                        record = run_exporter(args, round_dir, checked["model_config"])
+                    else:
+                        round_dir.mkdir()
+                        record = run_workload(args, case, round_dir, checked["model_config"])
+                    summary["rounds"].append({"case": case, "round": ordinal, "path": str(round_dir),
+                        "outcome": record["outcome"], "episode_id": record.get("episode_id"),
+                        "assessment_status": record.get("assessment_status"), "usage": record.get("usage")})
+                except Exception as error:
+                    case_failed = True
+                    summary["rounds"].append({"case": case, "round": ordinal, "path": str(round_dir),
+                        "outcome": "failed", "error_type": type(error).__name__, "error": str(error)[:500]})
+                    save(root / "suite.json", summary)
+                    # If recovery was not confirmed, the next fault would be unsafe.
+                    if not (round_dir / "recovery.json").exists() or not read(round_dir / "recovery.json").get("restored"):
+                        raise
+                    print(f"{case}: failed but owned recovery was confirmed; continuing with the next case", flush=True)
                 save(root / "suite.json", summary)
-                print(f"{case}: captured, recovered; assessment {record.get('assessment_status', 'unknown')}", flush=True)
+                if not case_failed:
+                    print(f"{case}: captured, recovered; assessment {record.get('assessment_status', 'unknown')}", flush=True)
                 if case == "query-rollout-history" and ordinal == 2:
                     prior = read(history_round(root / case, 1) / "run.json")
                     if record["episode_id"] == prior["episode_id"]:
                         raise RuntimeError("Occurrences grouped into the same episode; no split or relabel attempted")
         wait_for_lab_quiet(args)
-        summary["outcome"] = "captured_pending_media_and_human_review"
+        summary["outcome"] = "completed_with_failures" if any(item.get("outcome") == "failed" for item in summary["rounds"]) else "captured_pending_media_and_human_review"
     except BaseException as error:
         summary.update(outcome="incomplete", error=f"{type(error).__name__}: {error}")
         raise
@@ -433,7 +466,7 @@ def validated_image(root, record):
     metadata = read(root / "fault.png.json")
     expected = urlparse(record["prometheus"])
     source = urlparse(metadata["source_url"])
-    spec = DEMO_CASES[record["case"]].get("capture")
+    spec = capture_spec(record["case"])
     if not spec or (source.scheme, source.netloc) != (expected.scheme, expected.netloc):
         raise ValueError("Screenshot must originate from the configured external Prometheus, not FCAPSule")
     if source.path != ("/targets" if spec["view"] == "targets" else "/query"):
@@ -734,7 +767,7 @@ def retain_prior(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=("plan", "preflight", "retain-prior", "run", "attach", "reassess", "history", "history-status"))
-    parser.add_argument("--case", choices=[*DEMO_CASES, "all"], default="all")
+    parser.add_argument("--case", choices=[*DEMO_CASES, *SCENARIOS, *DISCOVERY_SCENARIOS, "all"], default="all")
     parser.add_argument("--out", type=Path)
     parser.add_argument("--case-dir", type=Path)
     parser.add_argument("--execute", action="store_true")
@@ -768,7 +801,8 @@ def main():
     if args.episode_quiet_seconds < 960:
         parser.error("Quiet period must cover the 15-minute grouping window plus a 60-second margin")
     if args.mode == "plan":
-        print(json.dumps({"cases": DEMO_CASES, "cluster_mutations": False, "paid_calls": 0}, indent=2))
+        print(json.dumps({"scenarios": public_scenarios(), "legacy_presets": DEMO_CASES,
+                          "cluster_mutations": False, "paid_calls": 0}, indent=2))
         return
     if args.mode in {"run", "preflight", "retain-prior"} and not args.out:
         parser.error("--out must name a new private output directory")

@@ -22,8 +22,8 @@ def action(target: str, mode: str = "normal") -> dict[str, str]:
 SCENARIOS = {
     # Log-led cases: the distinguishing mechanism is recorded in execution logs.
     "poison-job": {
-        "title": "Incompatible import message", "class": "FM", "evidence_group": "logs",
-        "summary": "A durable import repeatedly reaches a decoder that cannot accept its payload.",
+        "title": "Import worker restart loop", "class": "FM", "evidence_group": "logs",
+        "summary": "A durable import repeatedly fails while the worker processes it.",
         "actions": [action("database", "poison")], "expected_alert": "LabWorkerCrashLooping",
     },
     "response-contract": {
@@ -104,8 +104,8 @@ SCENARIOS = {
         "expected_alert": "LabOrdersDependencyTimeouts",
     },
     "signing-key-skew": {
-        "title": "Request signing key skew", "class": "CM", "evidence_group": "configuration",
-        "summary": "Caller and dependency accept different request-signing key identifiers.",
+        "title": "Request key policy mismatch", "class": "CM", "evidence_group": "configuration",
+        "summary": "The caller's request key identifier is not accepted by its dependency.",
         "config": {"INVENTORY_ACCEPTED_KEY_ID": "checkout-key-v2"},
         "actions": [action("inventory", "configured"), action("orders", "configured")],
         "expected_alert": "LabOrdersDependencyAuthorizationFailures",
@@ -129,4 +129,21 @@ DISCOVERY_SCENARIOS = {
         "service_metrics_label": "ture",
         "expected_alert": "LabApplicationMetricsDiscoveryMissing",
     },
+    "mysql-exporter-scrape-path": {
+        "title": "MySQL metrics target scrape failure", "class": "Discovery", "evidence_group": "discovery",
+        "summary": "Prometheus discovers the exporter but cannot collect its metrics.",
+        "runner_only": True,
+        "expected_alert": "LabExporterScrapeFailed",
+    },
 }
+
+
+def public_scenarios() -> dict[str, dict[str, str | bool]]:
+    """Safe operator-facing catalog metadata without mutation settings or oracle labels."""
+    scenarios = {}
+    for key, item in {**SCENARIOS, **DISCOVERY_SCENARIOS}.items():
+        scenarios[key] = {
+            field: item[field] for field in ("title", "class", "evidence_group", "summary") if field in item
+        }
+        scenarios[key]["runner_only"] = bool(item.get("runner_only"))
+    return scenarios

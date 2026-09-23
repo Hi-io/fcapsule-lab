@@ -13,11 +13,13 @@ test('start admission covers missing data, all services, active run and host mem
     { ...healthy(), memory: { available_bytes: 100 } }]) assert.equal(canStart(value), false);
 });
 
-test('demo references the existing mechanism; all-case catalog remains separate', () => {
-  const state = { demos: { example: { scenario: 'mysql-connections', rounds: 1 } }, scenarios: { 'schema-drift': { title: 'Query failures' } } };
-  assert.equal(selections(state, 'demos')[0].scenario, 'mysql-connections');
-  assert.equal(selections(state, 'scenarios')[0].scenario, 'schema-drift');
-  assert.deepEqual(selections(null, 'demos'), []);
+test('one catalog lists each failure mechanism once, including runner-only scenarios', () => {
+  const state = { demos: { example: { scenario: 'mysql-connections', rounds: 1 } }, scenarios: {
+    'schema-drift': { title: 'Query failures' }, 'mysql-exporter-scrape-path': { runner_only: true },
+  } };
+  assert.deepEqual(selections(state).map(item => item.id), ['schema-drift', 'mysql-exporter-scrape-path']);
+  assert.equal(selections(state)[1].runner_only, true);
+  assert.deepEqual(selections(null), []);
 });
 
 test('graph links select both metric names without PromQL or dropping the ceiling', () => {

@@ -51,31 +51,42 @@ class ScenarioRunnerAlertTests(unittest.TestCase):
 
     def test_recurrence_starts_one_fresh_investigation_then_reads_the_same_run(self):
         requested = set()
-        with patch("tools.run_scenarios.request", side_effect=[{"status": "queued"}, {"status": "ready"}]) as call:
+        with patch("tools.run_scenarios.request", side_effect=[{"status": "running"}, {"status": "ready"}]) as call:
             queued = request_investigation("http://fcapsule", "episode-1", requested)
             ready = request_investigation("http://fcapsule", "episode-1", requested)
 
-        self.assertEqual((queued["status"], ready["status"]), ("queued", "ready"))
-        self.assertEqual(call.call_args_list[0].args, ("http://fcapsule/api/episodes/episode-1/investigation", {}))
+        self.assertEqual((queued["status"], ready["status"]), ("running", "ready"))
+        self.assertEqual(call.call_args_list[0].args, ("http://fcapsule/api/episodes/episode-1/investigation",))
         self.assertEqual(call.call_args_list[1].args, ("http://fcapsule/api/episodes/episode-1/investigation",))
 
-    def test_investigation_can_focus_a_new_signal_inside_a_correlated_episode(self):
+    def test_automatic_assessment_is_not_repeated_and_one_followup_can_focus_a_new_signal(self):
         requested = set()
-        with patch("tools.run_scenarios.request", return_value={"status": "queued"}) as call:
+        current = {"status": "ready", "context": {"alerts": [{"incident_id": "incident-old"}]}}
+        with patch("tools.run_scenarios.request", side_effect=[current, {"status": "queued"}]) as call:
             request_investigation("http://fcapsule", "episode-1", requested, "incident-new")
 
         self.assertEqual(
-            call.call_args.args,
+            call.call_args_list[1].args,
             ("http://fcapsule/api/episodes/episode-1/investigation", {"incident_id": "incident-new"}),
         )
 
     def test_start_confirms_an_active_run_after_a_connection_reset(self):
-        active = {"scenario": "signing-key-skew", "run_id": "run-1", "status": "running"}
+        request_id = "a" * 32
+        active = {"scenario": "signing-key-skew", "run_id": request_id, "status": "running"}
         with patch("tools.run_scenarios.request", side_effect=[ConnectionResetError("reset"), {"active": active}]):
-            result = start_scenario("http://lab", "signing-key-skew", 180)
+            result = start_scenario("http://lab", "signing-key-skew", 180, request_id)
 
         self.assertEqual(result["run"], active)
         self.assertIn("confirmed", result["message"])
+
+    def test_ambiguous_start_is_never_retried_or_claimed_by_scenario_name(self):
+        request_id = "a" * 32
+        active = {"scenario": "signing-key-skew", "run_id": "b" * 32, "status": "running"}
+        with patch("tools.run_scenarios.request", side_effect=[TimeoutError("lost"), {"active": active}]) as call:
+            with self.assertRaisesRegex(RuntimeError, "different Lab run"):
+                start_scenario("http://lab", "signing-key-skew", 180, request_id)
+        self.assertEqual(call.call_count, 2)
+        self.assertEqual(call.call_args_list[0].args[1]["request_id"], request_id)
 
     def test_waits_for_only_the_expected_alert_to_clear(self):
         args = type("Args", (), {"prometheus": "http://prometheus", "alert_clear_timeout": 5})()

@@ -1,8 +1,10 @@
 import unittest
+import tempfile
+from pathlib import Path
 
 from app.scenario_catalog import SCENARIOS
 from evaluation.scoring import load_ground_truth, score_investigation, score_pipeline
-from tools.evaluate_models import observation_fingerprint
+from tools.evaluate_models import observation_fingerprint, write_reports
 
 
 class EvaluationTests(unittest.TestCase):
@@ -69,6 +71,42 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(result["domains"], ["logs"])
         self.assertEqual(result["components"]["cited_evidence"], 10.0)
 
+    def test_negated_and_speculative_hypotheses_do_not_count_as_findings(self):
+        run = {
+            "status": "ready",
+            "assessment": {
+                "likely_mechanism": "The CPU is high, but PBKDF2 is not supported and is unlikely to explain it.",
+                "hypotheses": [{"status": "unresolved", "explanation": "PBKDF2 rounds may be expensive."}],
+                "next_action": "Check worker CPU quota and compare completed credential work.",
+                "uncertainty": "The current logs do not include work-factor settings.",
+                "evidence_ids": ["M1"],
+            },
+            "context": {"evidence": [{"id": "M1", "domain": "metric_anomaly"}]},
+        }
+        result = score_investigation(self.oracle["cpu-saturation"], run)
+        self.assertFalse(any(item["matched"] for item in result["findings"]))
+
+    def test_failed_or_empty_cited_check_does_not_satisfy_evidence_domain(self):
+        run = {
+            "status": "ready",
+            "assessment": {"likely_mechanism": "The ServiceMonitor selector does not match the Service label.",
+                           "next_action": "Read Service metadata.", "uncertainty": "Selector evidence unavailable.",
+                           "evidence_ids": ["Q1"]},
+            "context": {"evidence": []},
+            "checks": [{"id": "Q1", "tool": "scrape_discovery", "question": "inspect configuration",
+                        "status": "failed", "domain": "configuration", "result": {"error": "forbidden"}}],
+        }
+        self.assertEqual(score_investigation(self.oracle["response-contract"], run)["domains"], [])
+
+    def test_pipeline_does_not_count_failed_log_collection_toward_volume(self):
+        run = {"alert_observed": True,
+               "logs": {"orders-api": {"ok": False, "retained_lines": 5000}},
+               "minimum_retained_log_lines": 1000, "captured_domains": ["logs"]}
+        investigation = {"status": "ready", "input_fingerprint": "x", "assessment": {"summary": "captured"}}
+        result = score_pipeline(self.oracle["response-contract"], run, investigation)
+        self.assertFalse(result["checks"]["substantial_logs"])
+        self.assertEqual(result["retained_log_lines"], 0)
+
     def test_contract_rubric_accepts_structured_status_but_penalizes_false_transport_claim(self):
         run = {
             "status": "ready",
@@ -112,6 +150,21 @@ class EvaluationTests(unittest.TestCase):
         result = score_investigation(self.oracle["response-contract"], run)
         self.assertEqual(result["status"], "inconclusive")
         self.assertEqual(result["label"], "inconclusive_with_retained_evidence")
+
+    def test_live_source_differences_are_not_reported_as_strict_paired_wins(self):
+        rows = []
+        for model, observation, score in (("flash", "obs-a", 95), ("pro", "obs-b", 60)):
+            rows.append({"scenario": "poison-job", "repetition": 1, "model": model,
+                         "score": score, "label": "test", "comparison_valid": True,
+                         "live_observations_equivalent": False, "observation_fingerprint": observation,
+                         "input_fingerprint": "same", "category": "logs", "pipeline_score": 100,
+                         "elapsed_seconds": 1, "total_tokens": 20})
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            write_reports(folder, rows, ["flash", "pro"])
+            report = (folder / "REPORT.md").read_text()
+        self.assertIn("`flash` 0 wins, `pro` 0 wins, 0 ties", report)
+        self.assertIn("strictly comparable: 0; contextual live-source differences: 1", report)
 
 
 if __name__ == "__main__":

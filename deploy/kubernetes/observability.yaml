@@ -63,15 +63,9 @@ spec:
         - alert: LabWorkerOOMKilled
           expr: |
             (
-              (
-                kube_pod_container_status_last_terminated_reason{
-                  namespace="fcapsule-lab", container="worker", reason="OOMKilled"
-                } == 1
-                or on(namespace, pod, container)
-                kube_pod_container_status_last_terminated_exitcode{
-                  namespace="fcapsule-lab", container="worker"
-                } == 137
-              )
+              kube_pod_container_status_last_terminated_reason{
+                namespace="fcapsule-lab", container="worker", reason="OOMKilled"
+              } == 1
               and on(namespace, pod, container)
               (
                 time() - kube_pod_container_status_last_terminated_timestamp{
@@ -85,8 +79,8 @@ spec:
             service: lab-worker
             signal_class: FM
           annotations:
-            summary: A worker container terminated with OOMKilled.
-            description: Kubernetes reported a worker OOM termination in the last five minutes. Investigate memory use and workload activity.
+            summary: Kubernetes reported a recent worker OOM termination.
+            description: The worker's last termination reason is OOMKilled and its timestamp is recent. Investigate the captured memory history and active work.
 
         - alert: LabWorkerCrashLooping
           expr: |
@@ -229,7 +223,7 @@ spec:
             signal_class: PM
           annotations:
             summary: More than 15 percent of checkout requests are failing.
-            description: Orders cannot complete inventory reservations within the configured retry and timeout budgets.
+            description: The observed checkout failure ratio is elevated. Check the scoped request and dependency evidence to identify where requests are rejected.
 
         - alert: LabCheckoutLatencyHigh
           expr: orders_checkout_latency_p95_seconds{namespace="fcapsule-lab"} > 0.25

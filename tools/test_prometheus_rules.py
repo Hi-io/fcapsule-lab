@@ -19,16 +19,17 @@ def main():
     subprocess.run(command + ["check", "rules", "/dev/stdin"], input=yaml.safe_dump(spec), text=True, check=True)
     series = []
     expected = []
-    for pod, oom, restarts, waiting, fires in (
-        ("oom-backoff", 1, "5+0x5", 1, True),
-        ("stale-oom", 1, "5+0x5", 0, False),
-        ("ordinary-crash", 0, "0+1x5", 1, False),
-        ("oom-restarted", 1, "0+1x5", 0, True),
+    for pod, oom, timestamp, restarts, waiting, fires in (
+        ("oom-backoff", 1, "120+0x5", "5+0x5", 1, True),
+        ("stale-oom", 1, "-600+0x5", "5+0x5", 0, False),
+        ("ordinary-crash", 0, "0+0x5", "0+1x5", 1, False),
+        ("oom-restarted", 1, "120+0x5", "0+1x5", 0, True),
     ):
         labels = f'namespace="fcapsule-lab",pod="{pod}",container="worker"'
         reason = 'kube_pod_container_status_last_terminated_reason{' + labels + ',reason="OOMKilled"}'
         series.extend([
             {"series": reason, "values": f"{oom}+0x5"},
+            {"series": "kube_pod_container_status_last_terminated_timestamp{" + labels + "}", "values": timestamp},
             {"series": "kube_pod_container_status_restarts_total{" + labels + "}", "values": restarts},
             {"series": "kube_pod_container_status_waiting_reason{" + labels + ',reason="CrashLoopBackOff"}', "values": f"{waiting}+0x5"},
         ])
