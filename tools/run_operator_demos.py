@@ -577,9 +577,7 @@ def reassess(args):
     finish_update(root, output, record, base, before, saved["attachment_id"])
 
 
-def history(args):
-    require_execute(args)
-    root = args.case_dir.resolve()
+def history_records(root):
     first, second = [read(history_round(root, n) / "run.json") for n in (1, 2)]
     if any(r.get("case") != "query-rollout-history" or r.get("outcome") != "captured" for r in (first, second)):
         raise ValueError("Two captured query-rollout-history occurrences are required")
@@ -589,6 +587,13 @@ def history(args):
         raise ValueError("Occurrences must share product origin and model configuration")
     if not all(read(history_round(root, n) / "recovery.json").get("restored") for n in (1, 2)):
         raise ValueError("Both occurrences must be recovered")
+    return first, second
+
+
+def history(args):
+    require_execute(args)
+    root = args.case_dir.resolve()
+    first, second = history_records(root)
     configuration(first["fcapsule"], first["model_config"])
     output = root / "history-review"
     output.mkdir(exist_ok=False)
@@ -603,21 +608,64 @@ def history(args):
         "earlier_incident_id": first["incident_id"], "recurrence_incident_id": second["incident_id"], "live_source_outage_induced": False})
     queued = request(base + "/source-review", {"question": QUESTIONS})
     save(output / "review-request.json", queued)
+    finish_history_review(first, second, queued, output)
+
+
+def finish_history_review(first, second, queued, output):
     review_id = queued.get("review_id")
-    if not review_id:
-        raise RuntimeError("Source-disconnected review API unavailable; no fallback model call")
-    reviewed = media.wait_for(lambda: next((r for r in request(base + "/investigation").get("source_disconnected_reviews", [])
-                                            if r.get("review_id") == review_id), {}),
-                              lambda r: r.get("status") in TERMINAL, 160, "Retained-only review timeout")
+    if not review_id or queued.get("episode_id") != first["episode_id"]:
+        raise RuntimeError("Missing or mismatched accepted review identity; no fallback model call")
+    report_url = first["fcapsule"] + "/api/incidents/" + quote(first["incident_id"], safe="") + "/report"
+
+    def observe():
+        report = request(report_url)
+        reviewed = next((r for r in report.get("source_disconnected_reviews", [])
+                         if r.get("review_id") == review_id and r.get("episode_id") == first["episode_id"]), {})
+        snapshots = output / "raw-reviews"
+        snapshots.mkdir(exist_ok=True)
+        path = snapshots / (digest(reviewed) + ".json")
+        if not path.exists():
+            exclusive(path, reviewed)
+        return reviewed
+
+    reviewed = media.wait_for(observe, lambda r: r.get("status") in TERMINAL, 160,
+                              "Retained-only review timeout; use history-status, do not repeat the POST")
     save(output / "source-review.json", reviewed)
     recurrence = request(second["fcapsule"] + "/api/episodes/" + quote(second["episode_id"], safe="") + "/investigation")
     save(output / "recurrence-investigation.json", recurrence)
     retain_revisions(first, output)
     save(output / "evaluation.json", {"earlier_capsule_unchanged": True, "different_incidents": True,
         "same_episode": first["episode_id"] == second["episode_id"], "status": reviewed.get("status"),
+        "review_id": review_id, "completed": reviewed.get("status") in TERMINAL,
+        "sufficiency": (reviewed.get("result") or {}).get("sufficiency"),
+        "status_source": report_url, "completed_at": reviewed.get("completed_at"),
         "usage": reviewed.get("usage"), "value_verdict": "requires_human_review",
         "live_source_outage_induced": False, "source_unavailability": "review-isolated only, not a shared-source outage",
         "history_retrieval_by_investigator": "inspect recurrence checks; operator retrieval alone does not prove automatic reuse"})
+    print(f"Retained review {review_id}: {reviewed.get('status')}; results: {output}", flush=True)
+
+
+def history_status(args):
+    """Reconcile an accepted review using GET only, preserving the original attempt."""
+    root = args.case_dir.resolve()
+    first, second = history_records(root)
+    original = root / "history-review"
+    attempt = read(original / "attempt.json")
+    queued = read(original / "review-request.json")
+    if (attempt.get("earlier_incident_id") != first["incident_id"] or
+            attempt.get("recurrence_incident_id") != second["incident_id"] or
+            attempt.get("earlier_capsule_id") != first["capsule_id"] or
+            queued.get("episode_id") != first["episode_id"] or not queued.get("review_id")):
+        raise ValueError("Saved history attempt and accepted review do not match the selected rounds")
+    capsule = read(original / "earlier-capsule-retrieved.json")
+    if digest(capsule["capsule"]) != first["capsule_sha256"]:
+        raise ValueError("Previously retrieved capsule hash differs; no review request will be made")
+    output = original / "status" / uuid.uuid4().hex
+    output.mkdir(parents=True, exist_ok=False)
+    exclusive(output / "reconciliation.json", {"at": now(), "mode": "history-status", "read_only": True,
+        "original_attempt": str(original), "review_request_sha256": digest(queued), "provider_requests": 0})
+    save(output / "review-request.json", queued)
+    finish_history_review(first, second, queued, output)
 
 
 def history_round(root, ordinal):
@@ -685,7 +733,7 @@ def retain_prior(args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("plan", "preflight", "retain-prior", "run", "attach", "reassess", "history"))
+    parser.add_argument("mode", choices=("plan", "preflight", "retain-prior", "run", "attach", "reassess", "history", "history-status"))
     parser.add_argument("--case", choices=[*DEMO_CASES, "all"], default="all")
     parser.add_argument("--out", type=Path)
     parser.add_argument("--case-dir", type=Path)
@@ -726,13 +774,14 @@ def main():
         parser.error("--out must name a new private output directory")
     if args.mode in {"run", "preflight", "retain-prior"} and not args.lab_node:
         parser.error("--lab-node must name the agreed hosting node; runner never changes placement")
-    if args.mode in {"attach", "reassess", "history"} and not args.case_dir:
+    if args.mode in {"attach", "reassess", "history", "history-status"} and not args.case_dir:
         parser.error("--case-dir is required")
     if args.mode == "preflight":
         args.out.mkdir(parents=True, exist_ok=False)
         preflight(args, args.out)
     else:
-        {"run": run_suite, "attach": attach, "reassess": reassess, "history": history, "retain-prior": retain_prior}[args.mode](args)
+        {"run": run_suite, "attach": attach, "reassess": reassess, "history": history,
+         "history-status": history_status, "retain-prior": retain_prior}[args.mode](args)
 
 
 if __name__ == "__main__":

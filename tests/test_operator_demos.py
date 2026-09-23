@@ -273,6 +273,113 @@ class DemoRunnerTests(unittest.TestCase):
             self.assertEqual(runner.history_round(root, 2), root / "round-2")
 
 
+class HistoryReviewPollingTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.capsule = {"capsule": {"retained": "observations"}}
+        self.queued = {"review_id": "accepted-review", "episode_id": "earlier-episode", "status": "queued"}
+        self.ready = {**self.queued, "status": "ready", "completed_at": "2026-09-23T13:50:28Z",
+                      "result": {"sufficiency": "partially_sufficient", "answer": "Retained observations only"}}
+        self.reviews = iter([self.ready])
+        for ordinal, identity in ((1, "earlier"), (2, "recurrence")):
+            folder = self.root / f"round-{ordinal}"
+            folder.mkdir()
+            runner.save(folder / "run.json", {"case": "query-rollout-history", "outcome": "captured",
+                "incident_id": identity + "-incident", "episode_id": identity + "-episode",
+                "fcapsule": "http://product", "model_config": config(), "capsule_id": identity + "-capsule",
+                "capsule_sha256": runner.digest(self.capsule["capsule"])})
+            runner.save(folder / "recovery.json", {"restored": True})
+        configuration = patch.object(runner, "configuration", return_value=config())
+        self.configuration = configuration.start()
+        self.addCleanup(configuration.stop)
+        requests = patch.object(runner, "request", side_effect=self.api)
+        self.requests = requests.start()
+        self.addCleanup(requests.stop)
+
+    def api(self, url, payload=None):
+        if url == "http://product/api/episodes/earlier-episode/source-review":
+            self.assertEqual(payload, {"question": runner.QUESTIONS})
+            return self.queued
+        self.assertIsNone(payload)
+        if url == "http://product/api/capsules/earlier-capsule": return self.capsule
+        if url == "http://product/api/incidents/earlier-incident/report":
+            return {"investigation": {"status": "ready"}, "source_disconnected_reviews": [
+                {**self.ready, "review_id": "unrelated-review"}, next(self.reviews)]}
+        if url == "http://product/api/episodes/recurrence-episode/investigation":
+            return {"status": "ready", "checks": []}
+        if url == "http://product/artifacts/earlier-capsule/investigation_revisions.json": return {}
+        self.fail("Unexpected endpoint, including any episode investigation used for review polling: " + url)
+
+    def accepted_attempt(self):
+        output = self.root / "history-review"
+        output.mkdir()
+        runner.save(output / "attempt.json", {"earlier_incident_id": "earlier-incident",
+            "recurrence_incident_id": "recurrence-incident", "earlier_capsule_id": "earlier-capsule"})
+        runner.save(output / "review-request.json", self.queued)
+        runner.save(output / "earlier-capsule-retrieved.json", self.capsule)
+        return output
+
+    def test_history_polls_report_contract_and_uses_top_level_review_status(self):
+        self.reviews = iter([{**self.queued, "result": {"status": "ready"}}, self.ready])
+        with patch.object(runner.media.time, "sleep"):
+            runner.history(SimpleNamespace(case_dir=self.root, execute=True))
+        output = self.root / "history-review"
+        self.assertEqual(runner.read(output / "source-review.json"), self.ready)
+        self.assertEqual(len(list((output / "raw-reviews").iterdir())), 2)
+        evaluation = runner.read(output / "evaluation.json")
+        self.assertEqual(evaluation["status"], "ready")
+        self.assertTrue(evaluation["completed"])
+        self.assertEqual(evaluation["sufficiency"], "partially_sufficient")
+        self.assertEqual(evaluation["review_id"], "accepted-review")
+        self.assertEqual(sum(len(call.args) == 2 for call in self.requests.call_args_list), 1)
+
+    def test_history_status_get_only_preserves_all_original_attempt_files(self):
+        original = self.accepted_attempt()
+        runner.save(original / "source-review.json", {"status": "running"})
+        runner.save(original / "evaluation.json", {"status": "incomplete", "error": "old timeout"})
+        saved = {path: path.read_bytes() for path in original.iterdir()}
+        runner.history_status(SimpleNamespace(case_dir=self.root))
+        self.configuration.assert_not_called()
+        self.assertTrue(all(len(call.args) == 1 and not call.kwargs for call in self.requests.call_args_list))
+        for path, contents in saved.items(): self.assertEqual(path.read_bytes(), contents)
+        output = next((original / "status").iterdir())
+        self.assertEqual(runner.read(output / "source-review.json"), self.ready)
+        self.assertEqual(runner.read(output / "review-request.json"), self.queued)
+        self.assertEqual(runner.read(output / "reconciliation.json")["provider_requests"], 0)
+
+    def test_failed_review_is_completed_but_never_promoted_to_ready(self):
+        original = self.accepted_attempt()
+        self.reviews = iter([{**self.queued, "status": "incomplete", "result": None}])
+        runner.history_status(SimpleNamespace(case_dir=self.root))
+        evaluation = runner.read(next((original / "status").iterdir()) / "evaluation.json")
+        self.assertEqual(evaluation["status"], "incomplete")
+        self.assertTrue(evaluation["completed"])
+        self.assertIsNone(evaluation["sufficiency"])
+
+    def test_reconcile_rejects_mismatched_accepted_identity_without_requests(self):
+        original = self.accepted_attempt()
+        for queued in ({"episode_id": "earlier-episode"}, {**self.queued, "episode_id": "other"}):
+            runner.save(original / "review-request.json", queued)
+            with self.assertRaisesRegex(ValueError, "do not match"):
+                runner.history_status(SimpleNamespace(case_dir=self.root))
+        self.requests.assert_not_called()
+
+    def test_missing_review_times_out_without_retry_or_replacing_original_outputs(self):
+        original = self.accepted_attempt()
+        self.reviews = iter([{**self.ready, "episode_id": "wrong-episode"}])
+        with patch.object(runner.media.time, "monotonic", side_effect=[0, 0, 160]), \
+             patch.object(runner.media.time, "sleep"), \
+             self.assertRaisesRegex(TimeoutError, "history-status, do not repeat the POST"):
+            runner.history_status(SimpleNamespace(case_dir=self.root))
+        self.requests.assert_called_once_with("http://product/api/incidents/earlier-incident/report")
+        self.assertEqual(runner.read(original / "review-request.json"), self.queued)
+        output = next((original / "status").iterdir())
+        self.assertFalse((output / "evaluation.json").exists())
+        self.assertEqual([runner.read(path) for path in (output / "raw-reviews").iterdir()], [{}])
+
+
 class AttachmentWorkflowTests(unittest.TestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
