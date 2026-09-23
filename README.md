@@ -144,6 +144,11 @@ Scale back to one before a new evaluation. The lab UI and database can remain ru
 
 ## Prometheus Integration
 
+The separate [external screenshot evaluation](docs/EXTERNAL_SCREENSHOT_EVALUATION.md)
+adds a bounded exporter scrape-path incident, actual Prometheus before/fault/after
+screenshots, and a one-shot media reassessment. It is outside the fifteen-case score
+and uses no FCAPSule UI screenshots as evidence.
+
 The manifests create:
 
 - `ServiceMonitor/fcapsule-lab-applications` with a 10-second scrape interval;
