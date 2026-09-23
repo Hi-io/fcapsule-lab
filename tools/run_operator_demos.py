@@ -221,10 +221,22 @@ def retain_revisions(record, output):
             "limitation": "Older automatic revisions may be missing; do not report last-run usage as total usage"})
 
 
-def await_assessment(record, root, seconds=360):
+def assessment_contains_incident(value, incident_id):
+    context = value.get("context")
+    alerts = context.get("alerts") if isinstance(context, dict) else None
+    return isinstance(alerts, list) and any(
+        isinstance(alert, dict) and alert.get("incident_id") == incident_id for alert in alerts
+    )
+
+
+def await_assessment(record, root, seconds=360, *, allow_retained_prior=False):
     base = record["fcapsule"] + "/api/episodes/" + quote(record["episode_id"], safe="")
+    description = ("Retained assessment did not finish; no retry started" if allow_retained_prior else
+                   "No terminal assessment includes the run incident in context.alerts; no retry started")
     value = media.wait_for(lambda: retain_assessment(root, request(base + "/investigation")),
-                           lambda v: v.get("status") in TERMINAL, seconds, "Automatic assessment did not finish; no retry started")
+                           lambda v: v.get("status") in TERMINAL and
+                           (allow_retained_prior or assessment_contains_incident(v, record["incident_id"])),
+                           seconds, description)
     save(root / "investigation-before.json", value)
     report = request(record["fcapsule"] + "/api/incidents/" + quote(record["incident_id"], safe="") + "/report")
     save(root / "report.json", report)
@@ -237,6 +249,10 @@ def await_assessment(record, root, seconds=360):
         retain_revisions(record, root)
     record["assessment_status"] = value.get("status")
     record["assessment_matches_incident"] = value.get("primary_incident_id") == record["incident_id"]
+    record["assessment_context_contains_incident"] = assessment_contains_incident(value, record["incident_id"])
+    record["assessment_context_policy"] = "retained_prior_read_only" if allow_retained_prior else "current_incident_required"
+    if not record["assessment_context_contains_incident"]:
+        record["comparison_valid"] = False
     record["usage"] = value.get("usage")
     record["quality"] = "requires_human_review"
     if value.get("model") != record["model_config"]["model"]:
@@ -447,7 +463,7 @@ def paid_context(args):
     return root, record, base
 
 
-def finish_update(root, output, record, base, before, attachment_id):
+def finish_update(root, output, record, base, before, attachment_id, *, incremental_evidence=False):
     queued = request(base + "/investigation/update", {})
     save(output / "update-request.json", queued)
     if not queued.get("revision_id") or queued["revision_id"] == before.get("revision_id"):
@@ -461,21 +477,30 @@ def finish_update(root, output, record, base, before, attachment_id):
         "status": after.get("status"), "before_revision": before.get("revision_id"), "after_revision": after.get("revision_id"),
         "parent_linked": after.get("parent_revision_id") == before.get("revision_id"),
         "same_model": after.get("model") == before.get("model") == record["model_config"]["model"],
+        "policy_before": before.get("policy_version"), "policy_after": after.get("policy_version"),
+        "incremental_evidence": incremental_evidence,
         "image_delivery": media.evidence_delivery(after, attachment_id),
         "image_cited": media.assessment_cites(after, attachment_id),
         "before_usage": before.get("usage"), "after_usage": after.get("usage"),
-        "value_verdict": "requires_human_review", "limitation": "Post-recovery live observations may differ; not an image-only ablation."})
+        "value_verdict": "requires_human_review",
+        "limitation": ("Incremental evidence, not isolated image ablation. " if incremental_evidence else "") +
+                      "Post-recovery live observations may differ; not an image-only ablation."})
 
 
 def attach(args):
     if not args.pixels_reviewed:
         raise ValueError("Inspect the actual external screenshot pixels, then pass --pixels-reviewed")
+    incremental = getattr(args, "incremental_evidence", False)
+    expected_revision = getattr(args, "expected_revision", None)
+    if incremental and not expected_revision:
+        raise ValueError("--incremental-evidence requires explicit --expected-revision")
     root, record, base = paid_context(args)
     output = root / "media-review"
     if output.exists():
         raise ValueError("Attachment/reassessment was already attempted; inspect its saved state")
     data, metadata = validated_image(root, record)
-    if request(base + "/evidence"):
+    existing = request(base + "/evidence")
+    if existing and not incremental:
         raise ValueError("Existing media would contaminate the no-image baseline")
     settings = request(record["fcapsule"] + "/api/settings/media")
     if any(settings.get(k, {}).get("capability", {}).get("status") != "ready" for k in ("vision", "core_investigator")):
@@ -483,10 +508,29 @@ def attach(args):
     before = request(base + "/investigation")
     if before.get("status") not in TERMINAL or not before.get("revision_id"):
         raise ValueError("Automatic investigation is still active or absent; no additional call started")
-    if before.get("revision_id") != read(root / "investigation-before.json").get("revision_id"):
+    if expected_revision and before["revision_id"] != expected_revision:
+        raise ValueError("Current revision differs from --expected-revision; no upload started")
+    if not assessment_contains_incident(before, record["incident_id"]):
+        raise ValueError("Current assessment context.alerts does not contain this run incident; no upload started")
+    original = read(root / "investigation-before.json")
+    if before["revision_id"] != original.get("revision_id") and not incremental:
         raise ValueError("Baseline changed; inspect and explicitly reassess instead of mixing comparisons")
     output.mkdir()
-    exclusive(output / "attempt.json", {"at": now(), "pixels_reviewed": True, "sha256": metadata["sha256"], "prior_revision_id": before["revision_id"]})
+    exclusive(output / "attempt.json", {"at": now(), "pixels_reviewed": True, "sha256": metadata["sha256"],
+        "prior_revision_id": before["revision_id"], "incremental_evidence": incremental, "expected_revision": expected_revision})
+    save(output / "existing-evidence.json", existing)
+    save(output / "capture.json", metadata)
+    save(output / "baseline-provenance.json", {
+        "incremental_evidence": incremental,
+        "limitation": "Incremental evidence, not isolated image ablation." if incremental else "Post-recovery comparison, not image-only ablation.",
+        "incident_id": record["incident_id"], "episode_id": record["episode_id"],
+        "original_revision_id": original.get("revision_id"), "original_policy": original.get("policy_version"),
+        "current_revision_id": before["revision_id"], "current_policy": before.get("policy_version"),
+        "baseline_changed": original.get("revision_id") != before["revision_id"],
+        "assessment_context_contains_incident": True,
+        "existing_attachments": [{key: item.get(key) for key in ("attachment_id", "kind", "sha256", "status")} for item in existing],
+        "capture_sha256": metadata["sha256"]})
+    save(output / "investigation-original.json", original)
     save(output / "investigation-before.json", before)
     response = request(base + "/evidence", {"kind": "image", "filename": "prometheus-observation.png",
         "content_base64": base64.b64encode(data).decode(), "observed_at": metadata["observed_at"],
@@ -500,9 +544,16 @@ def attach(args):
         raise RuntimeError("Extraction failed or hash mismatch; no reassessment started")
     configuration(record["fcapsule"], record["model_config"])
     current = request(base + "/investigation")
-    if current.get("revision_id") != before["revision_id"]:
-        raise RuntimeError("An intervening revision exists; retain attachment and review explicitly")
-    finish_update(root, output, record, base, before, attachment_id)
+    save(output / "investigation-pre-update.json", current)
+    if (current.get("revision_id") != before["revision_id"] or current.get("status") not in TERMINAL or
+            not assessment_contains_incident(current, record["incident_id"])):
+        raise RuntimeError("Current assessment changed or lacks this incident; retain attachment and review explicitly")
+    current_evidence = request(base + "/evidence")
+    save(output / "evidence-pre-update.json", current_evidence)
+    prior_evidence = [item for item in current_evidence if item.get("attachment_id") != attachment_id]
+    if sorted(map(digest, prior_evidence)) != sorted(map(digest, existing)) or extracted not in current_evidence:
+        raise RuntimeError("Evidence changed during attachment; retain saved state and review explicitly")
+    finish_update(root, output, record, base, before, attachment_id, incremental_evidence=incremental)
 
 
 def reassess(args):
@@ -625,7 +676,7 @@ def retain_prior(args):
         "origin": "existing retained matching symptom; historical injection not independently reverified",
         "retained_at": now()}
     save(root / "run.json", record)
-    await_assessment(record, root, seconds=30)
+    await_assessment(record, root, seconds=30, allow_retained_prior=True)
     if not record.get("capsule_id"):
         raise ValueError("Previous capsule is unavailable; do not substitute an invented prior")
     save(root / "recovery.json", {"at": now(), "restored": True,
@@ -640,6 +691,8 @@ def main():
     parser.add_argument("--case-dir", type=Path)
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--pixels-reviewed", action="store_true")
+    parser.add_argument("--incremental-evidence", action="store_true",
+                        help="Attach to an existing evidence set; requires --expected-revision, never an isolated image ablation")
     parser.add_argument("--label")
     parser.add_argument("--expected-revision")
     parser.add_argument("--incident-id")
@@ -654,6 +707,8 @@ def main():
     parser.add_argument("--baseline", type=int, choices=range(30, 121), default=45)
     parser.add_argument("--lab-quiet-timeout", type=int, default=420)
     args = parser.parse_args()
+    if args.incremental_evidence and (args.mode != "attach" or not args.expected_revision):
+        parser.error("--incremental-evidence is attach-only and requires --expected-revision")
     for key in ("lab", "prometheus", "fcapsule"):
         value = getattr(args, key).rstrip("/")
         parsed = urlparse(value)

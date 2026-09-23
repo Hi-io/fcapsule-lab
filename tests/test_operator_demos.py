@@ -273,5 +273,246 @@ class DemoRunnerTests(unittest.TestCase):
             self.assertEqual(runner.history_round(root, 2), root / "round-2")
 
 
+class AttachmentWorkflowTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.record = {"fcapsule": "http://product", "episode_id": "shared-episode",
+                       "incident_id": "new-incident", "model_config": config()}
+        self.args = SimpleNamespace(pixels_reviewed=True, incremental_evidence=True, expected_revision="r2")
+        self.original = {"revision_id": "r1", "policy_version": "old-policy"}
+        runner.save(self.root / "investigation-before.json", self.original)
+        self.original_bytes = (self.root / "investigation-before.json").read_bytes()
+        self.before = {"revision_id": "r2", "status": "ready", "model": config()["model"],
+                       "policy_version": "current-policy", "context": {"alerts": [{"incident_id": "new-incident"}]}}
+        self.existing = [{"attachment_id": "prior-image", "kind": "image", "sha256": "prior-hash", "status": "ready"},
+                         {"attachment_id": "prior-note", "kind": "text", "sha256": "note-hash", "status": "ready"}]
+        self.metadata = {"sha256": "capture-hash", "observed_at": "2026-09-23T13:13:00Z", "source_url": "http://prom/query"}
+        self.attachment = {"attachment_id": "new-image", "kind": "image", "sha256": "capture-hash", "status": "ready"}
+        self.uploaded = False
+        self.updated = False
+        for name, kwargs in (
+            ("paid_context", {"return_value": (self.root, self.record, "http://product/api/episodes/shared-episode")}),
+            ("validated_image", {"return_value": (b"unit-test-only", self.metadata)}),
+            ("configuration", {"return_value": config()}),
+            ("request", {"side_effect": self.api}),
+        ):
+            patcher = patch.object(runner, name, **kwargs)
+            mocked = patcher.start()
+            self.addCleanup(patcher.stop)
+            if name == "request": self.requests = mocked
+
+    def api(self, url, payload=None):
+        if url.endswith("/evidence"):
+            if payload is not None:
+                self.assertTrue((self.root / "media-review" / "baseline-provenance.json").exists())
+                self.assertTrue((self.root / "media-review" / "existing-evidence.json").exists())
+                self.uploaded = True
+                return {"attachment_id": "new-image"}
+            return (getattr(self, "changed_existing", self.existing) + [self.attachment]) if self.uploaded else self.existing
+        if url.endswith("/api/settings/media"):
+            return {key: {"capability": {"status": "ready"}} for key in ("vision", "core_investigator")}
+        if url.endswith("/investigation/update"):
+            self.updated = True
+            return {"revision_id": "r3"}
+        if url.endswith("/investigation"):
+            if self.updated:
+                return {**self.before, "revision_id": "r3", "parent_revision_id": "r2"}
+            return getattr(self, "changed_assessment", self.before) if self.uploaded else self.before
+        self.fail("Unexpected request: " + url)
+
+    def test_default_rejects_existing_evidence_even_with_expected_revision(self):
+        self.args.incremental_evidence = False
+        with self.assertRaisesRegex(ValueError, "Existing media"):
+            runner.attach(self.args)
+        self.assertFalse(self.uploaded)
+        self.assertFalse((self.root / "media-review").exists())
+
+    def test_default_rejects_changed_baseline_even_with_matching_expected_revision(self):
+        self.args.incremental_evidence = False
+        self.existing = []
+        with self.assertRaisesRegex(ValueError, "Baseline changed"):
+            runner.attach(self.args)
+        self.assertFalse(self.uploaded)
+
+    def test_incremental_requires_explicit_expected_revision_before_any_request(self):
+        self.args.expected_revision = None
+        with self.assertRaisesRegex(ValueError, "requires explicit --expected-revision"):
+            runner.attach(self.args)
+        self.requests.assert_not_called()
+
+    def test_incremental_rejects_revision_mismatch_active_or_missing_incident(self):
+        for edit in ("revision", "active", "context"):
+            with self.subTest(edit=edit):
+                before = copy.deepcopy(self.before)
+                if edit == "revision": self.before["revision_id"] = "unexpected"
+                if edit == "active": self.before["status"] = "running"
+                if edit == "context":
+                    self.before["context"]["alerts"] = [{"incident_id": "other-incident"}]
+                    self.before["primary_incident_id"] = "new-incident"
+                with self.assertRaises(ValueError): runner.attach(self.args)
+                self.assertFalse(self.uploaded)
+                self.assertFalse((self.root / "media-review").exists())
+                self.before = before
+
+    def test_incremental_audits_existing_evidence_intervening_policy_and_capture(self):
+        runner.attach(self.args)
+        output = self.root / "media-review"
+        self.assertEqual((self.root / "investigation-before.json").read_bytes(), self.original_bytes)
+        self.assertEqual(runner.read(output / "investigation-original.json"), self.original)
+        self.assertEqual(runner.read(output / "investigation-before.json"), self.before)
+        self.assertEqual(runner.read(output / "existing-evidence.json"), self.existing)
+        self.assertEqual(runner.read(output / "capture.json"), self.metadata)
+        audit = runner.read(output / "baseline-provenance.json")
+        self.assertEqual(audit["existing_attachments"], self.existing)
+        self.assertEqual((audit["original_revision_id"], audit["current_revision_id"]), ("r1", "r2"))
+        self.assertEqual((audit["original_policy"], audit["current_policy"]), ("old-policy", "current-policy"))
+        self.assertTrue(audit["baseline_changed"])
+        self.assertEqual(audit["capture_sha256"], "capture-hash")
+        result = runner.read(output / "evaluation.json")
+        self.assertTrue(result["incremental_evidence"])
+        self.assertIn("Incremental evidence, not isolated image ablation", result["limitation"])
+        self.assertTrue(result["parent_linked"])
+        self.assertEqual(result["before_revision"], "r2")
+        self.assertEqual(sum(len(call.args) == 2 for call in self.requests.call_args_list), 2)
+        originals = {p.name: p.read_bytes() for p in output.iterdir()}
+        with self.assertRaisesRegex(ValueError, "already attempted"): runner.attach(self.args)
+        self.assertEqual({p.name: p.read_bytes() for p in output.iterdir()}, originals)
+
+    def test_incremental_allows_changed_baseline_with_no_existing_attachment(self):
+        self.existing = []
+        runner.attach(self.args)
+        self.assertTrue(self.updated)
+        self.assertEqual(runner.read(self.root / "media-review" / "existing-evidence.json"), [])
+
+    def test_default_unchanged_baseline_with_no_evidence_still_works(self):
+        self.args.incremental_evidence = False
+        self.existing = []
+        runner.save(self.root / "investigation-before.json", self.before)
+        runner.attach(self.args)
+        self.assertTrue(self.updated)
+        self.assertFalse(runner.read(self.root / "media-review" / "evaluation.json")["incremental_evidence"])
+
+    def test_changed_evidence_during_upload_stops_before_reassessment(self):
+        self.changed_existing = [{**item, "sha256": "changed"} for item in self.existing]
+        with self.assertRaisesRegex(RuntimeError, "Evidence changed"): runner.attach(self.args)
+        self.assertTrue(self.uploaded)
+        self.assertFalse(self.updated)
+        self.assertEqual(runner.read(self.root / "media-review" / "existing-evidence.json"), self.existing)
+        self.assertTrue((self.root / "media-review" / "evidence-pre-update.json").exists())
+
+    def test_changed_context_after_extraction_stops_before_reassessment(self):
+        self.changed_assessment = {**self.before, "context": {"alerts": [{"incident_id": "other-incident"}]}}
+        with self.assertRaisesRegex(RuntimeError, "lacks this incident"): runner.attach(self.args)
+        self.assertTrue(self.uploaded)
+        self.assertFalse(self.updated)
+        self.assertTrue((self.root / "media-review" / "investigation-pre-update.json").exists())
+
+
+class AssessmentProvenanceTests(unittest.TestCase):
+    def record(self):
+        return {"fcapsule": "http://product", "episode_id": "reused-episode",
+                "incident_id": "new-incident", "model_config": config()}
+
+    def assessment(self, status="ready", incident_id="new-incident"):
+        return {"status": status, "model": config()["model"], "primary_incident_id": "old-incident",
+                "context": {"alerts": [{"incident_id": incident_id}]}}
+
+    def test_membership_requires_exact_structured_alert_not_primary_or_prose(self):
+        contexts = (None, [], {}, {"alerts": None}, {"alerts": {}}, {"alerts": "new-incident"},
+                    {"alerts": [None, "new-incident", {}, {"incident_id": "new-incident-suffix"}]})
+        for context in contexts:
+            with self.subTest(context=context):
+                value = {"context": context, "primary_incident_id": "new-incident",
+                         "assessment": "new-incident", "alerts": [{"incident_id": "new-incident"}]}
+                self.assertFalse(runner.assessment_contains_incident(value, "new-incident"))
+        self.assertFalse(runner.assessment_contains_incident({}, "new-incident"))
+        self.assertTrue(runner.assessment_contains_incident(self.assessment(), "new-incident"))
+
+    def test_run_waits_past_stale_terminal_and_current_running_revision(self):
+        stale = {**self.assessment(incident_id="old-incident"), "revision_id": "r1"}
+        running = {**self.assessment("running"), "revision_id": "r2"}
+        current = {**self.assessment(), "revision_id": "r2"}
+        current["context"]["alerts"].insert(0, {"incident_id": "old-incident"})
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            record = self.record()
+            with patch.object(runner, "request", side_effect=[stale, running, current, {}]) as api, \
+                 patch.object(runner.media.time, "monotonic", side_effect=[0, 0, 1, 2]), \
+                 patch.object(runner.media.time, "sleep"):
+                self.assertEqual(runner.await_assessment(record, root, seconds=3), current)
+            self.assertEqual(runner.read(root / "investigation-before.json"), current)
+            self.assertEqual(len(list((root / "raw-assessments").iterdir())), 3)
+            saved = runner.read(root / "run.json")
+            self.assertTrue(saved["assessment_context_contains_incident"])
+            self.assertFalse(saved["assessment_matches_incident"])
+            self.assertEqual(saved["assessment_context_policy"], "current_incident_required")
+            self.assertEqual(api.call_count, 4)
+            self.assertTrue(all(len(call.args) == 1 and not call.kwargs for call in api.call_args_list))
+
+    def test_stale_only_times_out_without_selecting_baseline_or_triggering_request(self):
+        stale = self.assessment(incident_id="old-incident")
+        # Even primary metadata naming the new incident cannot replace actual context.
+        stale["primary_incident_id"] = "new-incident"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.object(runner, "request", return_value=stale) as api, \
+                 patch.object(runner.media.time, "monotonic", side_effect=[0, 0, 1]), \
+                 patch.object(runner.media.time, "sleep"), \
+                 self.assertRaisesRegex(TimeoutError, "context.alerts; no retry started"):
+                runner.await_assessment(self.record(), root, seconds=1)
+            api.assert_called_once_with("http://product/api/episodes/reused-episode/investigation")
+            self.assertEqual([runner.read(p) for p in (root / "raw-assessments").iterdir()], [stale])
+            self.assertFalse((root / "investigation-before.json").exists())
+            self.assertFalse((root / "report.json").exists())
+
+    def test_matching_terminal_failures_are_preserved_not_forced_to_ready(self):
+        for status in runner.TERMINAL:
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                value = self.assessment(status)
+                record = self.record()
+                with patch.object(runner, "request", side_effect=[value, {}]) as api:
+                    self.assertEqual(runner.await_assessment(record, root), value)
+                self.assertEqual(runner.read(root / "run.json")["assessment_status"], status)
+                self.assertEqual(api.call_count, 2)
+
+    def test_retain_prior_explicitly_permits_old_context_but_is_read_only_and_disclosed(self):
+        incident = "incident-labinventoryqueryfailures-prior"
+        state = {"overview": {"episodes": [{"episode_id": "reused-episode", "signals": [{
+            "incident_id": incident, "status": "resolved", "app_id": "node:fcapsule-lab:inventory-api",
+            "started_at": "2026-09-22T12:00:00Z", "ended_at": "2026-09-22T12:03:00Z"}]}]}}
+        running = self.assessment("running", "another-member")
+        terminal = self.assessment(incident_id="another-member")
+        report = {"record": {"capsule_id": "prior-capsule"}}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "import"
+            args = SimpleNamespace(out=root, incident_id=incident, fcapsule="http://product",
+                                   lab="http://lab", prometheus="http://prom")
+            with patch.object(runner, "preflight", return_value={"model_config": config()}) as preflight, \
+                 patch.object(runner, "request", side_effect=[state, running, terminal, report, {"capsule": {}}, {}]) as api, \
+                 patch.object(runner.media.time, "monotonic", side_effect=[0, 0, 1]), \
+                 patch.object(runner.media.time, "sleep"):
+                runner.retain_prior(args)
+            preflight.assert_called_once_with(args, root, require_owned=False)
+            self.assertTrue(all(len(call.args) == 1 and not call.kwargs for call in api.call_args_list))
+            self.assertEqual(api.call_count, 6)
+            self.assertEqual(runner.read(root / "investigation-before.json"), terminal)
+            saved = runner.read(root / "run.json")
+            self.assertEqual(saved["incident_id"], incident)
+            self.assertEqual(saved["capsule_id"], "prior-capsule")
+            self.assertEqual(saved["assessment_context_policy"], "retained_prior_read_only")
+            self.assertFalse(saved["assessment_context_contains_incident"])
+            self.assertFalse(saved["comparison_valid"])
+
+    def test_retained_prior_exception_still_rejects_changed_model(self):
+        value = {**self.assessment(incident_id="another-member"), "model": "different-model"}
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(runner, "request", side_effect=[value, {}]), \
+                 self.assertRaisesRegex(RuntimeError, "different model"):
+                runner.await_assessment(self.record(), Path(directory), allow_retained_prior=True)
+
+
 if __name__ == "__main__":
     unittest.main()

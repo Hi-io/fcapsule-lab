@@ -114,7 +114,12 @@ Each workload occurrence waits for a quiet alert baseline, records 45 seconds of
 health, injects one owned lease, waits for the specific fresh symptom plus 30 seconds
 of evidence, recovers, confirms baseline ConfigMap/Service/monitor and node safety,
 retains bounded logs and real Prometheus range results, and reads the automatic
-assessment. It never forces a new baseline model call to obtain a better answer.
+assessment. A run accepts a terminal assessment only when its actual
+`context.alerts` includes that run's exact incident ID; primary-incident metadata
+or a mention in prose is not enough. Stale terminal revisions remain in
+`raw-assessments/` while the runner waits within its existing timeout. A timeout
+does not select a stale baseline or start another model request.
+It never forces a new baseline model call to obtain a better answer.
 Missing/ambiguous fresh signals, old delayed captures, missing reports, incomplete
 assessments, and changed models remain explicit failures or limitations.
 
@@ -156,6 +161,14 @@ that a historical matching symptom was reused and its original intervention was
 not independently repeated. Original records are not modified. A prior of the
 wrong model, unresolved signal, absent capsule or wrong origin is rejected.
 The earlier record is referenced by path, not rewritten as a new occurrence.
+Only this read-only import permits a terminal assessment without the selected
+old member in `context.alerts`. It records
+`assessment_context_policy: retained_prior_read_only` and the actual
+`assessment_context_contains_incident` result. A missing member marks
+`comparison_valid: false`: the capsule can demonstrate retained history, but the
+assessment is not a fresh diagnostic comparison for that incident.
+`assessment_matches_incident` continues to describe primary-incident equality,
+which is distinct from actual context membership.
 
 After two genuinely separate captured episodes:
 
@@ -186,9 +199,48 @@ origin checks are provenance safeguards, not proof that the image is useful.
 Each attachment permits one extraction and one explicit evidence reassessment.
 The payload contains pixels and a neutral source/time note, never scenario names,
 injection parameters, diagnoses, rubric, expected answer or evaluator commentary.
-An existing attachment, changed baseline revision, hash mismatch or changed Pro
-budget is rejected. Attempt directories are written **before** the paid POST.
+By default, an existing attachment or changed baseline revision is rejected.
+Hash mismatches and changed Pro budgets are always rejected. The current terminal
+assessment must contain this run's incident in `context.alerts`.
+Attempt directories are written **before** the paid POST.
 Keep them after a network error; inspect server state rather than delete and retry.
+
+### Sequential Evidence In One Episode
+
+Different real incidents can naturally share an episode. Do not split or relabel
+them, or inject another fault to obtain an isolated baseline. After inspecting the
+current assessment and existing attachments, explicitly authorize incremental
+evidence with its exact current revision:
+
+```powershell
+& $python tools/run_operator_demos.py attach --case-dir local_reports/demo-UNIQUE/exporter-scrape/round-1 --incremental-evidence --expected-revision ACTUAL-CURRENT-REVISION-ID --pixels-reviewed --execute
+& $python tools/run_operator_demos.py attach --case-dir local_reports/demo-UNIQUE/connection-pressure/round-1 --incremental-evidence --expected-revision ACTUAL-REVISION-AFTER-FIRST-ATTACH --pixels-reviewed --execute
+```
+
+The flag defaults to false, applies only to `attach`, and requires
+`--expected-revision`. Run these separately: inspect the first result and read the
+actual current revision before the second command. The revision must be terminal
+and its actual `context.alerts` must include the incident from that command's
+round. Passing `--expected-revision` without the flag does not relax the default
+baseline/evidence guards. Each round still permits only one attachment attempt.
+
+This is **incremental evidence, not isolated image ablation**. The round's original
+`investigation-before.json` is never rewritten. Its new `media-review/` contains:
+
+- `existing-evidence.json`: full existing attachment records, including IDs,
+  kinds, hashes, statuses, extractions and corrections returned by the product.
+- `baseline-provenance.json`: original/current revision and policy, incident
+  membership, existing attachment identity summary and capture hash.
+- `investigation-original.json` and `investigation-before.json`: the original
+  baseline and the actual intervening assessment used for this incremental step.
+- `capture.json`: the validated screenshot's original observation metadata.
+- `investigation-pre-update.json` and `evidence-pre-update.json`: state checked
+  again after extraction, before the explicit reassessment.
+
+An intervening revision, missing incident, or changed evidence inventory stops
+the reassessment, retaining the attachment and all local attempt records. Nothing
+is automatically reuploaded or retried. Evaluation records explicitly label the
+incremental comparison; existing evidence can influence either assessment.
 
 After a product fix, an explicit named follow-up reuses unchanged evidence:
 
@@ -201,6 +253,8 @@ revision linkage, with no second image upload. Compare policy/version, calls,
 `visible_evidence_ids`, exact citations and actual token usage. A stored image does
 not imply the model saw it; a citation does not imply diagnostic correctness.
 Post-recovery source observations can change, so this is not an image-only ablation.
+The `reassess` command retains its single-attachment guard; incremental attachment
+does not relax that separate workflow.
 
 ## Review And Limits
 
