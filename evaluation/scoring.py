@@ -57,15 +57,6 @@ def positive_group_matches(text: str, alternatives: list[str]) -> bool:
     return False
 
 
-def asserted_finding_text(assessment: dict[str, Any]) -> str:
-    """Only score the selected mechanism and hypotheses marked as supported."""
-    parts = [str(assessment.get("likely_mechanism") or "")]
-    for hypothesis in assessment.get("hypotheses", []):
-        if isinstance(hypothesis, dict) and hypothesis.get("status") == "supported":
-            parts.append(str(hypothesis.get("explanation") or ""))
-    return normalize(parts)
-
-
 def cited_ids(assessment: dict[str, Any]) -> set[str]:
     found: set[str] = set()
 
@@ -82,6 +73,35 @@ def cited_ids(assessment: dict[str, Any]) -> set[str]:
 
     visit(assessment)
     return found
+
+
+def available_citation_ids(investigation: dict[str, Any]) -> set[str]:
+    available = {str(item.get("id")) for item in (investigation.get("context") or {}).get("evidence", [])
+                 if item.get("id")}
+    available.update(str(check.get("id")) for check in investigation.get("checks", [])
+                     if check.get("id") and check.get("status") in {"completed", "ok"}
+                     and check.get("result") not in (None, {}, [], ""))
+    return available
+
+
+def supported_assertions(assessment: dict[str, Any], investigation: dict[str, Any]) -> list[tuple[str, set[str]]]:
+    """Pair a causal claim with its own citations, excluding unavailable evidence IDs."""
+    available = available_citation_ids(investigation)
+    hypotheses = assessment.get("hypotheses")
+    if isinstance(hypotheses, list) and hypotheses:
+        assertions = []
+        for hypothesis in hypotheses:
+            if not isinstance(hypothesis, dict) or hypothesis.get("status") != "supported":
+                continue
+            ids = {str(item) for item in hypothesis.get("evidence_ids", [])} & available
+            explanation = normalize(hypothesis.get("explanation") or "")
+            if explanation and ids:
+                assertions.append((explanation, ids))
+        return assertions
+
+    ids = {str(item) for item in assessment.get("evidence_ids", [])} & available
+    mechanism = normalize(assessment.get("likely_mechanism") or "")
+    return [(mechanism, ids)] if mechanism and ids else []
 
 
 def _domain(value: Any) -> set[str]:
@@ -130,13 +150,19 @@ def score_investigation(scenario: dict[str, Any], investigation: dict[str, Any])
                 "domains": [], "contradictions": [], "components": {}}
 
     assessment = investigation["assessment"]
-    claim_text = asserted_finding_text(assessment)
-    cited = cited_ids(assessment)
+    assertions = supported_assertions(assessment, investigation)
+    claim_text = " ".join(text for text, _ in assertions)
     finding_weight = sum(float(item["weight"]) for item in scenario["findings"]) or 1.0
     findings = [
         {"id": item["id"],
-         "matched": (all(positive_group_matches(claim_text, alternatives) for alternatives in item["all"])
-                     and bool(cited)),
+         "matched": any(
+             all(positive_group_matches(text, alternatives) for alternatives in item["all"])
+             for text, _evidence_ids in assertions
+         ),
+         "evidence_ids": sorted(set().union(*(
+             evidence_ids for text, evidence_ids in assertions
+             if all(positive_group_matches(text, alternatives) for alternatives in item["all"])
+         ))),
          "weight": item["weight"]}
         for item in scenario["findings"]
     ]
@@ -147,7 +173,7 @@ def score_investigation(scenario: dict[str, Any], investigation: dict[str, Any])
     evidence_score = 20 * len(domains & required) / max(1, len(required))
     action_text = normalize({"next_action": assessment.get("next_action"),
                              "expected_finding": assessment.get("expected_finding")})
-    action_matches = [group_matches(action_text, alternatives) for alternatives in scenario.get("actions", [])]
+    action_matches = [positive_group_matches(action_text, alternatives) for alternatives in scenario.get("actions", [])]
     action_score = 15 * sum(action_matches) / max(1, len(action_matches))
     contradictions = [phrase for phrase in scenario.get("contradictions", [])
                       if positive_group_matches(claim_text, [phrase.casefold()])]
@@ -160,6 +186,7 @@ def score_investigation(scenario: dict[str, Any], investigation: dict[str, Any])
                  else "partially_helpful" if total >= 45 else "weak_or_misdirected")
     return {
         "score": total, "label": label, "status": status, "findings": findings,
+        "grounding_basis": "claim-linked citations restricted to evidence present in this investigation",
         "domains": sorted(domains), "required_domains": sorted(required),
         "action_criteria_matched": action_matches, "contradictions": contradictions,
         "components": {"causal_findings": round(finding_score, 1), "cited_evidence": round(evidence_score, 1),
@@ -168,15 +195,80 @@ def score_investigation(scenario: dict[str, Any], investigation: dict[str, Any])
 
 
 def score_pipeline(scenario: dict[str, Any], run: dict[str, Any], investigation: dict[str, Any]) -> dict[str, Any]:
+    """Score execution separately from diagnosis and report raw log volume only as context."""
     log_lines = sum(item.get("retained_lines", 0) for item in run.get("logs", {}).values()
                     if item.get("ok", True))
+    status = investigation.get("status")
+    terminal = status in {"ready", "incomplete", "inconclusive", "not_configured", "failed", "blocked"}
+    usable = status in {"ready", "incomplete", "inconclusive"}
+    expected_alert = run.get("alert_observed")
+    if expected_alert is None:
+        expected_name = run.get("expected_alert")
+        observed = run.get("observed_alerts") or []
+        expected_alert = bool(expected_name and any(
+            (item.get("labels") or {}).get("alertname") == expected_name for item in observed
+        ))
+    if expected_alert is None:
+        expected_alert = bool(run.get("outcome") == "captured" and run.get("alert.json"))
+    exact_incident = run.get("assessment_context_contains_incident")
+    incident_id = run.get("incident_id")
+    if exact_incident is None and incident_id:
+        exact_incident = any(
+            isinstance(item, dict) and item.get("incident_id") == incident_id
+            for item in ((investigation.get("context") or {}).get("alerts") or [])
+        )
+    if exact_incident is None:
+        exact_incident = bool(run.get("assessment_pipeline_complete"))
+    recovery = run.get("recovery") or {}
+    recovery_confirmed = bool(run.get("recovery_confirmed") or recovery.get("restored") or recovery.get("ok"))
+    owner = run.get("owner_run_id") or run.get("owner") or (run.get("control") or {}).get("run", {}).get("run_id")
+    fault_owned = bool(owner and (run.get("control") or {}).get("run", {}).get("run_id", owner) == owner)
+    if run.get("scenario") == "mysql-exporter-scrape-path":
+        fault_owned = bool(owner and run.get("outcome") == "captured")
+    if "control" not in run and run.get("alert_observed") is not None:
+        # Model-evaluation records retain the original runner's owned control acknowledgement.
+        fault_owned = bool(run.get("injection_attempted", True) and run.get("alert_observed"))
+    domains = set(run.get("captured_domains", []))
+    required = set(scenario.get("required_domains", []))
+    log_capture = run.get("logs") or {}
+    logs_collected = bool(log_capture) and all(
+        item.get("ok", False) for item in log_capture.values() if isinstance(item, dict)
+    )
     checks = {
-        "expected_alert": bool(run.get("alert_observed")),
-        "substantial_logs": log_lines >= int(run.get("minimum_retained_log_lines", 1000)),
+        "owned_fault_generation": fault_owned,
+        "expected_alert": bool(expected_alert),
+        "exact_incident_in_assessment": bool(exact_incident),
+        "investigation_terminal": terminal,
+        "investigation_usable": usable,
+        "owned_recovery_confirmed": recovery_confirmed,
+        "required_domains_available": required.issubset(domains),
+        "local_log_collection_complete": logs_collected,
         "capsule_ready": bool(investigation.get("input_fingerprint")),
-        "required_domains_available": set(scenario["required_domains"]).issubset(set(run.get("captured_domains", []))),
     }
-    weights = {"expected_alert": 35, "substantial_logs": 25, "capsule_ready": 20,
-               "required_domains_available": 20}
-    return {"score": sum(weights[key] for key, passed in checks.items() if passed),
-            "checks": checks, "retained_log_lines": log_lines}
+    pipeline_weights = {
+        "owned_fault_generation": 15,
+        "expected_alert": 15,
+        "exact_incident_in_assessment": 15,
+        "investigation_terminal": 15,
+        "investigation_usable": 20,
+        "owned_recovery_confirmed": 20,
+    }
+    pipeline_score = sum(pipeline_weights[key] for key in pipeline_weights if checks[key])
+    observability_score = round(100 * sum((
+        bool(checks["required_domains_available"]),
+        bool(checks["local_log_collection_complete"]),
+        bool(checks["capsule_ready"]),
+    )) / 3, 1)
+    return {
+        "version": 2,
+        "score": pipeline_score,
+        "pipeline_score": pipeline_score,
+        "observability_score": observability_score,
+        "checks": checks,
+        "available_domains": sorted(domains),
+        "required_domains": sorted(required),
+        "retained_log_lines_context_only": log_lines,
+        "log_count_scope": "bounded local kubectl tails; not total emitted, indexed or model-read records",
+        "investigation_status": status or "missing",
+        "human_review_required": True,
+    }

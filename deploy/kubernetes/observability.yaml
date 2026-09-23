@@ -82,6 +82,17 @@ spec:
             summary: Kubernetes reported a recent worker OOM termination.
             description: The worker's last termination reason is OOMKilled and its timestamp is recent. Investigate the captured memory history and active work.
 
+        - alert: LabWorkerBufferPressure
+          expr: max by (namespace, pod, service) (lab_worker_allocated_bytes{namespace="fcapsule-lab",service="lab-worker"}) > 83886080
+          for: 15s
+          labels:
+            severity: warning
+            service: lab-worker
+            signal_class: PM
+          annotations:
+            summary: The worker's retained memory is above 80 MiB.
+            description: The application memory gauge stayed above 80 MiB for 15 seconds. Compare its recent growth with the container memory limit and inspect the active work.
+
         - alert: LabWorkerCrashLooping
           expr: |
             max_over_time(kube_pod_container_status_waiting_reason{
@@ -95,6 +106,17 @@ spec:
           annotations:
             summary: A worker container is in restart backoff.
             description: Kubernetes observed CrashLoopBackOff within the last two minutes. The cause is not established by this alert.
+
+        - alert: LabWorkerPoisonRetries
+          expr: increase(lab_worker_poison_retries_total{namespace="fcapsule-lab",service="lab-worker"}[1m]) > 2
+          for: 10s
+          labels:
+            severity: critical
+            service: lab-worker
+            signal_class: FM
+          annotations:
+            summary: The worker is repeatedly rejecting imported documents.
+            description: More than two import deliveries were rejected and left unacknowledged in the last minute. Inspect the retained job and decoder evidence.
 
         - alert: LabOrdersDependencyDocumentInvalid
           expr: increase(orders_dependency_failures_total{namespace="fcapsule-lab",kind="contract_shape"}[1m]) > 5
@@ -166,17 +188,27 @@ spec:
 
         - alert: LabMySQLConnectionsSaturated
           expr: |
-            mysql_global_status_threads_connected{namespace="fcapsule-lab"}
-            /
-            clamp_min(mysql_global_variables_max_connections{namespace="fcapsule-lab"}, 1) > 0.80
+            (
+              inventory_mysql_client_sessions_active{namespace="fcapsule-lab",service="inventory-api"}
+              /
+              clamp_min(inventory_mysql_server_max_connections{namespace="fcapsule-lab",service="inventory-api"}, 1)
+            ) > 0.80
+            and on(namespace,pod,service)
+              (inventory_mysql_server_max_connections{namespace="fcapsule-lab",service="inventory-api"} > 0)
+            and on(namespace,pod,service)
+              (time() - inventory_mysql_sample_timestamp_seconds{namespace="fcapsule-lab",service="inventory-api"} < 45)
+            and on(namespace,pod,service)
+              (time() - timestamp(inventory_mysql_client_sessions_active{namespace="fcapsule-lab",service="inventory-api"}) < 30)
+            and on(namespace,pod,service)
+              (up{namespace="fcapsule-lab",service="inventory-api"} == 1)
           for: 20s
           labels:
             severity: critical
-            service: mysql-exporter
+            service: inventory-api
             signal_class: PM
           annotations:
-            summary: MySQL connection use is above 80 percent of max_connections.
-            description: The independent MySQL exporter reports more than 80 percent of the server connection ceiling in use. Identify session owners before changing capacity.
+            summary: Inventory-owned MySQL sessions are above 80 percent of the observed server capacity.
+            description: Compare the inventory process's checked-out sessions with the fresh MySQL capacity sample and independent exporter before changing connection limits.
 
         - alert: LabInventoryLockContention
           expr: increase(inventory_database_failures_total{namespace="fcapsule-lab",kind="lock_timeout"}[2m]) > 5
@@ -226,7 +258,16 @@ spec:
             description: The observed checkout failure ratio is elevated. Check the scoped request and dependency evidence to identify where requests are rejected.
 
         - alert: LabCheckoutLatencyHigh
-          expr: orders_checkout_latency_p95_seconds{namespace="fcapsule-lab"} > 0.25
+          expr: |
+            (
+              orders_checkout_latency_p95_seconds{namespace="fcapsule-lab",service="orders-api"} > 0.25
+            )
+            and on(namespace,pod,service)
+              (orders_checkout_latency_sample_count{namespace="fcapsule-lab",service="orders-api"} >= 10)
+            and on(namespace,pod,service)
+              (time() - orders_checkout_latency_latest_sample_timestamp_seconds{namespace="fcapsule-lab",service="orders-api"} < 30)
+            and on(namespace,pod,service)
+              (up{namespace="fcapsule-lab",service="orders-api"} == 1)
           for: 20s
           labels:
             severity: warning

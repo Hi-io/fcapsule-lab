@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "scope": "monitoring_discovery_demos",
+  "scenarios": [
+    {
+      "id": "metrics-service-label-drift",
+      "category": "discovery",
+      "expected_alert": "LabApplicationMetricsDiscoveryMissing",
+      "target_service": "orders-api",
+      "mechanism": "Prometheus stops discovering the healthy orders application target because the application Service label no longer matches the ServiceMonitor selector.",
+      "required_domains": ["metrics", "configuration"],
+      "findings": [
+        {"id": "coverage_loss", "weight": 2, "all": [["target absent", "target is absent", "target missing", "not discovered", "discovery loss", "no longer scraped"], ["orders", "orders-api", "application target"]]},
+        {"id": "service_selector_mismatch", "weight": 3, "all": [["servicemonitor", "monitor selector", "selector"], ["fcapsule.io/app-metrics", "app-metrics label"], ["ture", "true", "label mismatch", "does not match"]]},
+        {"id": "workload_health_distinguished", "weight": 1, "all": [["pod", "workload"], ["ready", "healthy", "running"]]}
+      ],
+      "actions": [["restore the service label", "correct the service label", "match the servicemonitor selector", "restore the label"], ["verify the target returns", "confirm up", "verify scraping", "target is discovered"]],
+      "contradictions": [],
+      "media_expectation": "No image is required. If supplied, it must be a real Prometheus Targets capture from the fault interval, not an FCAPSule or Lab UI screenshot."
+    },
+    {
+      "id": "mysql-exporter-scrape-path",
+      "category": "discovery",
+      "expected_alert": "LabExporterScrapeFailed",
+      "target_service": "mysql-exporter",
+      "mechanism": "The MySQL exporter target remains discovered but Prometheus receives HTTP 404 because the active ServiceMonitor path differs from the exporter's metrics path.",
+      "required_domains": ["metrics", "configuration"],
+      "findings": [
+        {"id": "discovered_but_failing", "weight": 2, "all": [["discovered", "target remains", "target is present"], ["down", "scrape failed", "unavailable"], ["404", "http not found"]]},
+        {"id": "path_mismatch", "weight": 3, "all": [["servicemonitor", "scrape path", "path"], ["/metrics-v2", "metrics-v2"], ["/metrics", "exporter endpoint", "metrics endpoint"]]},
+        {"id": "not_exporter_or_db_crash", "weight": 1, "all": [["pod", "exporter"], ["ready", "healthy", "running"]]}
+      ],
+      "actions": [["restore the scrape path", "set the path to /metrics", "correct the servicemonitor path"], ["verify the target is up", "confirm up", "check metrics are collected"]],
+      "contradictions": [],
+      "media_expectation": "A real Prometheus Targets fault screenshot should corroborate pool identity, exporter endpoint, DOWN state and HTTP 404. It supplements rather than replaces the Prometheus API and Kubernetes configuration evidence."
+    }
+  ]
+}

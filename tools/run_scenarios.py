@@ -1,4 +1,8 @@
-"""Run bounded Kubernetes cases and retain evidence independently of FCAPSule."""
+"""Legacy paired-evaluation runner; use run_operator_demos.py for operator runs.
+
+This module remains importable by evaluate_models.py. Each injected case owns its
+recovery via an exact run ID; this CLI must never issue a global, unowned recovery.
+"""
 
 import argparse
 import json
@@ -303,12 +307,9 @@ def main():
     folder = args.out / datetime.now(timezone.utc).strftime("validation-%Y%m%dT%H%M%SZ")
     folder.mkdir(parents=True)
     results = []
-    try:
-        for scenario in EXPECTED if args.scenario == "all" else [args.scenario]:
-            results.append(run_case(args, scenario, folder))
-            save(folder / "summary.json", results)
-    finally:
-        request(args.lab + "/api/recover", {})
+    for scenario in EXPECTED if args.scenario == "all" else [args.scenario]:
+        results.append(run_case(args, scenario, folder))
+        save(folder / "summary.json", results)
     print(str(folder.resolve()), flush=True)
 
 

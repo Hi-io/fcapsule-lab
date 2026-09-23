@@ -411,6 +411,12 @@ spec:
               value: lab-control
             - name: PORT
               value: "8084"
+            - name: NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+            - name: NODE_EXPORTER_URL
+              value: http://$(NODE_IP):9100/metrics
           envFrom:
             - configMapRef:
                 name: lab-runtime

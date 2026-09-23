@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import hashlib
 import os
+import re
 import socket
 import threading
 import time
@@ -19,11 +20,57 @@ from urllib.request import Request, urlopen
 from app.common import JsonLogger, QuietHandler, counter_line, gauge_line, percentile, serve
 
 
+MAX_INVENTORY_RESPONSE_BYTES = 256_000
+MAX_IDEMPOTENCY_ENTRIES = 10_000
+IDEMPOTENCY_TTL_SECONDS = 900
+MAX_ORDER_ID_LENGTH = 64
+MAX_IDEMPOTENCY_KEY_LENGTH = 128
+MAX_SCHEMA_ID_LENGTH = 32
+
+
+def _short_identifier(value: Any, field: str, max_length: int) -> str:
+    if (not isinstance(value, str) or len(value) > max_length
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", value)):
+        raise ValueError(f"{field} must be a short identifier")
+    return value
+
+
+def _safe_schema_label(value: Any) -> str:
+    if value is None:
+        return "unspecified"
+    if isinstance(value, str) and len(value) <= MAX_SCHEMA_ID_LENGTH and re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9._-]*", value):
+        return value
+    return f"non_string:{type(value).__name__}"
+
+
+def _safe_contract_value(value: Any) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, str):
+        if len(value) <= 32 and re.fullmatch(r"[A-Za-z0-9._-]+", value):
+            return value
+        return f"string_length:{len(value)}"
+    if isinstance(value, bool):
+        return f"boolean:{str(value).lower()}"
+    if isinstance(value, (int, float)):
+        return "number"
+    return f"type:{type(value).__name__}"
+
+
+def _observed_fields(payload: dict[str, Any]) -> list[str]:
+    return sorted(str(key)[:64] for key in payload)[:24]
+
+
 class OrdersState:
     def __init__(self) -> None:
         self.inventory_url = os.environ["INVENTORY_URL"].rstrip("/")
         self.timeout = float(os.environ.get("INVENTORY_TIMEOUT_SECONDS", "0.45"))
         self.max_retries = int(os.environ.get("MAX_RETRIES", "3"))
+        if not 0.01 <= self.timeout <= 30:
+            raise ValueError("Inventory timeout must be between 0.01 and 30 seconds")
+        if not 1 <= self.max_retries <= 5:
+            raise ValueError("MAX_RETRIES must be between 1 and 5 attempts")
         self.logger = JsonLogger("orders-api")
         self.requests = {"200": 0, "409": 0, "502": 0, "503": 0}
         self.checkout_errors = 0
@@ -32,11 +79,15 @@ class OrdersState:
         self.inflight = 0
         self.latencies: list[tuple[float, float, float]] = []
         self.mode = "normal"
-        self.signing_key_id = os.environ.get("ORDER_SIGNING_KEY_ID", "checkout-key-v1")
-        self.expected_schema = os.environ.get("ORDER_EXPECTED_SCHEMA", "v1")
+        self.signing_key_id = _short_identifier(
+            os.environ.get("ORDER_SIGNING_KEY_ID", "checkout-key-v1"), "Request key ID", 64
+        )
+        self.expected_schema = _short_identifier(
+            os.environ.get("ORDER_EXPECTED_SCHEMA", "v1"), "Response schema identifier", MAX_SCHEMA_ID_LENGTH
+        )
         self.dependency_failures = {"transport": 0, "timeout": 0, "authorization": 0,
                                     "contract_shape": 0, "contract_version": 0}
-        self.internal_failures = {"idempotency_conflict": 0}
+        self.internal_failures = {"idempotency_conflict": 0, "idempotency_capacity": 0}
         self.idempotency_replays = 0
         self._idempotency: OrderedDict[str, dict[str, Any]] = OrderedDict()
         self._lock = threading.Lock()
@@ -51,15 +102,25 @@ class OrdersState:
         if mode not in {"normal", "configured", "idempotency-conflict"}:
             raise ValueError(f"Unknown orders mode: {mode}")
         run_id = _validate_run_id(run_id)
+        if settings is not None and not isinstance(settings, dict):
+            raise ValueError("Orders settings must be an object")
         values = settings or {}
-        inventory_url = str(values.get("INVENTORY_URL", os.environ.get("INVENTORY_URL", "http://inventory-api:8081"))).rstrip("/")
+        raw_inventory_url = values.get("INVENTORY_URL", os.environ.get("INVENTORY_URL", "http://inventory-api:8081"))
+        if not isinstance(raw_inventory_url, str) or not raw_inventory_url or len(raw_inventory_url) > 2048:
+            raise ValueError("Inventory URL must be a non-empty URL under 2048 characters")
+        inventory_url = raw_inventory_url.rstrip("/")
         timeout = float(values.get("INVENTORY_TIMEOUT_SECONDS", "1.5"))
         max_retries = int(values.get("MAX_RETRIES", "3"))
         if not 0.01 <= timeout <= 30:
             raise ValueError("Inventory timeout must be between 0.01 and 30 seconds")
         if not 1 <= max_retries <= 5:
             raise ValueError("MAX_RETRIES must be between 1 and 5 attempts")
-        expected_schema = str(values.get("ORDER_EXPECTED_SCHEMA", "v1"))
+        expected_schema = _short_identifier(
+            values.get("ORDER_EXPECTED_SCHEMA", "v1"), "Response schema identifier", MAX_SCHEMA_ID_LENGTH
+        )
+        request_key_id = _short_identifier(
+            values.get("ORDER_SIGNING_KEY_ID", "checkout-key-v1"), "Request key ID", 64
+        )
         parsed = urlparse(inventory_url)
         try:
             dependency_port = parsed.port
@@ -70,16 +131,19 @@ class OrdersState:
             self.inventory_url = inventory_url
             self.timeout = timeout
             self.max_retries = max_retries
-            self.signing_key_id = str(values.get("ORDER_SIGNING_KEY_ID", "checkout-key-v1"))
+            self.signing_key_id = request_key_id
             self.expected_schema = expected_schema
             self._fault_namespace = uuid.uuid4().hex if mode == "idempotency-conflict" else None
             self._expires_at = time.monotonic() + max(30, min(300, int(duration))) if mode != "normal" else 0.0
             self._control_run_id = run_id
         revision = hashlib.sha256(
-            f"{self.inventory_url}|{self.timeout}|{self.max_retries}|{self.signing_key_id}|{self.expected_schema}".encode()
+            f"{inventory_url}|{timeout}|{max_retries}|{request_key_id}|{expected_schema}".encode()
         ).hexdigest()[:12]
         self.logger.write("INFO", "Checkout runtime configuration applied", configuration_revision=revision,
-                          dependency_host=parsed.hostname, dependency_port=dependency_port, run_id=run_id)
+                          dependency_host=parsed.hostname, dependency_port=dependency_port,
+                          dependency_timeout_seconds=timeout, max_dependency_attempts=max_retries,
+                          request_key_id=request_key_id, expected_response_schema=expected_schema,
+                          run_id=run_id)
 
     def _lease_loop(self) -> None:
         while True:
@@ -96,13 +160,32 @@ class OrdersState:
                 self.dependency_failures[kind] = 0
             self.dependency_failures[kind] += 1
 
-    def _attempt_inventory_result(self, order_id: str, request_id: str = "", attempt: int = 1) -> dict[str, Any]:
-        endpoint = f"{self.inventory_url}/reserve?{urlencode({'order_id': order_id})}"
-        parsed = urlparse(self.inventory_url)
+    def _attempt_inventory_result(self, order_id: str, request_id: str = "", attempt: int = 1,
+                                  config: dict[str, Any] | None = None,
+                                  prior_timed_out_attempts: int = 0) -> dict[str, Any]:
+        if config is None:
+            with self._lock:
+                config = {
+                    "inventory_url": self.inventory_url,
+                    "timeout": self.timeout,
+                    "max_attempts": self.max_retries,
+                    "signing_key_id": self.signing_key_id,
+                    "expected_schema": self.expected_schema,
+                }
+        inventory_url = config["inventory_url"]
+        timeout = config["timeout"]
+        max_attempts = config["max_attempts"]
+        signing_key_id = config["signing_key_id"]
+        expected_schema = config["expected_schema"]
+        endpoint = f"{inventory_url}/reserve?{urlencode({'order_id': order_id})}"
         try:
+            parsed = urlparse(inventory_url)
             dependency_port = parsed.port
+            dependency_host = parsed.hostname
         except ValueError as exc:
+            parsed = None
             dependency_port = None
+            dependency_host = None
             parse_error = exc
         else:
             parse_error = None
@@ -113,13 +196,19 @@ class OrdersState:
             duration_ms = round((time.perf_counter() - started) * 1000, 2)
             if kind != "success":
                 self._dependency_failure(kind)
+            if kind == "timeout":
+                evidence.setdefault("remote_cancellation_propagated", False)
+                evidence.setdefault("late_completion_possible", True)
+                evidence.setdefault("prior_timed_out_attempts_may_still_be_running",
+                                    prior_timed_out_attempts > 0)
             self.logger.write(
                 "INFO" if kind == "success" else "WARN" if retryable else "ERROR",
                 "Inventory dependency attempt completed",
                 request_id=request_id or None,
                 order_ref=_safe_ref(order_id),
                 attempt=attempt,
-                dependency_host=parsed.hostname,
+                attempt_limit=max_attempts,
+                dependency_host=dependency_host,
                 dependency_port=dependency_port,
                 dependency_duration_ms=duration_ms,
                 upstream_status=upstream_status,
@@ -129,54 +218,83 @@ class OrdersState:
                 **evidence,
             )
             return {"status": int(status), "kind": kind, "upstream_status": upstream_status,
-                    "retryable": retryable, "duration_ms": duration_ms}
+                    "retryable": retryable, "duration_ms": duration_ms,
+                    "remote_cancellation_propagated": False if kind == "timeout" else None,
+                    "late_completion_possible": kind == "timeout"}
 
         try:
             if parse_error:
                 return result(HTTPStatus.SERVICE_UNAVAILABLE, "transport", None, False,
                               error_type=type(parse_error).__name__, consumer_decision="invalid_dependency_url")
-            request = Request(endpoint, headers={"X-Signing-Key-Id": self.signing_key_id})
-            with urlopen(request, timeout=self.timeout) as response:
-                body = response.read(256_000)
+            request = Request(endpoint, headers={"X-Signing-Key-Id": signing_key_id})
+            with urlopen(request, timeout=timeout) as response:
+                body = response.read(MAX_INVENTORY_RESPONSE_BYTES + 1)
                 upstream_status = int(response.status)
+            if upstream_status != HTTPStatus.OK:
+                if 200 <= upstream_status < 300:
+                    return result(HTTPStatus.BAD_GATEWAY, "contract_status", upstream_status, False,
+                                  expected_upstream_status=int(HTTPStatus.OK),
+                                  response_bytes=min(len(body), MAX_INVENTORY_RESPONSE_BYTES + 1),
+                                  consumer_decision="reject_unexpected_success_status")
+                retryable = upstream_status in {408, 425, 429} or upstream_status >= 500
+                return result(HTTPStatus.SERVICE_UNAVAILABLE, "http_error", upstream_status, retryable,
+                              expected_upstream_status=int(HTTPStatus.OK),
+                              consumer_decision="dependency_http_status_rejected")
+            if len(body) > MAX_INVENTORY_RESPONSE_BYTES:
+                return result(HTTPStatus.BAD_GATEWAY, "contract_shape", upstream_status, False,
+                              expected_schema=expected_schema, observed_type="oversized_document",
+                              response_bytes=len(body), max_response_bytes=MAX_INVENTORY_RESPONSE_BYTES,
+                              consumer_decision="reject_oversized_document")
             try:
                 payload = json.loads(body)
-            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            except (UnicodeDecodeError, ValueError, RecursionError) as exc:
                 return result(HTTPStatus.BAD_GATEWAY, "contract_shape", upstream_status, False,
-                              expected_schema=self.expected_schema, observed_type="invalid_json",
+                              expected_schema=expected_schema, observed_type="invalid_json",
                               error_type=type(exc).__name__, response_bytes=len(body),
                               consumer_decision="reject_as_bad_gateway")
 
             if not isinstance(payload, dict):
                 return result(HTTPStatus.BAD_GATEWAY, "contract_shape", upstream_status, False,
-                              expected_schema=self.expected_schema, observed_type=type(payload).__name__,
+                              expected_schema=expected_schema, observed_type=type(payload).__name__,
                               consumer_decision="reject_as_bad_gateway")
             observed_schema = payload.get("schema")
-            if self.expected_schema not in {"v1", "v2"}:
+            observed_schema_label = _safe_schema_label(observed_schema)
+            if expected_schema not in {"v1", "v2"}:
                 return result(HTTPStatus.BAD_GATEWAY, "contract_version", upstream_status, False,
-                              expected_schema=self.expected_schema, observed_schema=observed_schema,
-                              observed_fields=sorted(str(key) for key in payload.keys())[:24],
+                              expected_schema=expected_schema, observed_schema=observed_schema_label,
+                              observed_fields=_observed_fields(payload),
                               consumer_decision="reject_unsupported_consumer_schema")
-            if self.expected_schema == "v1":
+            if expected_schema == "v1":
                 reservation = payload
-                valid = payload.get("status") == "reserved"
-                missing_fields = [] if "status" in payload else ["status"]
+                status_present = "status" in payload
+                observed_status = _safe_contract_value(payload.get("status")) if status_present else "missing"
+                valid = status_present and payload.get("status") == "reserved"
+                missing_fields = [] if status_present else ["status"]
             else:
                 reservation = payload.get("reservation")
-                valid = isinstance(reservation, dict) and reservation.get("status") == "reserved"
-                missing_fields = ["reservation.status"] if not (isinstance(reservation, dict) and "status" in reservation) else []
-            version_mismatch = observed_schema is not None and observed_schema != self.expected_schema
-            if upstream_status == HTTPStatus.OK and (version_mismatch or not valid):
+                status_present = isinstance(reservation, dict) and "status" in reservation
+                observed_status = _safe_contract_value(reservation.get("status")) if status_present else "missing"
+                valid = status_present and reservation.get("status") == "reserved"
+                missing_fields = [] if status_present else ["reservation.status"]
+            version_mismatch = observed_schema is not None and (
+                not isinstance(observed_schema, str) or observed_schema != expected_schema
+            )
+            if version_mismatch or not valid:
                 kind = "contract_version" if version_mismatch else "contract_shape"
                 return result(HTTPStatus.BAD_GATEWAY, kind, upstream_status, False,
-                              expected_schema=self.expected_schema, observed_schema=observed_schema or "unspecified",
-                              observed_fields=sorted(str(key) for key in payload.keys())[:24],
+                              expected_schema=expected_schema, observed_schema=observed_schema_label,
+                              observed_fields=_observed_fields(payload),
                               observed_reservation_type=type(reservation).__name__,
+                              observed_status=observed_status,
+                              validation_failure=(
+                                  "schema_mismatch" if version_mismatch else
+                                  "missing_required_field" if missing_fields else
+                                  "unexpected_status_value"
+                              ),
                               missing_fields=missing_fields,
                               consumer_decision="reject_as_bad_gateway")
-            return result(upstream_status, "success" if upstream_status < 400 else "http_error",
-                          upstream_status, upstream_status in {408, 425, 429} or upstream_status >= 500,
-                          expected_schema=self.expected_schema, observed_schema=observed_schema or "unspecified")
+            return result(upstream_status, "success", upstream_status, False,
+                          expected_schema=expected_schema, observed_schema=observed_schema_label)
         except HTTPError as exc:
             try:
                 exc.read(64_000)
@@ -188,16 +306,16 @@ class OrdersState:
                           consumer_decision="dependency_http_error")
         except (TimeoutError, socket.timeout):
             return result(HTTPStatus.SERVICE_UNAVAILABLE, "timeout", None, True,
-                          timeout_seconds=self.timeout, consumer_decision="dependency_timeout")
+                          timeout_seconds=timeout, consumer_decision="dependency_timeout")
         except URLError as exc:
             kind = "timeout" if isinstance(exc.reason, (TimeoutError, socket.timeout)) else "transport"
             return result(HTTPStatus.SERVICE_UNAVAILABLE, kind, None, kind == "timeout",
-                          error_type=type(exc.reason).__name__, timeout_seconds=self.timeout,
+                          error_type=type(exc.reason).__name__, timeout_seconds=timeout,
                           consumer_decision="dependency_transport_error")
         except (OSError, ValueError) as exc:
             kind = "timeout" if isinstance(exc, (TimeoutError, socket.timeout)) else "transport"
             return result(HTTPStatus.SERVICE_UNAVAILABLE, kind, None, kind == "timeout",
-                          error_type=type(exc).__name__, timeout_seconds=self.timeout,
+                          error_type=type(exc).__name__, timeout_seconds=timeout,
                           consumer_decision="dependency_transport_error")
 
     def _attempt_inventory(self, order_id: str) -> int:
@@ -205,14 +323,18 @@ class OrdersState:
 
     def _prune_idempotency(self, now: float) -> None:
         expired = [key for key, entry in self._idempotency.items()
-                   if entry.get("completed") and now - entry["created_at"] > 900]
+                   if entry.get("completed") and now - entry["created_at"] > IDEMPOTENCY_TTL_SECONDS]
         for key in expired:
             self._idempotency.pop(key, None)
-        while len(self._idempotency) > 10_000:
-            oldest = next(iter(self._idempotency))
-            if not self._idempotency[oldest].get("completed"):
-                break
-            self._idempotency.popitem(last=False)
+
+    def _make_idempotency_room(self) -> bool:
+        while len(self._idempotency) >= MAX_IDEMPOTENCY_ENTRIES:
+            completed_key = next((key for key, entry in self._idempotency.items()
+                                  if entry.get("completed")), None)
+            if completed_key is None:
+                return False
+            self._idempotency.pop(completed_key, None)
+        return True
 
     def checkout(self, order_id: str, idempotency_key: str | None = None) -> tuple[int, dict[str, Any]]:
         request_id = uuid.uuid4().hex
@@ -224,16 +346,38 @@ class OrdersState:
         owns_entry = False
         completed_successfully = False
         entry: dict[str, Any] | None = None
+        attempts_made = 0
+        timed_out_attempts = 0
+        idempotency_disposition = "not_checked"
+        last_attempt: dict[str, Any] | None = None
         with self._lock:
             self.inflight += 1
             mode = self.mode
             fault_namespace = self._fault_namespace
+            config = {
+                "inventory_url": self.inventory_url,
+                "timeout": self.timeout,
+                "max_attempts": self.max_retries,
+                "signing_key_id": self.signing_key_id,
+                "expected_schema": self.expected_schema,
+            }
+        safe_order_ref = _safe_ref(order_id) if isinstance(order_id, str) else None
         self.logger.write("INFO", "Checkout request accepted", request_id=request_id,
-                          order_ref=_safe_ref(order_id), idempotency_key_present=bool(idempotency_key))
+                          order_ref=safe_order_ref, idempotency_key_present=bool(idempotency_key),
+                          idempotency_identity_field="order_id")
         try:
-            if idempotency_key is not None and (not idempotency_key.strip() or len(idempotency_key) > 128):
+            if (not isinstance(order_id, str) or not order_id or len(order_id) > MAX_ORDER_ID_LENGTH):
+                status = HTTPStatus.BAD_REQUEST
+                body = {"status": "invalid_order_id", "request_id": request_id}
+                idempotency_disposition = "invalid_order_id"
+                return status, body
+
+            if idempotency_key is not None and (
+                    not isinstance(idempotency_key, str) or not idempotency_key.strip()
+                    or len(idempotency_key) > MAX_IDEMPOTENCY_KEY_LENGTH):
                 status = HTTPStatus.BAD_REQUEST
                 body = {"status": "invalid_idempotency_key", "request_id": request_id}
+                idempotency_disposition = "invalid_key"
                 return status, body
 
             if mode == "idempotency-conflict":
@@ -242,31 +386,45 @@ class OrdersState:
                 raw_key = idempotency_key or order_id
             entry_key = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
             fingerprint = hashlib.sha256(json.dumps({"order_id": order_id}, sort_keys=True).encode()).hexdigest()
-            deadline = time.monotonic() + min(30.0, max(5.0, self.timeout * self.max_retries + 2.0))
+            deadline = time.monotonic() + min(30.0, max(5.0, config["timeout"] * config["max_attempts"] + 2.0))
+            idempotency_disposition = "checking"
 
             with self._idempotency_condition:
                 self._prune_idempotency(time.monotonic())
                 while True:
                     entry = self._idempotency.get(entry_key)
                     if entry is None:
+                        if not self._make_idempotency_room():
+                            self.internal_failures["idempotency_capacity"] += 1
+                            status = HTTPStatus.SERVICE_UNAVAILABLE
+                            body = {"status": "idempotency_store_busy", "request_id": request_id}
+                            idempotency_disposition = "capacity_rejected"
+                            self.logger.write("WARN", "Checkout rejected because the idempotency store is at capacity",
+                                              request_id=request_id, order_ref=_safe_ref(order_id),
+                                              capacity=MAX_IDEMPOTENCY_ENTRIES, dependency_called=False)
+                            return status, body
                         entry = {"fingerprint": fingerprint, "created_at": time.monotonic(),
                                  "completed": False, "injected": mode == "idempotency-conflict"}
                         self._idempotency[entry_key] = entry
                         owns_entry = True
+                        idempotency_disposition = "new_request"
                         break
                     if entry["fingerprint"] != fingerprint:
                         self.internal_failures["idempotency_conflict"] += 1
                         status = HTTPStatus.CONFLICT
                         body = {"status": "idempotency_conflict", "request_id": request_id}
+                        idempotency_disposition = "conflict"
                         self.logger.write("ERROR", "Idempotency key was reused for a different order",
                                           request_id=request_id, order_ref=_safe_ref(order_id),
                                           existing_order_ref=entry.get("order_ref", "unavailable"),
-                                          idempotency_key_ref=entry_key[:12], consumer_decision="reject_before_dependency")
+                                          idempotency_key_ref=entry_key[:12], identity_field="order_id",
+                                          comparison="different_order_ref", consumer_decision="reject_before_dependency")
                         return status, body
                     if entry["completed"]:
                         self.idempotency_replays += 1
                         status = int(entry["status"])
                         original = entry["response"]
+                        idempotency_disposition = "replayed"
                         body = {"status": original.get("status", "completed"),
                                 "request_id": request_id, "replayed": True,
                                 "original_request_id": original.get("request_id")}
@@ -280,30 +438,36 @@ class OrdersState:
                     if remaining <= 0:
                         status = HTTPStatus.CONFLICT
                         body = {"status": "same_request_still_in_progress", "request_id": request_id}
+                        idempotency_disposition = "in_progress_rejected"
                         self.logger.write("WARN", "Identical checkout retry is still awaiting its original request",
                                           request_id=request_id, order_ref=_safe_ref(order_id),
                                           idempotency_key_ref=entry_key[:12], dependency_called=False)
                         return status, body
                     self._idempotency_condition.wait(remaining)
 
-            last_attempt: dict[str, Any] | None = None
-            for attempt in range(1, self.max_retries + 1):
+            for attempt in range(1, config["max_attempts"] + 1):
+                attempts_made = attempt
                 with self._lock:
                     self.inventory_attempts += 1
                     if attempt > 1:
                         self.inventory_retries += 1
-                last_attempt = self._attempt_inventory_result(order_id, request_id, attempt)
+                last_attempt = self._attempt_inventory_result(
+                    order_id, request_id, attempt, config, timed_out_attempts
+                )
+                if last_attempt["kind"] == "timeout":
+                    timed_out_attempts += 1
                 status = int(last_attempt["status"])
                 if status == HTTPStatus.OK:
                     break
                 if not last_attempt["retryable"]:
                     break
-                if attempt < self.max_retries:
+                if attempt < config["max_attempts"]:
                     time.sleep(0.006 * attempt)
 
             if status == HTTPStatus.OK:
                 completed_successfully = True
                 body = {"status": "completed", "request_id": request_id}
+                idempotency_disposition = "stored_result"
                 with self._idempotency_condition:
                     entry["completed"] = True
                     entry["status"] = int(status)
@@ -311,22 +475,16 @@ class OrdersState:
                     entry["created_at"] = time.monotonic()
                     entry["order_ref"] = _safe_ref(order_id)
                     self._idempotency_condition.notify_all()
-                self.logger.write("INFO", "Checkout completed", request_id=request_id,
-                                  order_ref=_safe_ref(order_id), dependency_attempts=attempt,
-                                  dependency_duration_ms=last_attempt["duration_ms"] if last_attempt else 0)
                 return status, body
 
             terminal_status = HTTPStatus.BAD_GATEWAY if status == HTTPStatus.BAD_GATEWAY else HTTPStatus.SERVICE_UNAVAILABLE
             status = terminal_status
             body = {"status": "dependency_contract_rejected" if status == HTTPStatus.BAD_GATEWAY else "inventory_unavailable",
                     "request_id": request_id}
-            self.logger.write("ERROR", "Checkout could not complete within the dependency contract and retry policy",
-                              request_id=request_id, order_ref=_safe_ref(order_id),
-                              dependency_attempts=attempt, final_upstream_status=last_attempt.get("upstream_status") if last_attempt else None,
-                              final_dependency_outcome=last_attempt.get("kind") if last_attempt else "unknown",
-                              duration_ms=round((time.perf_counter() - started) * 1000, 2))
+            idempotency_disposition = "failed_not_cached"
             return status, body
         finally:
+            duration_ms = round((time.perf_counter() - started) * 1000, 2)
             with self._idempotency_condition:
                 if owns_entry and entry_key and entry is not None:
                     if not completed_successfully:
@@ -339,6 +497,18 @@ class OrdersState:
                 finished = time.monotonic()
                 self.latencies.append((finished, time.time(), finished - start_monotonic))
                 self.latencies = [item for item in self.latencies if finished - item[0] <= 300][-5000:]
+            self.logger.write("INFO" if status < 400 else "WARN", "Checkout request completed",
+                              request_id=request_id, order_ref=safe_order_ref,
+                              consumer_status=int(status), duration_ms=duration_ms,
+                              dependency_attempts=attempts_made,
+                              configured_dependency_attempt_limit=config["max_attempts"],
+                              dependency_retries=max(0, attempts_made - 1),
+                              final_upstream_status=last_attempt.get("upstream_status") if last_attempt else None,
+                              final_dependency_outcome=last_attempt.get("kind") if last_attempt else None,
+                              idempotency_disposition=idempotency_disposition,
+                              timed_out_attempts=timed_out_attempts,
+                              remote_cancellation_propagated=False if timed_out_attempts else None,
+                              late_completion_possible=bool(timed_out_attempts))
 
     def metrics(self) -> str:
         with self._lock:
@@ -352,6 +522,7 @@ class OrdersState:
             p95 = percentile(latency_samples)
             latency_count = len(latency_samples)
             oldest_latency_timestamp = min((item[1] for item in self.latencies), default=0.0)
+            latest_latency_timestamp = max((item[1] for item in self.latencies), default=0.0)
             checkout_errors = self.checkout_errors
             idempotency_replays = self.idempotency_replays
             total = max(1, sum(requests.values()))
@@ -361,8 +532,8 @@ class OrdersState:
             internal_failures = dict(self.internal_failures)
         return "".join(
             [
-                *(counter_line("orders_checkout_requests_total", "Completed checkout requests", value, status=status) for status, value in requests.items()),
-                counter_line("orders_checkout_failures_total", "Checkout requests ending in a dependency error", checkout_errors),
+                *(counter_line("orders_checkout_requests_total", "Checkout requests completed by the Orders API", value, status=status) for status, value in requests.items()),
+                counter_line("orders_checkout_failures_total", "Checkout requests ending with HTTP 502 or 503", checkout_errors),
                 counter_line("orders_inventory_attempts_total", "Inventory calls made by checkout", attempts),
                 counter_line("orders_inventory_retries_total", "Inventory retry calls made by checkout", retries),
                 gauge_line("orders_retry_amplification_ratio", "Inventory attempts per checkout request", amplification),
@@ -370,6 +541,7 @@ class OrdersState:
                 gauge_line("orders_checkout_latency_p95_seconds", "Checkout p95 response time over local observation window", p95),
                 gauge_line("orders_checkout_latency_sample_count", "Checkout completions in the rolling five-minute latency window", latency_count),
                 gauge_line("orders_checkout_latency_oldest_sample_timestamp_seconds", "Unix timestamp of the oldest checkout in the active latency window", oldest_latency_timestamp),
+                gauge_line("orders_checkout_latency_latest_sample_timestamp_seconds", "Unix timestamp of the latest checkout in the active latency window", latest_latency_timestamp),
                 counter_line("orders_checkout_idempotency_replays_total", "Identical checkout retries served from a completed result", idempotency_replays),
                 counter_line("orders_log_events_total", "Structured orders log events emitted", logs),
                 *(counter_line("orders_dependency_failures_total", "Checkout dependency failures", value, kind=kind)

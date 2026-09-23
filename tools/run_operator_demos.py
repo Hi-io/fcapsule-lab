@@ -27,6 +27,7 @@ if str(ROOT) not in sys.path:
 
 from app.demo_catalog import DEMO_CASES
 from app.scenario_catalog import DEFAULT_SCENARIO_CONFIG, DISCOVERY_SCENARIOS, SCENARIOS, public_scenarios
+from evaluation.scoring import available_evidence_domains, load_ground_truth, score_investigation, score_pipeline
 from tools import evaluate_external_screenshot as media
 from tools.run_scenarios import firing, now, request, save, wait_for_lab_quiet
 
@@ -35,6 +36,8 @@ CONFIG_KEYS = ("provider", "model", "max_tokens", "max_total_tokens", "max_promp
 MAXIMUMS = {"max_tokens": 3600, "max_total_tokens": 12000, "max_prompt_tokens": 3200, "max_checks": 1}
 SIGNALS = {**SCENARIOS, **DISCOVERY_SCENARIOS}
 SIGNALS["mysql-exporter-scrape-path"] = {"expected_alert": media.ALERT}
+WORKLOAD_ORACLE = load_ground_truth()
+DISCOVERY_ORACLE = load_ground_truth(ROOT / "evaluation/operational_ground_truth.json")
 QUESTIONS = (
     "Using only this earlier retained capsule, what can be established about the incident, "
     "what remains uncertain, and which preserved evidence supports the next check? "
@@ -48,6 +51,29 @@ def read(path):
 
 def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def record_diagnostic_score(scenario, assessment, output_dir):
+    if scenario in WORKLOAD_ORACLE:
+        oracle = WORKLOAD_ORACLE[scenario]
+        scope = "frozen_workload_benchmark"
+    elif scenario in DISCOVERY_ORACLE:
+        oracle = DISCOVERY_ORACLE[scenario]
+        scope = "monitoring_discovery_demo"
+    else:
+        raise ValueError(f"No independent diagnostic rubric exists for {scenario}")
+    result = score_investigation(oracle, assessment)
+    result.update(scenario=scenario, scope=scope, requires_human_review=True)
+    save(output_dir / "diagnostic-score.json", result)
+    return result
+
+
+def record_pipeline_score(scenario, record, assessment, output_dir):
+    oracle = WORKLOAD_ORACLE.get(scenario) or DISCOVERY_ORACLE[scenario]
+    record["captured_domains"] = sorted(available_evidence_domains(assessment))
+    result = score_pipeline(oracle, record, assessment)
+    save(output_dir / "pipeline-score.json", result)
+    return result
 
 
 def exclusive(path, data):
@@ -124,6 +150,11 @@ def baseline_config(data):
         raise RuntimeError("Exporter monitor is not at baseline")
     if media.OWNER in data["monitor"]["metadata"].get("annotations", {}):
         raise RuntimeError("External scrape probe is already owned")
+    annotations = data["config"].get("metadata", {}).get("annotations", {})
+    if annotations.get("fcapsule.io/lab-control-run") or annotations.get("fcapsule.io/lab-control-field-owner"):
+        raise RuntimeError("A controller-owned Lab run or recovery journal is active")
+    if annotations.get("fcapsule.lab/screenshot-run"):
+        raise RuntimeError("An external Prometheus screenshot run owns the Lab")
 
 
 def preflight(args, root, require_owned=True):
@@ -179,6 +210,7 @@ def collect_logs(root, start):
         except (OSError, subprocess.SubprocessError) as error:
             counts[name] = {"ok": False, "error": str(error)}
     save(root / "log-retention.json", counts)
+    return counts
 
 
 def promql(case):
@@ -200,8 +232,18 @@ def promql(case):
 
 
 def retain_metrics(args, root, case, start):
+    results = {}
     for name, expr in promql(case).items():
-        save(root / ("metrics-" + name + ".json"), query(args.prometheus, expr, start=start, end=now(), step="10s"))
+        try:
+            value = query(args.prometheus, expr, start=start, end=now(), step="10s")
+            results[name] = {"available": True, "series": len(value.get("data", {}).get("result", []))}
+            save(root / ("metrics-" + name + ".json"), value)
+        except (OSError, ValueError, RuntimeError, TimeoutError) as error:
+            results[name] = {"available": False, "error_type": type(error).__name__,
+                             "error": str(error)[:240], "query": expr}
+            save(root / ("metrics-" + name + ".json"), results[name])
+    save(root / "metric-retention.json", results)
+    return results
 
 
 def matching_signals(state, expected, started):
@@ -341,6 +383,7 @@ def run_workload(args, case, root, config):
             if matches and seen_at is None:
                 seen_at = time.monotonic()
                 record["observed_alerts"] = alerts
+                record["alert_observed"] = True
                 save(root / "fault.json", current)
                 save(root / "alert.json", matches)
                 capture(args, root, case)
@@ -365,14 +408,22 @@ def run_workload(args, case, root, config):
     finally:
         try:
             recover_owned(args, root, owner)
+            record["recovery"] = read(root / "recovery.json")
+            record["recovery_confirmed"] = bool(record["recovery"].get("restored"))
         finally:
             record["fault_ended_at"] = now()
             save(root / "run.json", record)
-    collect_logs(root, record["baseline_at"])
-    retain_metrics(args, root, case, record["baseline_at"])
+    record["logs"] = collect_logs(root, record["baseline_at"])
+    record["retained_metrics"] = retain_metrics(args, root, case, record["baseline_at"])
     if record["outcome"] != "captured":
         raise RuntimeError("Fresh alert/capsule not captured within the lease; no reinjection")
-    await_assessment(record, root)
+    assessment = await_assessment(record, root)
+    result = record_diagnostic_score(scenario, assessment, root)
+    record.update(diagnostic_score=result["score"], diagnostic_label=result["label"])
+    pipeline = record_pipeline_score(scenario, record, assessment, root)
+    record.update(pipeline_score=pipeline["pipeline_score"],
+                  observability_score=pipeline["observability_score"])
+    save(root / "run.json", record)
     return record
 
 
@@ -383,11 +434,22 @@ def run_exporter(args, root, config):
     probe.out = root
     media.run(probe)
     record = read(root / "run.json")
-    record.update(case="exporter-scrape", scenario="mysql-exporter-scrape-path", model_config=config)
+    observed = read(root / "alert.json")
+    recovery = read(root / "recovery.json")
+    record.update(case="exporter-scrape", scenario="mysql-exporter-scrape-path", model_config=config,
+                  expected_alert=media.ALERT, observed_alerts=observed,
+                  alert_observed=any(item.get("labels", {}).get("alertname") == media.ALERT for item in observed),
+                  recovery=recovery, recovery_confirmed=bool(recovery.get("restored")))
     save(root / "run.json", record)
-    collect_logs(root, record["started_at"])
-    retain_metrics(args, root, "exporter-scrape", record["started_at"])
-    await_assessment(record, root)
+    record["logs"] = collect_logs(root, record["started_at"])
+    record["retained_metrics"] = retain_metrics(args, root, "exporter-scrape", record["started_at"])
+    assessment = await_assessment(record, root)
+    result = record_diagnostic_score("mysql-exporter-scrape-path", assessment, root)
+    record.update(diagnostic_score=result["score"], diagnostic_label=result["label"])
+    pipeline = record_pipeline_score("mysql-exporter-scrape-path", record, assessment, root)
+    record.update(pipeline_score=pipeline["pipeline_score"],
+                  observability_score=pipeline["observability_score"])
+    save(root / "run.json", record)
     return record
 
 
@@ -434,7 +496,10 @@ def run_suite(args):
                         record = run_workload(args, case, round_dir, checked["model_config"])
                     summary["rounds"].append({"case": case, "round": ordinal, "path": str(round_dir),
                         "outcome": record["outcome"], "episode_id": record.get("episode_id"),
-                        "assessment_status": record.get("assessment_status"), "usage": record.get("usage")})
+                        "assessment_status": record.get("assessment_status"), "diagnostic_score": record.get("diagnostic_score"),
+                        "diagnostic_label": record.get("diagnostic_label"),
+                        "pipeline_score": record.get("pipeline_score"),
+                        "observability_score": record.get("observability_score"), "usage": record.get("usage")})
                 except Exception as error:
                     case_failed = True
                     summary["rounds"].append({"case": case, "round": ordinal, "path": str(round_dir),
@@ -452,7 +517,15 @@ def run_suite(args):
                     if record["episode_id"] == prior["episode_id"]:
                         raise RuntimeError("Occurrences grouped into the same episode; no split or relabel attempted")
         wait_for_lab_quiet(args)
-        summary["outcome"] = "completed_with_failures" if any(item.get("outcome") == "failed" for item in summary["rounds"]) else "captured_pending_media_and_human_review"
+        missing_or_weak = any(item.get("diagnostic_label") in {"failed", "weak_or_misdirected", "pipeline_failed"}
+                              or item.get("diagnostic_score", 0) < 70
+                              or item.get("pipeline_score", 0) < 100
+                              or item.get("observability_score", 0) < 100
+                              for item in summary["rounds"] if item.get("outcome") != "failed")
+        summary["outcome"] = ("completed_with_failures" if any(item.get("outcome") == "failed" for item in summary["rounds"])
+                               else "completed_needs_diagnosis_review" if missing_or_weak
+                               else "captured_pending_media_and_human_review")
+        summary["diagnostic_quality"] = "one-pass rubric score; human review still required"
     except BaseException as error:
         summary.update(outcome="incomplete", error=f"{type(error).__name__}: {error}")
         raise

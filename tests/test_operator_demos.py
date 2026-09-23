@@ -61,6 +61,11 @@ class DemoCatalogTests(unittest.TestCase):
         self.assertEqual(sum("capture" in c for c in DEMO_CASES.values()), 2)
         self.assertEqual(DEMO_CASES["query-rollout-history"]["rounds"], 2)
         self.assertEqual(len(public_scenarios()), 17)
+        catalog = public_scenarios()
+        self.assertEqual(catalog["mysql-connections"]["source_view"], "prometheus_graph")
+        self.assertEqual(catalog["metrics-service-label-drift"]["source_view"], "prometheus_targets")
+        self.assertEqual(catalog["mysql-exporter-scrape-path"]["execution"], "guarded_runner")
+        self.assertEqual(catalog["memory-leak"]["resource_profile"], "bounded_memory")
         self.assertEqual(runner.scenario_rounds("mysql-connections"), 1)
         self.assertEqual(runner.capture_spec("mysql-connections")["view"], "graph")
 
@@ -69,6 +74,22 @@ class DemoCatalogTests(unittest.TestCase):
         for key in ("expected_alert", "root_cause", "ground_truth", "actions", "config", "capture"):
             self.assertNotIn('"' + key + '"', text)
         self.assertTrue(public_demos()["exporter-scrape"]["runner_only"])
+
+    def test_baseline_preflight_refuses_any_persisted_run_owner(self):
+        for key in ("fcapsule.io/lab-control-run", "fcapsule.io/lab-control-field-owner",
+                    "fcapsule.lab/screenshot-run"):
+            data = sample()
+            data["config"]["metadata"] = {"annotations": {key: "owner"}}
+            with self.subTest(key=key), self.assertRaises(RuntimeError):
+                runner.baseline_config(data)
+
+    def test_baseline_preflight_refuses_any_persisted_run_owner(self):
+        for key in ("fcapsule.io/lab-control-run", "fcapsule.io/lab-control-field-owner",
+                    "fcapsule.lab/screenshot-run"):
+            data = sample()
+            data["config"]["metadata"] = {"annotations": {key: "owner"}}
+            with self.subTest(key=key), self.assertRaises(RuntimeError):
+                runner.baseline_config(data)
 
     def test_all_non_config_actions_receive_defined_baseline_settings(self):
         for name, case in SCENARIOS.items():
@@ -119,9 +140,29 @@ class DemoCatalogTests(unittest.TestCase):
 
     def test_owned_start_returns_request_id(self):
         state = ControlState(); state._health = Mock(return_value={"reachable": True}); state._start = Mock(return_value={})
-        with patch("app.control.memory_snapshot", return_value={"available_bytes": 2 * 1024**3}):
+        with patch("app.control.memory_snapshot", return_value={
+            "available_bytes": 2 * 1024**3, "node_identity_verified": True,
+        }):
             result = state.start("mysql-connections", 120, "a" * 32)
         self.assertEqual(result["run"]["run_id"], "a" * 32)
+
+    def test_watchdog_recovers_persisted_run_after_control_pod_restart(self):
+        state = ControlState()
+        state._persisted_run = Mock(return_value={
+            "run_id": "a" * 32, "targets": ["inventory"],
+            "baseline_settings": DEFAULT_SCENARIO_CONFIG, "expires_at": 2_000_000_000,
+            "status": "recovering", "recovered_after_restart": True,
+        })
+        state.recover = Mock()
+        with patch("app.control.memory_snapshot", return_value={
+            "available_bytes": 2 * 1024**3, "node_identity_verified": True,
+        }), patch("app.control.time.sleep", side_effect=StopIteration):
+            with self.assertRaises(StopIteration):
+                state.watchdog()
+        state.recover.assert_called_once_with("controller_restart")
+        self.assertEqual(state.active["run_id"], "a" * 32)
+        self.assertEqual(state.active["targets"], ["inventory"])
+        self.assertTrue(state.active["claim_acquired"])
 
     def test_recovery_does_not_reset_workloads_after_config_conflict(self):
         state = ControlState(); state.logger = Mock(); state._post = Mock()

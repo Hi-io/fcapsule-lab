@@ -2,15 +2,15 @@
   "version": 1,
   "scenarios": [
     {
-      "id": "poison-job", "category": "logs", "expected_alert": "LabWorkerCrashLooping", "target_service": "lab-worker",
-      "mechanism": "An invalid Base64 import body is redelivered because the decoder exits before acknowledgement.",
-      "required_domains": ["logs"],
+      "id": "poison-job", "category": "logs", "expected_alert": "LabWorkerPoisonRetries", "target_service": "lab-worker",
+      "mechanism": "An invalid Base64 import body is rejected and rolled back before acknowledgement; the live worker retains the durable job and retries it.",
+      "required_domains": ["logs", "metrics"],
       "findings": [
         {"id": "decode_failure", "weight": 3, "all": [["base64", "encoding"], ["decode", "decoder", "payload"]]},
-        {"id": "redelivery", "weight": 2, "all": [["redeliver", "same job", "repeated delivery", "acknowledgement"], ["restart", "crashloop", "process exits"]]}
+        {"id": "redelivery", "weight": 2, "all": [["redeliver", "same job", "job id", "repeated delivery"], ["retry", "unacknowledged", "acknowledgement pending", "transaction rollback"]]}
       ],
-      "actions": [["quarantine", "dead letter", "remove the message", "validate payload"], ["decoder", "producer contract", "schema"]],
-      "contradictions": ["out of memory caused", "cpu saturation caused"]
+      "actions": [["quarantine", "dead letter", "retry limit", "remove the message", "validate payload"], ["decoder", "producer contract", "schema"]],
+      "contradictions": ["worker crashed", "worker process exited", "out of memory caused", "cpu saturation caused"]
     },
     {
       "id": "response-contract", "category": "logs", "expected_alert": "LabOrdersDependencyDocumentInvalid", "target_service": "orders-api",
@@ -47,43 +47,43 @@
     },
     {
       "id": "idempotency-conflict", "category": "logs", "expected_alert": "LabOrdersIdempotencyConflicts", "target_service": "orders-api",
-      "mechanism": "Different order payloads are bound to the same checkout idempotency record.",
+      "mechanism": "A single idempotency key is bound to the first order identifier; another order using the same key is rejected locally before the inventory dependency is called.",
       "required_domains": ["logs"],
       "findings": [
         {"id": "idempotency", "weight": 3, "all": [["idempotency"], ["conflict", "collision", "reused"]]},
-        {"id": "payload_identity", "weight": 2, "all": [["different payload", "different order", "conflicting order"], ["same key", "existing record", "original order"]]}
+        {"id": "order_identity", "weight": 2, "all": [["different order", "conflicting order", "order identifier"], ["same key", "existing record", "original order"]]}
       ],
-      "actions": [["key generation", "scope the key", "unique key", "payload hash"], ["preserve original response", "reject conflicting reuse", "idempotency store"]],
+      "actions": [["key generation", "scope the key", "unique key", "order identifier"], ["preserve original response", "reject conflicting reuse", "idempotency store"]],
       "contradictions": ["inventory database caused", "network timeout caused"]
     },
     {
-      "id": "memory-leak", "category": "metrics", "expected_alert": "LabWorkerOOMKilled", "target_service": "lab-worker",
-      "mechanism": "A report export retains encoded pages instead of streaming them until the worker crosses its cgroup memory limit.",
+      "id": "memory-leak", "category": "metrics", "expected_alert": "LabWorkerBufferPressure", "target_service": "lab-worker",
+      "mechanism": "A report export retains encoded pages instead of streaming them, driving the measured application buffer above 80 MiB toward its 96 MiB safety cap without an expected OOM.",
       "required_domains": ["logs", "metrics"],
       "findings": [
-        {"id": "oom", "weight": 2, "all": [["oomkilled", "out of memory", "memory limit"], ["restart", "terminated", "cgroup"]]},
-        {"id": "growth", "weight": 3, "all": [["buffer", "retained pages", "allocated bytes"], ["export", "report"], ["growth", "increasing", "stream"]]}
+        {"id": "buffer_retention", "weight": 3, "all": [["buffer", "retained pages", "allocated bytes"], ["export", "report"], ["growth", "increasing", "stream"]]},
+        {"id": "measured_pressure", "weight": 2, "all": [["80 mib", "80 mib threshold", "above the warning threshold", "buffer pressure"], ["96 mib", "safety cap", "bounded", "guardrail"]]}
       ],
       "actions": [["stream", "bounded buffer", "flush pages"], ["memory profile", "heap", "allocation"]],
-      "contradictions": ["poison message caused", "cpu limit caused the restart"]
+      "contradictions": ["worker was oomkilled during this run", "poison message caused", "cpu limit caused the worker failure"]
     },
     {
       "id": "cpu-saturation", "category": "metrics", "expected_alert": "LabWorkerCPUHigh", "target_service": "lab-worker",
       "mechanism": "Credential migration performs excessive PBKDF2 rounds and sustains CPU near the worker limit while still making slow progress.",
       "required_domains": ["logs", "metrics"],
       "findings": [
-        {"id": "cpu", "weight": 2, "all": [["cpu", "throttl"], ["limit", "quota", "saturat"]]},
+        {"id": "cpu", "weight": 2, "all": [["cpu"], ["limit", "quota", "saturat"]]},
         {"id": "pbkdf2", "weight": 3, "all": [["pbkdf2", "password derivation", "credential migration"], ["rounds", "expensive", "work factor"]]}
       ],
-      "actions": [["reduce rounds", "batch", "rate limit", "move migration"], ["cpu quota", "worker capacity", "benchmark"]],
+      "actions": [["benchmark", "batch", "rate limit", "move migration"], ["review cpu quota", "worker capacity", "benchmark"]],
       "contradictions": ["database lock caused", "memory leak caused"]
     },
     {
-      "id": "mysql-connections", "category": "metrics", "expected_alert": "LabMySQLConnectionsSaturated", "target_service": "mysql-exporter",
-      "mechanism": "Inventory retains checked-out database sessions until Threads_connected approaches max_connections and new sessions are rejected.",
+      "id": "mysql-connections", "category": "metrics", "expected_alert": "LabMySQLConnectionsSaturated", "target_service": "inventory-api",
+      "mechanism": "The inventory API retains its own checked-out sessions above 80 percent of a fresh observed MySQL max_connections value; the independent exporter corroborates total server usage and capacity.",
       "required_domains": ["logs", "metrics", "configuration"],
       "findings": [
-        {"id": "capacity", "weight": 2, "all": [["threads_connected", "connections"], ["max_connections", "connection ceiling", "40"]]},
+        {"id": "capacity", "weight": 2, "all": [["threads_connected", "client sessions", "checked-out sessions", "pool_checked_out"], ["max_connections", "connection ceiling", "40"]]},
         {"id": "retention", "weight": 3, "all": [["retained", "not released", "leak", "checked out"], ["session", "connection", "pool"]]}
       ],
       "actions": [["close connections", "release sessions", "pool lifecycle"], ["identify owners", "pool checked out", "connection inventory"]],

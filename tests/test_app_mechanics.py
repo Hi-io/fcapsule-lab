@@ -2,6 +2,8 @@ import base64
 import json
 import threading
 import unittest
+from io import BytesIO
+from urllib.error import HTTPError
 from unittest.mock import MagicMock, Mock, patch
 
 import psycopg
@@ -14,6 +16,21 @@ from app.worker import WorkerState, _validated_import_records, decode_job
 
 
 RUN_ID = "a" * 32
+
+
+class FakeResponse:
+    def __init__(self, body: bytes, status: int = 200) -> None:
+        self.body = body
+        self.status = status
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def read(self, limit: int = -1) -> bytes:
+        return self.body if limit < 0 else self.body[:limit]
 
 
 def mysql_connection(cursor):
@@ -57,6 +74,33 @@ class ApplicationMechanicsTests(unittest.TestCase):
         self.assertEqual(response["status"], "idempotency_conflict")
         self.assertEqual(state._attempt_inventory_result.call_count, 1)
 
+    def test_orders_injected_idempotency_collision_is_rejected_before_second_inventory_call(self):
+        with patch.dict("os.environ", {"INVENTORY_URL": "http://inventory-api:8081"}):
+            state = OrdersState()
+        state.logger = Mock()
+        state._attempt_inventory_result = Mock(return_value={
+            "status": 200, "kind": "success", "upstream_status": 200,
+            "retryable": False, "duration_ms": 2.0,
+        })
+        state.set_mode("idempotency-conflict", run_id=RUN_ID)
+
+        first_status, _ = state.checkout("order-17")
+        second_status, second = state.checkout("order-18")
+
+        self.assertEqual(first_status, 200)
+        self.assertEqual(second_status, 409)
+        self.assertEqual(second["status"], "idempotency_conflict")
+        self.assertEqual(state._attempt_inventory_result.call_count, 1)
+        self.assertEqual(state.internal_failures["idempotency_conflict"], 1)
+        events = [call.kwargs for call in state.logger.write.call_args_list
+                  if call.args and call.args[1] == "Idempotency key was reused for a different order"]
+        self.assertEqual(events[0]["identity_field"], "order_id")
+        self.assertEqual(events[0]["comparison"], "different_order_ref")
+        completion = [call.kwargs for call in state.logger.write.call_args_list
+                      if call.args and call.args[1] == "Checkout request completed"][-1]
+        self.assertEqual(completion["idempotency_disposition"], "conflict")
+        self.assertEqual(completion["dependency_attempts"], 0)
+
     def test_orders_configuration_log_correlates_run_id_and_rejects_invalid_id(self):
         with patch.dict("os.environ", {"INVENTORY_URL": "http://inventory-api:8081"}):
             state = OrdersState()
@@ -65,6 +109,300 @@ class ApplicationMechanicsTests(unittest.TestCase):
         self.assertEqual(state.logger.write.call_args.kwargs["run_id"], RUN_ID)
         with self.assertRaises(ValueError):
             state.set_mode("normal", run_id="not-a-run-id")
+
+    def test_orders_applied_configuration_logs_effective_timeout_attempts_and_schema(self):
+        with patch.dict("os.environ", {"INVENTORY_URL": "http://inventory-api:8081"}):
+            state = OrdersState()
+        state.logger = Mock()
+
+        state.set_mode("configured", settings={
+            "INVENTORY_TIMEOUT_SECONDS": "0.05",
+            "MAX_RETRIES": "3",
+            "ORDER_EXPECTED_SCHEMA": "v2",
+        }, run_id=RUN_ID)
+
+        event = state.logger.write.call_args.kwargs
+        self.assertEqual(event["dependency_timeout_seconds"], 0.05)
+        self.assertEqual(event["max_dependency_attempts"], 3)
+        self.assertEqual(event["expected_response_schema"], "v2")
+        self.assertEqual(event["run_id"], RUN_ID)
+
+    def test_orders_settings_must_be_an_object_and_schema_identifier_is_bounded(self):
+        with patch.dict("os.environ", {"INVENTORY_URL": "http://inventory-api:8081"}):
+            state = OrdersState()
+
+        with self.assertRaisesRegex(ValueError, "must be an object"):
+            state.set_mode("configured", settings=["not", "an", "object"])
+        with self.assertRaisesRegex(ValueError, "short identifier"):
+            state.set_mode("configured", settings={"ORDER_EXPECTED_SCHEMA": "v" * 1000})
+
+    def test_orders_startup_rejects_unbounded_retry_or_timeout_configuration(self):
+        with patch.dict("os.environ", {"INVENTORY_URL": "http://inventory-api:8081", "MAX_RETRIES": "1000"}):
+            with self.assertRaisesRegex(ValueError, "between 1 and 5 attempts"):
+                OrdersState()
+        with patch.dict("os.environ", {"INVENTORY_URL": "http://inventory-api:8081", "INVENTORY_TIMEOUT_SECONDS": "nan"}):
+            with self.assertRaisesRegex(ValueError, "between 0.01 and 30 seconds"):
+                OrdersState()
+
+    def test_orders_rejects_oversized_and_malformed_response_documents_without_leaking_body(self):
+        with patch.dict("os.environ", {"INVENTORY_URL": "http://inventory-api:8081"}):
+            state = OrdersState()
+        state.logger = Mock()
+        oversized_secret = b"s" * 300_000
+
+        with patch("app.orders.urlopen", return_value=FakeResponse(oversized_secret)):
+            result = state._attempt_inventory_result("order-17")
+        self.assertEqual((result["status"], result["kind"]), (502, "contract_shape"))
+        event = state.logger.write.call_args.kwargs
+        self.assertEqual(event["observed_type"], "oversized_document")
+        self.assertEqual(event["response_bytes"], 256_001)
+        self.assertNotIn("s" * 100, str(event))
+
+        with patch("app.orders.urlopen", return_value=FakeResponse(b"not json")):
+            result = state._attempt_inventory_result("order-17")
+        self.assertEqual((result["status"], result["kind"]), (502, "contract_shape"))
+        self.assertEqual(state.logger.write.call_args.kwargs["observed_type"], "invalid_json")
+
+        deeply_nested = b"[" * 10_000 + b"]" * 10_000
+        with patch("app.orders.urlopen", return_value=FakeResponse(deeply_nested)):
+            result = state._attempt_inventory_result("order-17")
+        self.assertEqual((result["status"], result["kind"]), (502, "contract_shape"))
+        self.assertEqual(state.logger.write.call_args.kwargs["error_type"], "RecursionError")
+
+    def test_orders_rejects_non_200_success_status_and_preserves_status_attribution(self):
+        with patch.dict("os.environ", {"INVENTORY_URL": "http://inventory-api:8081"}):
+            state = OrdersState()
+        state.logger = Mock()
+        valid_v1 = json.dumps({"schema": "v1", "status": "reserved"}).encode()
+
+        with patch("app.orders.urlopen", return_value=FakeResponse(valid_v1, status=201)):
+            result = state._attempt_inventory_result("order-17")
+
+        self.assertEqual((result["status"], result["kind"], result["upstream_status"]),
+                         (502, "contract_status", 201))
+        event = state.logger.write.call_args.kwargs
+        self.assertEqual(event["consumer_status"], 502)
+        self.assertEqual(event["upstream_status"], 201)
+        self.assertEqual(event["expected_upstream_status"], 200)
+
+    def test_orders_response_validation_handles_non_object_and_bad_nested_schema_safely(self):
+        with patch.dict("os.environ", {"INVENTORY_URL": "http://inventory-api:8081"}):
+            state = OrdersState()
+        state.logger = Mock()
+
+        with patch("app.orders.urlopen", return_value=FakeResponse(b'["not", "an", "object"]')):
+            result = state._attempt_inventory_result("order-17")
+        self.assertEqual((result["status"], result["kind"]), (502, "contract_shape"))
+        self.assertEqual(state.logger.write.call_args.kwargs["observed_type"], "list")
+
+        state.expected_schema = "v2"
+        with patch("app.orders.urlopen", return_value=FakeResponse(
+                b'{"schema":"v2","reservation":[]}')):
+            result = state._attempt_inventory_result("order-17")
+        self.assertEqual((result["status"], result["kind"]), (502, "contract_shape"))
+        self.assertEqual(state.logger.write.call_args.kwargs["observed_reservation_type"], "list")
+        self.assertEqual(state.logger.write.call_args.kwargs["missing_fields"], ["reservation.status"])
+
+    def test_orders_response_validation_reports_wrong_status_and_sanitizes_bad_schema_metadata(self):
+        with patch.dict("os.environ", {"INVENTORY_URL": "http://inventory-api:8081"}):
+            state = OrdersState()
+        state.logger = Mock()
+
+        with patch("app.orders.urlopen", return_value=FakeResponse(
+                b'{"schema":"v1","status":"not-reserved"}')):
+            result = state._attempt_inventory_result("order-17")
+        self.assertEqual((result["status"], result["kind"]), (502, "contract_shape"))
+        self.assertEqual(state.logger.write.call_args.kwargs["validation_failure"], "unexpected_status_value")
+        self.assertEqual(state.logger.write.call_args.kwargs["observed_status"], "not-reserved")
+        self.assertEqual(state.logger.write.call_args.kwargs["missing_fields"], [])
+
+        with patch("app.orders.urlopen", return_value=FakeResponse(
+                b'{"schema":{"private":"not-for-logs"},"status":"reserved"}')):
+            result = state._attempt_inventory_result("order-17")
+        self.assertEqual((result["status"], result["kind"]), (502, "contract_version"))
+        event = state.logger.write.call_args.kwargs
+        self.assertEqual(event["observed_schema"], "non_string:dict")
+        self.assertNotIn("not-for-logs", str(event))
+
+    def test_orders_normal_v1_and_v2_responses_are_accepted(self):
+        for schema, document in (
+            ("v1", {"schema": "v1", "status": "reserved", "order_id": "private-order"}),
+            ("v2", {"schema": "v2", "reservation": {"status": "reserved", "order_id": "private-order"}}),
+        ):
+            with self.subTest(schema=schema), patch.dict("os.environ", {
+                    "INVENTORY_URL": "http://inventory-api:8081", "ORDER_EXPECTED_SCHEMA": schema}):
+                state = OrdersState()
+                state.logger = Mock()
+                with patch("app.orders.urlopen", return_value=FakeResponse(json.dumps(document).encode())):
+                    status, body = state.checkout("order-17")
+                self.assertEqual(status, 200)
+                self.assertEqual(body["status"], "completed")
+                self.assertEqual(state.inventory_attempts, 1)
+                emitted = " ".join(str(call.kwargs) for call in state.logger.write.call_args_list)
+                self.assertNotIn("private-order", emitted)
+
+    def test_orders_contract_failure_is_non_retryable_and_checkout_logs_both_statuses(self):
+        with patch.dict("os.environ", {"INVENTORY_URL": "http://inventory-api:8081", "MAX_RETRIES": "3"}):
+            state = OrdersState()
+        state.logger = Mock()
+        legacy_document = json.dumps({"result": "accepted", "reference": "private-order"}).encode()
+
+        with patch("app.orders.urlopen", return_value=FakeResponse(legacy_document)) as urlopen:
+            status, body = state.checkout("order-17")
+
+        self.assertEqual(status, 502)
+        self.assertEqual(body["status"], "dependency_contract_rejected")
+        self.assertEqual(urlopen.call_count, 1)
+        attempt_events = [call.kwargs for call in state.logger.write.call_args_list
+                          if call.args and call.args[1] == "Inventory dependency attempt completed"]
+        self.assertEqual(len(attempt_events), 1)
+        self.assertEqual(attempt_events[0]["upstream_status"], 200)
+        self.assertEqual(attempt_events[0]["consumer_status"], 502)
+        self.assertEqual(attempt_events[0]["missing_fields"], ["status"])
+        completion = [call.kwargs for call in state.logger.write.call_args_list
+                      if call.args and call.args[1] == "Checkout request completed"][-1]
+        self.assertEqual(completion["consumer_status"], 502)
+        self.assertEqual(completion["final_upstream_status"], 200)
+        self.assertEqual(completion["final_dependency_outcome"], "contract_shape")
+
+    def test_orders_http_auth_failure_keeps_dependency_and_consumer_status_distinct(self):
+        with patch.dict("os.environ", {"INVENTORY_URL": "http://inventory-api:8081"}):
+            state = OrdersState()
+        state.logger = Mock()
+        error = HTTPError("http://inventory-api:8081/reserve", 401, "unauthorized", {}, BytesIO(b"{}"))
+
+        with patch("app.orders.urlopen", side_effect=error):
+            result = state._attempt_inventory_result("order-17")
+
+        self.assertEqual((result["status"], result["kind"], result["upstream_status"]),
+                         (503, "authorization", 401))
+        event = state.logger.write.call_args.kwargs
+        self.assertEqual(event["consumer_status"], 503)
+        self.assertEqual(event["upstream_status"], 401)
+        self.assertEqual(event["consumer_decision"], "dependency_http_error")
+
+    def test_orders_timeout_records_late_completion_and_attempts_are_bounded(self):
+        with patch.dict("os.environ", {
+            "INVENTORY_URL": "http://inventory-api:8081",
+            "INVENTORY_TIMEOUT_SECONDS": "0.05",
+            "MAX_RETRIES": "2",
+        }):
+            state = OrdersState()
+        state.logger = Mock()
+
+        with patch("app.orders.urlopen", side_effect=TimeoutError), patch("app.orders.time.sleep") as sleep:
+            status, _body = state.checkout("order-17")
+
+        self.assertEqual(status, 503)
+        self.assertEqual(state.inventory_attempts, 2)
+        self.assertEqual(state.inventory_retries, 1)
+        self.assertEqual(sleep.call_count, 1)
+        attempt_events = [call.kwargs for call in state.logger.write.call_args_list
+                          if call.args and call.args[1] == "Inventory dependency attempt completed"]
+        self.assertEqual(len(attempt_events), 2)
+        self.assertTrue(all(item["late_completion_possible"] for item in attempt_events))
+        self.assertTrue(all(item["remote_cancellation_propagated"] is False for item in attempt_events))
+        self.assertTrue(attempt_events[1]["prior_timed_out_attempts_may_still_be_running"])
+        completion = [call.kwargs for call in state.logger.write.call_args_list
+                      if call.args and call.args[1] == "Checkout request completed"][-1]
+        self.assertEqual(completion["dependency_attempts"], 2)
+        self.assertEqual(completion["dependency_retries"], 1)
+        self.assertEqual(completion["timed_out_attempts"], 2)
+        self.assertTrue(completion["late_completion_possible"])
+        self.assertEqual(state.inflight, 0)
+
+    def test_orders_snapshots_effective_settings_for_all_attempts_in_a_checkout(self):
+        with patch.dict("os.environ", {"INVENTORY_URL": "http://inventory-api:8081", "MAX_RETRIES": "2"}):
+            state = OrdersState()
+        state.logger = Mock()
+        outcomes = [
+            {"status": 503, "kind": "transport", "upstream_status": None,
+             "retryable": True, "duration_ms": 1.0},
+            {"status": 200, "kind": "success", "upstream_status": 200,
+             "retryable": False, "duration_ms": 1.0},
+        ]
+
+        def attempt(_order_id, _request_id, _attempt, config, _prior_timed_out_attempts):
+            if len(outcomes) == 2:
+                state.set_mode("configured", settings={
+                    "INVENTORY_URL": "http://changed-inventory:9090",
+                    "INVENTORY_TIMEOUT_SECONDS": "0.2",
+                })
+            return outcomes.pop(0)
+
+        state._attempt_inventory_result = Mock(side_effect=attempt)
+        with patch("app.orders.time.sleep"):
+            status, _body = state.checkout("order-17")
+
+        self.assertEqual(status, 200)
+        first_config = state._attempt_inventory_result.call_args_list[0].args[3]
+        second_config = state._attempt_inventory_result.call_args_list[1].args[3]
+        self.assertEqual(first_config, second_config)
+        self.assertEqual(second_config["inventory_url"], "http://inventory-api:8081")
+        self.assertEqual(second_config["timeout"], 0.45)
+
+    def test_orders_waits_for_same_key_inflight_result_and_replays_without_second_call(self):
+        with patch.dict("os.environ", {"INVENTORY_URL": "http://inventory-api:8081"}):
+            state = OrdersState()
+        state.logger = Mock()
+        entered = threading.Event()
+        release = threading.Event()
+        outcomes = []
+
+        def slow_success(*_args):
+            entered.set()
+            self.assertTrue(release.wait(2))
+            return {"status": 200, "kind": "success", "upstream_status": 200,
+                    "retryable": False, "duration_ms": 2.0}
+
+        state._attempt_inventory_result = Mock(side_effect=slow_success)
+        first = threading.Thread(target=lambda: outcomes.append(state.checkout("order-17", "key-17")))
+        second = threading.Thread(target=lambda: outcomes.append(state.checkout("order-17", "key-17")))
+        first.start()
+        self.assertTrue(entered.wait(1))
+        second.start()
+        self.assertFalse(outcomes)
+        release.set()
+        first.join(2)
+        second.join(2)
+
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        self.assertEqual(len(outcomes), 2)
+        self.assertEqual([item[0] for item in outcomes], [200, 200])
+        self.assertEqual(sum(bool(item[1].get("replayed")) for item in outcomes), 1)
+        self.assertEqual(state._attempt_inventory_result.call_count, 1)
+
+    def test_orders_idempotency_cache_never_exceeds_bound_when_all_entries_are_active(self):
+        with patch.dict("os.environ", {"INVENTORY_URL": "http://inventory-api:8081"}):
+            state = OrdersState()
+        state.logger = Mock()
+        entered = threading.Event()
+        release = threading.Event()
+        first_outcome = []
+
+        def slow_success(*_args):
+            entered.set()
+            self.assertTrue(release.wait(2))
+            return {"status": 200, "kind": "success", "upstream_status": 200,
+                    "retryable": False, "duration_ms": 2.0}
+
+        state._attempt_inventory_result = Mock(side_effect=slow_success)
+        with patch("app.orders.MAX_IDEMPOTENCY_ENTRIES", 1):
+            first = threading.Thread(target=lambda: first_outcome.append(state.checkout("order-17", "key-17")))
+            first.start()
+            self.assertTrue(entered.wait(1))
+            status, body = state.checkout("order-18", "key-18")
+            self.assertEqual(status, 503)
+            self.assertEqual(body["status"], "idempotency_store_busy")
+            self.assertEqual(state._attempt_inventory_result.call_count, 1)
+            release.set()
+            first.join(2)
+
+        self.assertFalse(first.is_alive())
+        self.assertEqual(first_outcome[0][0], 200)
+        self.assertEqual(state.internal_failures["idempotency_capacity"], 1)
+        self.assertLessEqual(len(state._idempotency), 1)
 
     def test_worker_configuration_log_correlates_run_id_without_oracle_fields(self):
         state = WorkerState()

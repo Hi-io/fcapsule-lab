@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 
 DEFAULT_SCENARIO_CONFIG = {
     "INVENTORY_URL": "http://inventory-api:8081",
@@ -22,9 +24,9 @@ def action(target: str, mode: str = "normal") -> dict[str, str]:
 SCENARIOS = {
     # Log-led cases: the distinguishing mechanism is recorded in execution logs.
     "poison-job": {
-        "title": "Import worker restart loop", "class": "FM", "evidence_group": "logs",
-        "summary": "A durable import repeatedly fails while the worker processes it.",
-        "actions": [action("database", "poison")], "expected_alert": "LabWorkerCrashLooping",
+        "title": "Import retry loop", "class": "FM", "evidence_group": "logs",
+        "summary": "A durable import remains unacknowledged and is retried after decode failures.",
+        "actions": [action("database", "poison")], "expected_alert": "LabWorkerPoisonRetries",
     },
     "response-contract": {
         "title": "Dependency response contract regression", "class": "FM", "evidence_group": "logs",
@@ -45,8 +47,8 @@ SCENARIOS = {
         "expected_alert": "LabInventoryDeadlockVictims",
     },
     "idempotency-conflict": {
-        "title": "Checkout idempotency collision", "class": "FM", "evidence_group": "logs",
-        "summary": "Different checkout payloads are assigned the same idempotency record.",
+        "title": "Checkout idempotency key reused", "class": "FM", "evidence_group": "logs",
+        "summary": "The same idempotency key is bound to a different order before inventory is called.",
         "actions": [action("orders", "idempotency-conflict")],
         "expected_alert": "LabOrdersIdempotencyConflicts",
     },
@@ -54,8 +56,8 @@ SCENARIOS = {
     # Metric-led cases: time-series behavior is required to distinguish the mechanism.
     "memory-leak": {
         "title": "Buffered report export", "class": "PM", "evidence_group": "metrics",
-        "summary": "A report export buffers pages instead of streaming them and reaches its memory limit.",
-        "actions": [action("worker", "memory-leak")], "expected_alert": "LabWorkerOOMKilled",
+        "summary": "A report export retains pages and approaches its configured memory guardrail.",
+        "actions": [action("worker", "memory-leak")], "expected_alert": "LabWorkerBufferPressure",
     },
     "cpu-saturation": {
         "title": "Credential migration backlog", "class": "PM", "evidence_group": "metrics",
@@ -65,6 +67,7 @@ SCENARIOS = {
     "mysql-connections": {
         "title": "MySQL connection saturation", "class": "PM", "evidence_group": "metrics",
         "summary": "Inventory retains sessions until the database connection ceiling is approached.",
+        "source_view": "prometheus_graph",
         "actions": [action("inventory", "connection-saturation")],
         "expected_alert": "LabMySQLConnectionsSaturated",
     },
@@ -76,7 +79,7 @@ SCENARIOS = {
     },
     "downstream-latency": {
         "title": "Inventory latency amplification", "class": "PM", "evidence_group": "metrics",
-        "summary": "Inventory responses slow down enough to increase checkout concurrency and retries.",
+        "summary": "Inventory completes successfully, but its added processing delay pushes checkout latency above its alert threshold.",
         "actions": [action("inventory", "downstream-latency")],
         "expected_alert": "LabCheckoutLatencyHigh",
     },
@@ -120,30 +123,48 @@ SCENARIOS = {
 }
 
 
-# This is intentionally separate from the fifteen-case diagnostic benchmark.
-# It exercises the monitoring-discovery path rather than a workload diagnosis.
+# These probes are included in the operator catalog, but remain outside the frozen
+# fifteen-case workload-diagnosis benchmark.
 DISCOVERY_SCENARIOS = {
     "metrics-service-label-drift": {
         "title": "Metrics Service label drift", "class": "Discovery", "evidence_group": "discovery",
         "summary": "Metrics are no longer discovered even though the application pods remain healthy.",
+        "source_view": "prometheus_targets",
         "service_metrics_label": "ture",
         "expected_alert": "LabApplicationMetricsDiscoveryMissing",
     },
     "mysql-exporter-scrape-path": {
         "title": "MySQL metrics target scrape failure", "class": "Discovery", "evidence_group": "discovery",
         "summary": "Prometheus discovers the exporter but cannot collect its metrics.",
+        "source_view": "prometheus_targets",
         "runner_only": True,
         "expected_alert": "LabExporterScrapeFailed",
     },
 }
 
 
-def public_scenarios() -> dict[str, dict[str, str | bool]]:
+def public_scenarios() -> dict[str, dict[str, Any]]:
     """Safe operator-facing catalog metadata without mutation settings or oracle labels."""
     scenarios = {}
     for key, item in {**SCENARIOS, **DISCOVERY_SCENARIOS}.items():
+        evidence_group = item["evidence_group"]
+        domains = {
+            "logs": ["logs", "metrics"],
+            "metrics": ["metrics", "logs"],
+            "configuration": ["configuration", "logs", "metrics"],
+            "discovery": ["metrics", "configuration"],
+        }[evidence_group]
         scenarios[key] = {
-            field: item[field] for field in ("title", "class", "evidence_group", "summary") if field in item
+            field: item[field] for field in ("title", "class", "evidence_group", "summary", "source_view")
+            if field in item
         }
+        scenarios[key]["evidence_domains"] = domains
+        scenarios[key]["execution"] = "guarded_runner" if item.get("runner_only") else "controller"
+        scenarios[key]["resource_profile"] = (
+            "bounded_memory" if key == "memory-leak" else
+            "bounded_cpu" if key == "cpu-saturation" else
+            "bounded_database_sessions" if key == "mysql-connections" else "bounded"
+        )
+        scenarios[key]["screenshot_available"] = key == "mysql-exporter-scrape-path"
         scenarios[key]["runner_only"] = bool(item.get("runner_only"))
     return scenarios

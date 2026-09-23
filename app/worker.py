@@ -24,8 +24,8 @@ MODES = {"normal", "cpu-saturation", "memory-leak"}
 EXPORT_ROWS_PER_PAGE = 24_000
 MAX_BUFFERED_EXPORT_PAGES = 160
 MAX_BUFFERED_EXPORT_BYTES = 96 * 1024 * 1024
-CPU_MIGRATION_BATCH_SIZE = 512
-CPU_MIGRATION_ROUNDS = 1_200_000
+CPU_MIGRATION_BATCH_SIZE = 160
+CPU_MIGRATION_ROUNDS = 600_000
 
 
 class WorkerState:
@@ -33,6 +33,7 @@ class WorkerState:
         self.logger = JsonLogger("worker")
         self.mode = "normal"
         self.jobs = 0
+        self.poison_retries = 0
         self.cpu_iterations = 0
         self.migration_backlog = 0
         self.migration_records_completed = 0
@@ -139,7 +140,21 @@ class WorkerState:
                 mode = self.mode
                 backlog = self.migration_backlog
                 batch_id = self._migration_batch_id
-            if mode == "cpu-saturation" and backlog > 0:
+            if mode == "cpu-saturation" and backlog <= 0:
+                with self._lock:
+                    completed = (self.mode == mode and self._migration_batch_id == batch_id
+                                 and self.migration_backlog <= 0)
+                    if completed:
+                        self.mode = "normal"
+                        self._expires_at = 0.0
+                        self._migration_batch_id = None
+                if completed:
+                    self.logger.write("INFO", "Credential migration batch completed",
+                                      batch_id=batch_id, records_completed=CPU_MIGRATION_BATCH_SIZE,
+                                      records_remaining=0, disposition="normal_work_resumed")
+                    self._export_loop(stop)
+                break
+            if mode == "cpu-saturation":
                 rounds = CPU_MIGRATION_ROUNDS
                 record_number = CPU_MIGRATION_BATCH_SIZE - backlog + 1
                 time.sleep(0)
@@ -245,6 +260,8 @@ class WorkerState:
                                 connection.commit()
                             except (ValueError, KeyError, TypeError) as exc:
                                 connection.rollback()
+                                with self._lock:
+                                    self.poison_retries += 1
                                 self.logger.write("ERROR", "Import decoder rejected document", job_id=job_id,
                                                   owner_run_id=owner_run_id, error_type=type(exc).__name__,
                                                   error=str(exc), acknowledgement="pending")
@@ -274,6 +291,7 @@ class WorkerState:
             return {
                 "status": "ok",
                 "mode": self.mode,
+                "poison_retries": self.poison_retries,
                 "allocated_bytes": self.allocated_bytes,
                 "cpu_iterations": self.cpu_iterations,
                 "migration_backlog": self.migration_backlog,
@@ -294,6 +312,7 @@ class WorkerState:
                 counter_line("lab_worker_export_pages_total", "Finite inventory export pages processed", state["export_pages_completed"]),
                 counter_line("lab_worker_export_bytes_streamed_total", "Export bytes released after normal streaming", state["export_bytes_streamed"]),
                 counter_line("lab_worker_jobs_total", "Completed background jobs", state["completed_jobs"]),
+                counter_line("lab_worker_poison_retries_total", "Import deliveries rejected and retained for retry", state["poison_retries"]),
                 counter_line("lab_worker_log_events_total", "Structured worker log events emitted", self.logger.count),
             ]
         )

@@ -17,7 +17,7 @@ workloads:
 | `inventory-api` | MySQL-backed reservation service | 400m CPU / 256 MiB |
 | `orders-api` | Checkout orchestration and retry behavior | 400m CPU / 192 MiB |
 | `traffic-generator` | Continuous 25 request/second workload | 300m CPU / 128 MiB |
-| `lab-worker` | Background jobs and resource incidents | 500m CPU / 160 MiB |
+| `lab-worker` | Background jobs and resource incidents | 500m CPU / 192 MiB (effective `-k` limit) |
 | `lab-control` | Scenario UI and recovery controller | 150m CPU / 128 MiB |
 
 Requests are intentionally modest. Healthy traffic targets several thousand structured
@@ -72,23 +72,26 @@ Worker/inventory operations have their own leases; durable import jobs expire af
 five minutes even if the controller is unavailable. This is a single-node test harness,
 not a guarantee against unrelated workloads exhausting the host.
 
-The evaluation catalog contains fifteen cases: five led by logs, five requiring logs
-plus performance metrics, and five where Kubernetes configuration is decisive. Cases
-cover poison-message redelivery, dependency contract changes, unique-key collisions,
-real MySQL deadlocks, idempotency conflicts, memory and CPU pressure, connection and
-lock saturation, downstream latency, schema rollout order, dependency routing, timeout
-budgets, signing-key skew and response-version skew.
+The Lab control UI presents one catalog of 17 operator scenarios. Fifteen are
+workload-diagnosis cases balanced across log-led, metrics-led and configuration-led
+evidence; two more exercise Prometheus discovery and scrape-path failures. Every case
+is a usable demo. The grouping exists only to keep model evaluation comparable, not to
+suggest that some scenarios are second-class. Cases cover poison-message redelivery,
+dependency contract changes, unique-key collisions, real MySQL deadlocks, idempotency
+conflicts, bounded memory and CPU pressure, connection and lock saturation, downstream
+latency, schema rollout order, dependency routing, timeout budgets, signing-key skew,
+response-version skew, and monitoring coverage failures.
 
 The complete matrix and independently observable outcomes are frozen in the
 [scenario contract](docs/SCENARIO_CONTRACT.md). Configuration scenarios update a
 dedicated ConfigMap through narrow namespace RBAC, then restore its baseline values.
 
-The Lab also includes one separate operational probe, **Metrics Service label drift**.
-It changes the actual `Service` label selected by the application `ServiceMonitor`,
-while application Pods remain healthy. The resulting discovery alert is useful for
-testing FCAPSule's Prometheus target investigation, but is deliberately excluded from
-the fifteen-case model benchmark: losing a metrics target is an observability problem,
-not a workload root-cause label.
+The two monitoring scenarios are first-class demos: **Metrics Service label drift**
+removes an otherwise healthy application target from discovery; **MySQL exporter scrape
+path failure** keeps the target discovered but causes its scrape to return HTTP 404.
+Both distinguish loss of observability from an application outage. The exporter case
+is runner-only because it needs actual Prometheus Targets screenshots and its own
+guarded rollback procedure.
 
 Alerts state symptoms, not injected causes. Application telemetry contains ordinary
 operation names, SQL codes and identities, not scenario labels or expected answers.
@@ -97,9 +100,10 @@ must verify and what cannot be claimed from these cases. It is not sent to FCAPS
 
 ## Run a Recorded Evaluation
 
-For the separate practical five-case operator demo (two external Prometheus images
-and distinct-episode retained history), see [Operator demos](docs/OPERATOR_DEMOS.md).
-Preview the execution catalog without network access:
+For the full 17-scenario operator guide, including both monitoring discovery cases,
+external screenshot evidence and safe recorded execution, see
+[Operator demos](docs/OPERATOR_DEMOS.md). Preview the full catalog without network
+access:
 
 ```bash
 python tools/run_operator_demos.py plan
@@ -109,12 +113,17 @@ Live execution and paid evidence reviews require explicit `--execute` after oper
 coordination. The runner never changes FCAPSule's configured Pro model or budgets.
 
 ```bash
-python3 tools/run_scenarios.py --scenario schema-drift
-python3 tools/run_scenarios.py --scenario all
+python3 tools/run_operator_demos.py preflight --lab-node NODE --out local_reports/preflight-<UTC>
+python3 tools/run_operator_demos.py run --case all --lab-node NODE --execute --out local_reports/evaluation-<UTC>
 python3 tools/evaluate_models.py --scenario all --models deepseek-v4-flash deepseek-v4-pro
 python3 tools/review_run.py artifacts/validation-<UTC>
 python3 tools/test_prometheus_rules.py --promtool /path/to/promtool
 ```
+
+`tools/run_scenarios.py` remains as a lower-level compatibility API used by the
+model evaluator. For a complete operator run, use `run_operator_demos.py`, which
+captures the automatic investigation before recovery and records owned evidence,
+recovery and the separated pipeline/diagnosis scores.
 
 Use `--lab`, `--prometheus` and `--fcapsule` to override the development URLs. The runner
 waits for healthy traffic and previous alert windows, records the intervention and
@@ -155,10 +164,11 @@ Scale back to one before a new evaluation. The lab UI and database can remain ru
 
 ## Prometheus Integration
 
-The separate [external screenshot evaluation](docs/EXTERNAL_SCREENSHOT_EVALUATION.md)
-adds a bounded exporter scrape-path incident, actual Prometheus before/fault/after
-screenshots, and a one-shot media reassessment. It is outside the fifteen-case score
-and uses no FCAPSule UI screenshots as evidence.
+The [external screenshot evaluation](docs/EXTERNAL_SCREENSHOT_EVALUATION.md) details
+the exporter scrape-path case, actual Prometheus before/fault/after screenshots, and
+an optional one-shot media reassessment. This case is in the 17-scenario operator
+catalog but outside the fifteen-case workload score. Evidence must come from
+Prometheus itself; FCAPSule UI screenshots are not valid incident evidence.
 
 The manifests create:
 
@@ -207,6 +217,9 @@ rate(orders_checkout_requests_total{namespace="fcapsule-lab",status="503"}[1m])
 make k8s-down
 ```
 
-The older five-container Compose stack remains available for local adapter experiments.
-It uses PostgreSQL and its terminal controls; Kubernetes is the primary path for live
-FCAPSule testing.
+The older five-container Compose stack remains available for local adapter
+compatibility experiments. Its PostgreSQL lock and authentication failure modes are
+legacy-only: they are not part of the supported 17 Kubernetes scenarios or the
+diagnostic benchmark. See [Compose compatibility status](docs/COMPOSE_COMPATIBILITY.md)
+before using those local controls; passing a Compose smoke test is not evidence that
+they meet the live FCAPSule scenario contract.

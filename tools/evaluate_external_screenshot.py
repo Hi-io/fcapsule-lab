@@ -29,6 +29,8 @@ POOL = f"serviceMonitor/{NAMESPACE}/{MONITOR}/0"
 RULE = "fcapsule-lab-screenshot-scrape"
 ALERT = "LabExporterScrapeFailed"
 OWNER = "fcapsule.lab/screenshot-run"
+CONTROL_OWNER = "fcapsule.io/lab-control-run"
+FIELD_OWNER = "fcapsule.io/lab-control-field-owner"
 FAULT_PATH = "/metrics-v2"
 TERMINAL = {"ready", "incomplete", "inconclusive", "not_configured", "failed", "blocked"}
 
@@ -42,6 +44,42 @@ def kubectl(*args, body=None, raw=False):
 
 def get(kind, name):
     return kubectl("get", kind, name, "-n", NAMESPACE, "-o", "json")
+
+
+def claim_external_run(owner):
+    config = get("configmap", "lab-scenario-config")
+    metadata = config.get("metadata", {})
+    annotations = metadata.get("annotations") or {}
+    if annotations.get(CONTROL_OWNER) or annotations.get(FIELD_OWNER):
+        raise RuntimeError("A controller-owned Lab run or recovery journal is active")
+    if annotations.get(OWNER):
+        raise RuntimeError("Another external Prometheus screenshot run owns the Lab")
+    operations = [{"op": "test", "path": "/metadata/resourceVersion",
+                   "value": metadata.get("resourceVersion")}]
+    if metadata.get("annotations") is None:
+        operations.append({"op": "add", "path": "/metadata/annotations", "value": {OWNER: owner}})
+    else:
+        operations.append({"op": "add", "path": "/metadata/annotations/" + OWNER.replace("/", "~1"), "value": owner})
+    kubectl("patch", "configmap", "lab-scenario-config", "-n", NAMESPACE,
+            "--type=json", "--patch", json.dumps(operations))
+
+
+def release_external_run(owner):
+    config = get("configmap", "lab-scenario-config")
+    metadata = config.get("metadata", {})
+    annotations = metadata.get("annotations") or {}
+    current = annotations.get(OWNER)
+    if current is None:
+        return
+    if current != owner:
+        raise RuntimeError("External screenshot ownership changed; preserving the active owner's lock")
+    operations = [
+        {"op": "test", "path": "/metadata/resourceVersion", "value": metadata.get("resourceVersion")},
+        {"op": "test", "path": "/metadata/annotations/" + OWNER.replace("/", "~1"), "value": owner},
+        {"op": "remove", "path": "/metadata/annotations/" + OWNER.replace("/", "~1")},
+    ]
+    kubectl("patch", "configmap", "lab-scenario-config", "-n", NAMESPACE,
+            "--type=json", "--patch", json.dumps(operations))
 
 
 def patch_monitor(document, path, owner):
@@ -62,7 +100,10 @@ def rule_document(owner):
                          "annotations": {OWNER: owner}},
             "spec": {"groups": [{"name": "fcapsule-lab.external-screenshot", "rules": [{
                 "alert": ALERT, "expr": 'up{namespace="fcapsule-lab",service="mysql-exporter"} == 0',
-                "for": "15s", "labels": {"severity": "warning", "signal_class": "discovery"},
+                "for": "15s", "labels": {"severity": "warning", "signal_class": "discovery",
+                                            "target_namespace": NAMESPACE,
+                                            "target_service": "mysql-exporter",
+                                            "target_workload": "mysql-exporter"},
                 "annotations": {"summary": "The exporter metrics target is failing scrapes.",
                                 "description": "Prometheus discovered the target but cannot collect its metrics. Workload health must be checked independently."},
             }]}]}}
@@ -147,6 +188,7 @@ def restore(root):
         kubectl("delete", "--raw", f"/apis/monitoring.coreos.com/v1/namespaces/{NAMESPACE}/prometheusrules/{RULE}",
                 "-f", "-", body={"apiVersion": "v1", "kind": "DeleteOptions", "preconditions": {"uid": rule["metadata"]["uid"]}})
     save(root / "recovery.json", {"at": now(), "monitor_path": baseline["spec"]["endpoints"][0]["path"], "restored": True})
+    release_external_run(owner)
 
 
 def watchdog(root):
@@ -180,13 +222,23 @@ def run(args):
     if kubectl("get", "prometheusrule", RULE, "-n", NAMESPACE, "--ignore-not-found", "-o", "json"):
         raise RuntimeError("Another screenshot evaluation already owns the temporary rule")
     capture(args, root, "before")
-    record = {"scenario": "mysql-exporter-scrape-path", "owner": uuid.uuid4().hex, "started_at": now(),
+    owner = uuid.uuid4().hex
+    record = {"scenario": "mysql-exporter-scrape-path", "owner": owner, "started_at": now(),
               "rollback_at": time.time() + 240, "outcome": "running", "samples": [],
               "prometheus": args.prometheus, "lab": args.lab, "fcapsule": args.fcapsule}
     save(root / "run.json", record)
-    guard = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "watchdog", "--out", str(root)],
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    claim_external_run(owner)
+    guard = None
     try:
+        guard = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "watchdog", "--out", str(root)],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        locked = snapshot(args, root, "locked")
+        require_safe(locked)
+        locked_monitor = locked["monitor"]
+        if (locked_monitor["metadata"].get("uid") != monitor["metadata"].get("uid")
+                or locked_monitor["spec"]["endpoints"][0].get("path") != "/metrics"
+                or locked["lab"].get("active")):
+            raise RuntimeError("Lab changed between preflight and the external run lock")
         kubectl("create", "-f", "-", body=rule_document(record["owner"]))
         patch_monitor(monitor, FAULT_PATH, record["owner"])
         deadline = time.monotonic() + 180
@@ -227,7 +279,8 @@ def run(args):
         finally:
             record["fault_ended_at"] = now()
             save(root / "run.json", record)
-            guard.wait(timeout=max(5, record["rollback_at"] - time.time() + 30))
+            if guard is not None:
+                guard.wait(timeout=max(5, record["rollback_at"] - time.time() + 30))
     wait_for(lambda: exporter_target(targets(args.prometheus)), lambda t: t["health"] == "up" and urlparse(t["scrapeUrl"]).path == "/metrics", 100, "Exporter scrape did not recover")
     snapshot(args, root, "after")
     capture(args, root, "after")

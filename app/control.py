@@ -26,6 +26,7 @@ from app.safety import lease_seconds, memory_snapshot
 
 
 CONTROL_OWNER = "fcapsule.io/lab-control-run"
+EXTERNAL_PROBE_OWNER = "fcapsule.lab/screenshot-run"
 CONTROL_TARGETS = "fcapsule.io/lab-control-targets"
 CONTROL_BASELINE = "fcapsule.io/lab-control-baseline-settings"
 CONTROL_EXPIRY = "fcapsule.io/lab-control-expires-at"
@@ -94,6 +95,8 @@ class ControlState:
             existing_owner = annotations.get(CONTROL_OWNER)
             if existing_owner:
                 raise ValueError("A persisted Lab run already owns scenario resources; recover it first")
+            if annotations.get(EXTERNAL_PROBE_OWNER):
+                raise ValueError("The external Prometheus screenshot run owns the Lab; recover it first")
             baseline = {key: str(current.get("data", {}).get(key, default))
                         for key, default in DEFAULT_SCENARIO_CONFIG.items()}
             patch = {
@@ -108,6 +111,16 @@ class ControlState:
             self._kubernetes_patch("configmaps", "lab-scenario-config", patch)
         run["baseline_settings"] = baseline
         return baseline
+
+    def _external_probe_status(self) -> dict[str, Any]:
+        try:
+            current = self._kubernetes_get("configmaps", "lab-scenario-config")
+        except (OSError, TimeoutError, ValueError, KeyError) as exc:
+            return {"available": False, "active": False, "error": type(exc).__name__}
+        if current is None:
+            return {"available": False, "active": False}
+        owner = current.get("metadata", {}).get("annotations", {}).get(EXTERNAL_PROBE_OWNER)
+        return {"available": True, "active": bool(owner), "owner": owner}
 
     def _claim_fields(self, resource: str, name: str, section: str, updates: dict[str, str]) -> None:
         current = self._kubernetes_get(resource, name)
@@ -266,6 +279,8 @@ class ControlState:
             if self.active:
                 raise ValueError("A run is already active or recovering; recover it before starting another")
             self.memory = memory_snapshot()
+            if not self.memory.get("node_identity_verified"):
+                raise ValueError("Start blocked: node-specific memory source is not verified")
             if self.memory["available_bytes"] < 1024 * 1024 * 1024:
                 raise ValueError("Start blocked: node MemAvailable is below 1 GiB")
             if not all(self._health(url).get("reachable") for url in (self.worker_url, self.inventory_url, self.orders_url)):
@@ -461,14 +476,29 @@ class ControlState:
         while True:
             try:
                 memory = memory_snapshot()
+                if not memory.get("node_identity_verified"):
+                    raise ValueError("Node-specific memory source could not be verified")
+                recover_reason = None
                 with self.lock:
                     self.memory, self.memory_error = memory, None
                     if self.active:
                         self.active["minimum_available_bytes"] = min(memory["available_bytes"], self.active["minimum_available_bytes"])
                         if memory["available_bytes"] < 768 * 1024 * 1024:
-                            self.recover("low_host_memory")
+                            recover_reason = "low_host_memory"
                         elif time.time() >= self.active["expires_at"] or self.active["status"] == "recovering":
-                            self.recover(self.active.get("recovery_reason", "lease_expired"))
+                            recover_reason = self.active.get("recovery_reason", "lease_expired")
+                    else:
+                        persisted = self._persisted_run()
+                        if persisted:
+                            self.active = {
+                                **persisted,
+                                "minimum_available_bytes": memory["available_bytes"],
+                                "claim_acquired": True,
+                                "recovery_reason": "controller_restart",
+                            }
+                            recover_reason = "controller_restart"
+                    if recover_reason:
+                        self.recover(recover_reason)
             except (OSError, ValueError, KeyError, TimeoutError) as exc:
                 with self.lock:
                     self.memory_error = type(exc).__name__
@@ -489,6 +519,7 @@ class ControlState:
             "recovery_error": self.recovery_error,
             "memory": self.memory,
             "memory_error": self.memory_error,
+            "external_probe": self._external_probe_status(),
             "demos": public_demos(),
             "capabilities": {"owned_runs": True, "scenario_catalog_version": 2},
             "prometheus_url": os.environ.get("PROMETHEUS_PUBLIC_URL", "http://192.168.0.102:30090"),
@@ -500,11 +531,11 @@ HTML = r"""<!doctype html>
 <title>FCAPSule Lab</title><style>
 :root{--ink:#172129;--muted:#66747d;--line:#d4dadd;--paper:#fff;--bg:#f3f5f6;--nav:#11181d;--green:#167052;--amber:#9a5a12;--red:#a23838;--blue:#286a96}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 Inter,"Segoe UI",Arial,sans-serif}header{height:58px;background:var(--nav);border-bottom:3px solid var(--green);color:#fff;display:flex;align-items:center;justify-content:space-between;padding:0 24px}header strong{font-size:20px}header strong span{color:#60bf9a}header small{color:#b9c3c8;text-transform:uppercase}main{width:min(1120px,calc(100% - 32px));margin:24px auto 48px}.head{display:flex;justify-content:space-between;align-items:end;margin-bottom:18px}.head h1{margin:0;font-size:26px}.head p{margin:4px 0 0;color:var(--muted)}button{border:1px solid #16583f;border-radius:2px;background:var(--green);color:#fff;min-height:36px;padding:7px 13px;font-weight:650;cursor:pointer}button.secondary{color:var(--ink);background:#fff;border-color:#aeb8be}.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.scenario{background:var(--paper);border:1px solid var(--line);border-left:4px solid var(--blue);padding:15px}.scenario.fm{border-left-color:var(--red)}.scenario.pm{border-left-color:var(--amber)}.scenario h2{font-size:16px;margin:0 0 5px}.scenario p{color:var(--muted);margin:0 0 14px;min-height:42px}.tag{font-size:10px;font-weight:750;border:1px solid var(--line);padding:2px 5px;margin-left:6px}.actions{display:flex;gap:7px}.state{display:flex;gap:18px;align-items:center;margin-top:14px;background:#fff;border:1px solid var(--line);padding:12px}.dot{width:8px;height:8px;border-radius:50%;background:var(--green);display:inline-block;margin-right:6px}.dot.down{background:var(--red)}#notice{color:var(--muted);margin-left:auto}@media(max-width:720px){.grid{grid-template-columns:1fr}.head{align-items:start;flex-direction:column;gap:10px}.scenario p{min-height:0}.state{align-items:start;flex-direction:column;gap:7px}#notice{margin-left:0}}
-button:disabled{background:#e8edef;color:#5b6870;border-color:#cbd3d7;cursor:not-allowed}button:focus-visible,select:focus-visible{outline:2px solid var(--blue);outline-offset:3px}.scenario.active{border-color:var(--green);border-left-width:4px}.actions{align-items:center;flex-wrap:wrap}select{min-height:36px;border:1px solid #aeb8be;background:#fff;color:var(--ink);padding:5px}header small{font-size:10px}
+button:disabled{background:#e8edef;color:#5b6870;border-color:#cbd3d7;cursor:not-allowed}button:focus-visible,select:focus-visible{outline:2px solid var(--blue);outline-offset:3px}.scenario.active{border-color:var(--green);border-left-width:4px}.actions{align-items:center;flex-wrap:wrap}select{min-height:36px;border:1px solid #aeb8be;background:#fff;color:var(--ink);padding:5px}header small{font-size:10px}.scenario-evidence{display:block;color:var(--muted);margin:-7px 0 12px;text-transform:capitalize}
 .dot{background:var(--muted)}.dot.up{background:var(--green)}.actions label{max-width:100%}select{max-width:100%}
 </style></head><body><header><strong><span>FCAPS</span>ule Lab</strong><small>Failure control</small></header><main>
 <div class="head"><div><h1>Incident scenarios</h1><p id="run-state">Checking node headroom</p></div><div class="actions"><label>Duration <select id="duration"><option value="120">2 minutes</option><option value="180" selected>3 minutes</option><option value="300">5 minutes</option></select></label><button class="secondary" id="recover">Recover all</button></div></div>
-<div class="grid" id="scenarios" aria-busy="true"></div><div class="state"><span><i class="dot" id="worker-dot"></i>Worker: <b id="worker-state">checking</b></span><span><i class="dot" id="inventory-dot"></i>Inventory: <b id="inventory-state">checking</b></span><span id="notice" role="status" aria-live="polite">Loading</span></div>
+<div class="grid" id="scenarios" aria-busy="true"></div><div class="state"><span><i class="dot" id="worker-dot"></i>Worker: <b id="worker-state">checking</b></span><span><i class="dot" id="inventory-dot"></i>Inventory: <b id="inventory-state">checking</b></span><span><i class="dot" id="orders-dot"></i>Orders: <b id="orders-state">checking</b></span><span id="notice" role="status" aria-live="polite">Loading</span></div>
 </main><script src="/assets/control.js"></script></body></html>"""
 
 

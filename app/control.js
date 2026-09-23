@@ -2,6 +2,8 @@
 
 function canStart(state) {
   return Boolean(state && !state.read_only_preview && !state.active && !state.memory_error &&
+    !state.external_probe?.active &&
+    state.memory?.node_identity_verified === true &&
     Number.isFinite(state.memory?.available_bytes) && state.memory.available_bytes >= 1073741824 &&
     ['worker', 'inventory', 'orders'].every(name => state[name]?.reachable));
 }
@@ -10,13 +12,13 @@ function selections(state) {
   return Object.entries(state?.scenarios || {}).map(([id, item]) => ({ ...item, id, scenario: id }));
 }
 
-function sourceUrl(base, id) {
-  const graph = ['mysql-connections', 'connection-pressure'].includes(id);
-  if (!graph && !['metrics-service-label-drift', 'mysql-exporter-scrape-path', 'exporter-scrape'].includes(id)) return null;
+function sourceUrl(base, sourceView) {
+  if (!['prometheus_graph', 'prometheus_targets'].includes(sourceView)) return null;
+  const graph = sourceView === 'prometheus_graph';
   const url = new URL(graph ? '/query' : '/targets', base);
   if (!['http:', 'https:'].includes(url.protocol)) return null;
   if (graph) {
-    url.searchParams.set('g0.expr', '{__name__=~"mysql_global_status_threads_connected|mysql_global_variables_max_connections",namespace="fcapsule-lab"}');
+    url.searchParams.set('g0.expr', '{__name__=~"inventory_mysql_client_sessions_active|inventory_mysql_server_max_connections|mysql_global_status_threads_connected|mysql_global_variables_max_connections",namespace="fcapsule-lab"}');
     url.searchParams.set('g0.tab', 'graph'); url.searchParams.set('g0.range_input', '10m');
   }
   return url.href;
@@ -40,6 +42,8 @@ if (typeof document !== 'undefined') {
         const title = document.createElement('h2'); title.textContent = item.title;
         const tag = document.createElement('span'); tag.className = 'tag'; tag.textContent = item.class; title.append(tag);
         const summary = document.createElement('p'); summary.textContent = item.summary;
+        const evidence = document.createElement('small'); evidence.className = 'scenario-evidence';
+        evidence.textContent = 'Evidence: ' + (item.evidence_domains || []).join(' · ');
         const actions = document.createElement('div'); actions.className = 'actions';
         if (item.runner_only) {
           const label = document.createElement('span'); label.textContent = 'External screenshot runner';
@@ -50,14 +54,14 @@ if (typeof document !== 'undefined') {
           const start = document.createElement('button'); start.dataset.start = item.id;
           start.addEventListener('click', () => startScenario(item)); actions.append(start);
         }
-        if (['mysql-connections', 'mysql-exporter-scrape-path', 'metrics-service-label-drift'].includes(item.id)) {
-          const href = sourceUrl(state.prometheus_url, item.id);
+        if (item.source_view) {
+          const href = sourceUrl(state.prometheus_url, item.source_view);
           if (href) {
             const link = document.createElement('a'); link.href = href; link.target = '_blank'; link.rel = 'noopener noreferrer';
-            link.textContent = ['mysql-connections'].includes(item.id) ? 'Prometheus graph' : 'Prometheus targets'; actions.append(link);
+            link.textContent = item.source_view === 'prometheus_graph' ? 'Prometheus graph' : 'Prometheus targets'; actions.append(link);
           }
         }
-        article.append(title, summary, actions); fragment.append(article);
+        article.append(title, summary, evidence, actions); fragment.append(article);
       }
       $('#scenarios').replaceChildren(fragment); shape = nextShape;
     }
@@ -84,11 +88,13 @@ if (typeof document !== 'undefined') {
       state = await response.json(); available = true;
       const memory = state.memory && Number.isFinite(state.memory.available_bytes) ?
         'Node available: ' + (state.memory.available_bytes / 1073741824).toFixed(2) + ' GiB' : 'Memory check unavailable';
+      const identity = state.memory?.node_identity_verified ? ' | node source verified' : ' | node source unverified';
+      const external = state.external_probe?.active ? ' | Prometheus screenshot run owns Lab' : '';
       const active = state.active;
-      $('#run-state').textContent = memory + (active ? ' | ' +
+      $('#run-state').textContent = memory + identity + external + (active ? ' | ' +
         (state.scenarios?.[active.scenario]?.title || active.scenario) + ' | ' + active.status + ' | ' +
         Math.max(0, Math.ceil(active.expires_at - Date.now() / 1000)) + 's remaining' : ' | No active run');
-      for (const name of ['worker', 'inventory']) {
+      for (const name of ['worker', 'inventory', 'orders']) {
         const up = state[name]?.reachable;
         $('#' + name + '-dot').className = 'dot' + (up ? ' up' : ' down');
         $('#' + name + '-state').textContent = up ? (state[name].mode || state[name].failure_mode || 'healthy') : 'unreachable';
@@ -97,7 +103,7 @@ if (typeof document !== 'undefined') {
         canStart(state) ? 'Ready' : 'Start unavailable');
     } catch (_) {
       available = false; $('#run-state').textContent = 'Control API unavailable'; notice('Control API unavailable');
-      for (const name of ['worker', 'inventory']) {
+      for (const name of ['worker', 'inventory', 'orders']) {
         $('#' + name + '-dot').className = 'dot'; $('#' + name + '-state').textContent = 'unknown';
       }
     } finally { reading = false; render(); }

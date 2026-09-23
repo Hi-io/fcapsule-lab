@@ -3,27 +3,32 @@
 This contract is the evaluator's oracle. It is stored in the standalone Lab and is
 never sent to FCAPSule, embedded in alert annotations, or exposed by the Lab control
 API. Application evidence remains realistic: SQL codes, request identities, timing,
-resource measurements and active Kubernetes configuration are observable.
+resource measurements and active Kubernetes configuration are observable. The
+operator catalog contains all 17 scenarios; the model-diagnosis benchmark remains
+the fifteen workload cases below, with two additional monitoring-discovery probes.
 
 ## Evaluation Matrix
 
-The suite contains fifteen independent mechanisms, balanced by the evidence that
-should carry the diagnosis. The grouping is not an FCAPS classification. It describes
-what an investigator must use to distinguish the root mechanism from similar symptoms.
+The benchmark contains fifteen independent workload mechanisms, balanced by the
+evidence that should carry the diagnosis. The grouping is not an FCAPS classification.
+It describes what an investigator must use to distinguish the root mechanism from
+similar symptoms. The two discovery probes are also first-class operator demos, but
+are kept separate from this legacy workload score because their target is monitoring
+coverage, not an application failure.
 
 | Group | Scenario | Decisive mechanism | Expected symptom alert |
 |---|---|---|---|
-| Logs | `poison-job` | Invalid Base64 import is redelivered before acknowledgement | `LabWorkerCrashLooping` |
+| Logs | `poison-job` | Invalid Base64 import is rolled back before acknowledgement and retried by the still-running worker | `LabWorkerPoisonRetries` |
 | Logs | `response-contract` | A successful dependency response has the wrong document shape | `LabOrdersDependencyDocumentInvalid` |
 | Logs | `reservation-token-collision` | Different reservations reuse a unique database token | `LabInventoryConstraintFailures` |
 | Logs | `transaction-deadlock` | Transactions acquire two stock rows in opposite order | `LabInventoryDeadlockVictims` |
-| Logs | `idempotency-conflict` | Different checkout payloads bind to one idempotency record | `LabOrdersIdempotencyConflicts` |
-| Logs + metrics | `memory-leak` | Export pages remain buffered until cgroup OOM | `LabWorkerOOMKilled` |
-| Logs + metrics | `cpu-saturation` | Excessive PBKDF2 rounds consume the CPU quota | `LabWorkerCPUHigh` |
-| Logs + metrics | `mysql-connections` | Checked-out sessions remain open near `max_connections` | `LabMySQLConnectionsSaturated` |
+| Logs | `idempotency-conflict` | One idempotency key is bound to the first order identifier; a later order using that key is rejected before inventory is called | `LabOrdersIdempotencyConflicts` |
+| Logs + metrics | `memory-leak` | Buffered export pages grow above the measured 80 MiB warning threshold toward a 96 MiB application safety cap; OOM is not expected | `LabWorkerBufferPressure` |
+| Logs + metrics | `cpu-saturation` | A finite credential-migration batch drives measured worker CPU use near its quota while progress is logged | `LabWorkerCPUHigh` |
+| Logs + metrics | `mysql-connections` | Inventory-owned checked-out sessions exceed 80% of a fresh capacity sample; the exporter independently corroborates server usage | `LabMySQLConnectionsSaturated` |
 | Logs + metrics | `lock-contention` | Reconciliation holds the stock row while reservations wait | `LabInventoryLockContention` |
-| Logs + metrics | `downstream-latency` | Inventory latency raises checkout p95 and concurrency | `LabCheckoutLatencyHigh` |
-| Configuration | `schema-drift` | Query revision v2 precedes the `reserved_quantity` migration | `LabInventoryQueryFailures` |
+| Logs + metrics | `downstream-latency` | Successful inventory processing adds 350 ms, raising checkout p95 without an expected retry or timeout | `LabCheckoutLatencyHigh` |
+| Configuration | `schema-drift` | Query revision v2 references `reserved_quantity` while the actual table lacks the column; the controller checks this precondition before injection | `LabInventoryQueryFailures` |
 | Configuration | `dependency-route` | `INVENTORY_URL` uses port 8099 while the Service uses 8081 | `LabOrdersDependencyTransportFailures` |
 | Configuration | `timeout-budget` | A 50 ms caller timeout is below 250 ms dependency work | `LabOrdersDependencyTimeouts` |
 | Configuration | `signing-key-skew` | Caller and dependency use different signing key IDs | `LabOrdersDependencyAuthorizationFailures` |
@@ -89,15 +94,26 @@ domains, acceptable action concepts and scenario-specific contradictions. The sc
 - awards 15 points for a relevant verification or remediation action;
 - awards 10 points for explicit uncertainty and absence of known contradictions.
 
+The action matcher rejects a matching phrase when it is explicitly negated. It still
+uses transparent phrase groups rather than a semantic entailment model; disputed or
+ambiguous matches require human review. CPU quota utilization is not evidence of CFS
+throttling by itself, and the CPU rubric intentionally does not require a throttling
+claim or recommend weakening password security.
+
 Labels are `correct_and_actionable` (90-100), `substantially_correct` (70-89),
 `partially_helpful` (45-69), `weak_or_misdirected` (1-44), and `failed` (0).
-This is a transparent task rubric, not semantic truth by keyword: every score retains
-matched criteria, citations and the unedited model output for human audit.
+This is a transparent phrase-and-citation rubric, not semantic truth or an accuracy
+certificate. It can miss paraphrases or accept ambiguous language; every score retains
+matched criteria, citations and the unedited model output for human adjudication.
 
-A separate pipeline score records whether the expected alert fired, at least the
-configured minimum log evidence was retained, a capsule fingerprint exists, and all
-required source domains were available. A missing source cannot silently become a
-model failure.
+A separate versioned pipeline score records owned fault generation, the expected
+alert, exact incident membership, a terminal and usable investigation, and confirmed
+owned recovery. A separate observability score reports required evidence domains,
+bounded local log collection, and the retained capsule fingerprint. Local `kubectl`
+tail counts are context only: they are not a proxy for total emitted, indexed,
+selected, or model-read log records. A missing source cannot silently become a
+model diagnosis failure, and pipeline completion does not imply that the diagnosis
+is correct.
 
 ## Validity Limits
 
@@ -107,5 +123,7 @@ report dispersion, preserve failures, and add future cases without changing old 
 Do not modify mechanisms or rubric criteria in response to a candidate model's output.
 
 The controller continues to enforce one active run, a 1 GiB admission threshold,
-automatic expiry and recovery below 768 MiB. Worker OOM remains restricted by its
-container limit; the Lab must never exhaust the node or restart unrelated services.
+automatic expiry and recovery below 768 MiB. The buffered-export case is intentionally
+bounded below the worker's cgroup limit. An actual `OOMKilled` event remains a separate
+defensive alert, not a desired test outcome. The Lab must never exhaust the node or
+restart unrelated services.

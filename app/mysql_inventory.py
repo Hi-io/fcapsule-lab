@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import math
 import os
 import threading
 import time
@@ -143,6 +144,11 @@ class InventoryState:
             raise ValueError(f"Unknown failure mode: {mode}")
         run_id = _validate_run_id(run_id)
         duration = lease_seconds(duration)
+        values = settings or {}
+        if mode == "connection-saturation":
+            self._connection_saturation_target(self.server_max_connections or self.configured_max_connections)
+        if mode == "configured" and values.get("INVENTORY_QUERY_REVISION") == "v2":
+            self._require_reserved_quantity_column_absent()
         with self._operation_lock:
             self._task_stop.set()
             self._release_connections()
@@ -157,7 +163,6 @@ class InventoryState:
             with self._lock:
                 self.failure_mode = mode
                 self._expires_at = time.monotonic() + duration if mode != "normal" else 0
-                values = settings or {}
                 self.accepted_key_id = str(values.get("INVENTORY_ACCEPTED_KEY_ID", "checkout-key-v1"))
                 self.response_schema = str(values.get("INVENTORY_RESPONSE_SCHEMA", "v1"))
                 self.query_revision = str(values.get("INVENTORY_QUERY_REVISION", "v1"))
@@ -184,6 +189,14 @@ class InventoryState:
         except pymysql.MySQLError as exc:
             self.logger.write("WARN", "Owned reservation test record could not be removed during recovery",
                               token_ref=_safe_ref(token), owner_ref=_safe_ref(owner), error=str(exc)[:180])
+
+    def _require_reserved_quantity_column_absent(self) -> None:
+        with self._managed_connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute("SHOW COLUMNS FROM inventory_items LIKE 'reserved_quantity'")
+                present = cursor.fetchone() is not None
+        if present:
+            raise ValueError("Schema-drift precondition failed: inventory_items.reserved_quantity already exists")
 
     def _lease_loop(self) -> None:
         while True:
@@ -236,7 +249,11 @@ class InventoryState:
             stop.wait(2.0 if hold_for_contention else 12.0)
 
     def _connection_storm(self, stop: threading.Event) -> None:
-        target = max(4, self.configured_max_connections - 1)
+        target = self._connection_saturation_target(self.server_max_connections or self.configured_max_connections)
+        self.logger.write("INFO", "Inventory session pressure bounded with server headroom",
+                          checked_out_target=target,
+                          observed_capacity=self.configured_max_connections,
+                          reserved_connections=self.configured_max_connections - target)
         while not stop.is_set():
             with self._lock:
                 at_target = len(self._held_connections) >= target
@@ -274,6 +291,16 @@ class InventoryState:
                     error=str(exc)[:180],
                 )
             stop.wait(0.5)
+
+    @staticmethod
+    def _connection_saturation_target(max_connections: int) -> int:
+        if isinstance(max_connections, bool) or not isinstance(max_connections, int) or max_connections <= 0:
+            raise ValueError("MySQL max_connections must be a positive integer")
+        reserve = max(3, math.ceil(max_connections * 0.15))
+        target = max(4, max_connections - reserve)
+        if target >= max_connections or target / max_connections <= 0.80:
+            raise ValueError("Configured MySQL capacity cannot reach the alert threshold while reserving headroom")
+        return target
 
     def _release_connections(self) -> None:
         self._storm_stop.set()
