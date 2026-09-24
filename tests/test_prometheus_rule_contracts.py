@@ -222,8 +222,13 @@ class PrometheusRuleContractTests(unittest.TestCase):
 
         cpu_cases = by_alert["LabWorkerCPUHigh"]
         self.assertTrue(any(case["eval_time"] == "0s" and not case["exp_alerts"] for case in cpu_cases))
-        self.assertTrue(any(case["eval_time"] == "5s" and case["exp_alerts"] for case in cpu_cases),
-                        "CPU pressure should alert from the post-injection rate without an oversized hold")
+        self.assertTrue(any(case["eval_time"] == "5s" and not case["exp_alerts"] for case in cpu_cases),
+                        "the one-minute rate must not fire on the first post-injection sample")
+        self.assertTrue(any(case["eval_time"] == "50s" and not case["exp_alerts"] for case in cpu_cases))
+        self.assertTrue(any(case["eval_time"] == "55s" and case["exp_alerts"] for case in cpu_cases),
+                        "CPU pressure should fire once the one-minute rate crosses the configured threshold")
+        self.assertTrue(any(case["eval_time"] == "80s" and not case["exp_alerts"] for case in cpu_cases),
+                        "CPU pressure should clear after the finite migration batch completes")
         external_cases = by_alert["LabExporterScrapeFailed"]
         self.assertTrue(any(case["eval_time"] == "0s" and not case["exp_alerts"] for case in external_cases))
         self.assertTrue(any(case["eval_time"] == "20s" and case["exp_alerts"] for case in external_cases))

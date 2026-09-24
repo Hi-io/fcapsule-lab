@@ -281,7 +281,7 @@ def build_rule_test(spec: dict[str, Any]) -> dict[str, Any]:
     cpu_service = "lab-worker"
     cpu_labels = {"container": "worker"}
     cpu_high = _series("container_cpu_usage_seconds_total", cpu_pod, cpu_service,
-                       "0 5 10 15 20 25 30 35 40 45 50 55 55 55 55 55",
+                       "0 0 5 10 15 20 25 30 35 40 45 50 55 55 55 55 55",
                        {**cpu_labels, "image": "worker-image"})
     cpu_limit = {
         "series": 'kube_pod_container_resource_limits{namespace="fcapsule-lab",pod="cpu-positive",'
@@ -290,7 +290,7 @@ def build_rule_test(spec: dict[str, Any]) -> dict[str, Any]:
     }
     tests.append(_rule_case(rules, "LabWorkerCPUHigh", [cpu_high, cpu_limit], pod=cpu_pod,
                             service=cpu_service, extra_labels=cpu_labels,
-                            absent_at=("0s", "70s"), firing_at=("5s",)))
+                            absent_at=("0s", "5s", "50s", "80s"), firing_at=("55s",)))
     cpu_below = _series("container_cpu_usage_seconds_total", cpu_pod, cpu_service,
                         "0 2.5 5 7.5 10 12.5 15 17.5",
                         {**cpu_labels, "image": "worker-image"})
