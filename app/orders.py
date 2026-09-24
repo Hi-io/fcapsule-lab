@@ -26,6 +26,8 @@ IDEMPOTENCY_TTL_SECONDS = 900
 MAX_ORDER_ID_LENGTH = 64
 MAX_IDEMPOTENCY_KEY_LENGTH = 128
 MAX_SCHEMA_ID_LENGTH = 32
+LATENCY_WINDOW_SECONDS = 300
+MAX_LATENCY_SAMPLES = 5_000
 
 
 def _short_identifier(value: Any, field: str, max_length: int) -> str:
@@ -78,6 +80,7 @@ class OrdersState:
         self.inventory_retries = 0
         self.inflight = 0
         self.latencies: list[tuple[float, float, float]] = []
+        self.inventory_latencies: list[tuple[float, float, float]] = []
         self.mode = "normal"
         self.signing_key_id = _short_identifier(
             os.environ.get("ORDER_SIGNING_KEY_ID", "checkout-key-v1"), "Request key ID", 64
@@ -194,6 +197,12 @@ class OrdersState:
         def result(status: int, kind: str, upstream_status: int | None, retryable: bool,
                    **evidence: Any) -> dict[str, Any]:
             duration_ms = round((time.perf_counter() - started) * 1000, 2)
+            finished = time.monotonic()
+            with self._lock:
+                self.inventory_latencies.append((finished, time.time(), duration_ms / 1000))
+                self.inventory_latencies = [item for item in self.inventory_latencies
+                                            if finished - item[0] <= LATENCY_WINDOW_SECONDS][
+                                                -MAX_LATENCY_SAMPLES:]
             if kind != "success":
                 self._dependency_failure(kind)
             if kind == "timeout":
@@ -302,8 +311,12 @@ class OrdersState:
                 pass
             kind = "authorization" if exc.code in {HTTPStatus.UNAUTHORIZED, HTTPStatus.FORBIDDEN} else "http_error"
             retryable = exc.code in {408, 425, 429} or exc.code >= 500
+            if kind == "authorization":
+                evidence = {"consumer_decision": "dependency_http_error", "request_key_id": signing_key_id}
+            else:
+                evidence = {"consumer_decision": "dependency_http_error"}
             return result(HTTPStatus.SERVICE_UNAVAILABLE, kind, int(exc.code), retryable,
-                          consumer_decision="dependency_http_error")
+                          **evidence)
         except (TimeoutError, socket.timeout):
             return result(HTTPStatus.SERVICE_UNAVAILABLE, "timeout", None, True,
                           timeout_seconds=timeout, consumer_decision="dependency_timeout")
@@ -496,7 +509,9 @@ class OrdersState:
                     self.checkout_errors += 1
                 finished = time.monotonic()
                 self.latencies.append((finished, time.time(), finished - start_monotonic))
-                self.latencies = [item for item in self.latencies if finished - item[0] <= 300][-5000:]
+                self.latencies = [item for item in self.latencies
+                                  if finished - item[0] <= LATENCY_WINDOW_SECONDS][
+                                      -MAX_LATENCY_SAMPLES:]
             self.logger.write("INFO" if status < 400 else "WARN", "Checkout request completed",
                               request_id=request_id, order_ref=safe_order_ref,
                               consumer_status=int(status), duration_ms=duration_ms,
@@ -517,12 +532,25 @@ class OrdersState:
             retries = self.inventory_retries
             inflight = self.inflight
             now = time.monotonic()
-            self.latencies = [item for item in self.latencies if now - item[0] <= 300][-5000:]
+            self.latencies = [item for item in self.latencies
+                              if now - item[0] <= LATENCY_WINDOW_SECONDS][-MAX_LATENCY_SAMPLES:]
             latency_samples = [item[2] for item in self.latencies]
             p95 = percentile(latency_samples)
             latency_count = len(latency_samples)
             oldest_latency_timestamp = min((item[1] for item in self.latencies), default=0.0)
             latest_latency_timestamp = max((item[1] for item in self.latencies), default=0.0)
+            self.inventory_latencies = [item for item in self.inventory_latencies
+                                        if now - item[0] <= LATENCY_WINDOW_SECONDS][
+                                            -MAX_LATENCY_SAMPLES:]
+            inventory_latency_samples = [item[2] for item in self.inventory_latencies]
+            inventory_p95 = percentile(inventory_latency_samples)
+            inventory_latency_count = len(inventory_latency_samples)
+            oldest_inventory_latency_timestamp = min(
+                (item[1] for item in self.inventory_latencies), default=0.0
+            )
+            latest_inventory_latency_timestamp = max(
+                (item[1] for item in self.inventory_latencies), default=0.0
+            )
             checkout_errors = self.checkout_errors
             idempotency_replays = self.idempotency_replays
             total = max(1, sum(requests.values()))
@@ -542,6 +570,10 @@ class OrdersState:
                 gauge_line("orders_checkout_latency_sample_count", "Checkout completions in the rolling five-minute latency window", latency_count),
                 gauge_line("orders_checkout_latency_oldest_sample_timestamp_seconds", "Unix timestamp of the oldest checkout in the active latency window", oldest_latency_timestamp),
                 gauge_line("orders_checkout_latency_latest_sample_timestamp_seconds", "Unix timestamp of the latest checkout in the active latency window", latest_latency_timestamp),
+                gauge_line("orders_inventory_dependency_latency_p95_seconds", "Inventory dependency attempt p95 latency over the local observation window", inventory_p95),
+                gauge_line("orders_inventory_dependency_latency_sample_count", "Inventory dependency attempts in the rolling five-minute latency window", inventory_latency_count),
+                gauge_line("orders_inventory_dependency_latency_oldest_sample_timestamp_seconds", "Unix timestamp of the oldest inventory dependency attempt in the active latency window", oldest_inventory_latency_timestamp),
+                gauge_line("orders_inventory_dependency_latency_latest_sample_timestamp_seconds", "Unix timestamp of the latest inventory dependency attempt in the active latency window", latest_inventory_latency_timestamp),
                 counter_line("orders_checkout_idempotency_replays_total", "Identical checkout retries served from a completed result", idempotency_replays),
                 counter_line("orders_log_events_total", "Structured orders log events emitted", logs),
                 *(counter_line("orders_dependency_failures_total", "Checkout dependency failures", value, kind=kind)
