@@ -669,7 +669,12 @@ class ApplicationMechanicsTests(unittest.TestCase):
         cursor = MagicMock()
         cursor.rowcount = 1
         connection = mysql_connection(cursor)
-        state.connect = Mock(return_value=connection)
+
+        def connect_with_counter():
+            state.client_sessions_active += 1
+            return connection
+
+        state.connect = Mock(side_effect=connect_with_counter)
 
         status, response = state.reserve("order-17", "checkout-key-v1")
 
@@ -679,16 +684,109 @@ class ApplicationMechanicsTests(unittest.TestCase):
         self.assertTrue(any("INSERT INTO reservation_events" in statement for statement in statements))
         self.assertTrue(any("quantity=quantity-1" in statement for statement in statements))
         connection.commit.assert_called_once()
+        self.assertEqual(state.client_sessions_active, 1)
+        self.assertIn("inventory_mysql_client_sessions_active 1", state.metrics())
+        state.close()
+        connection.close.assert_called_once()
+        self.assertEqual(state.client_sessions_active, 0)
+
+    def test_mysql_normal_reservations_reuse_one_healthy_session(self):
+        state = MysqlInventoryState()
+        state.logger = Mock()
+        cursor = MagicMock()
+        cursor.rowcount = 1
+        connection = mysql_connection(cursor)
+
+        def connect_with_counter():
+            state.client_sessions_active += 1
+            return connection
+
+        state.connect = Mock(side_effect=connect_with_counter)
+
+        self.assertEqual(state.reserve("order-17", "checkout-key-v1")[0], 200)
+        self.assertEqual(state.reserve("order-18", "checkout-key-v1")[0], 200)
+
+        state.connect.assert_called_once_with()
+        connection.ping.assert_called_once_with(reconnect=False)
+        self.assertEqual(state.client_sessions_active, 1)
+        self.assertEqual(state.reservation_admissions_inflight, 0)
+        state.close()
+        self.assertEqual(state.client_sessions_active, 0)
+
+    def test_mysql_normal_reservation_discards_stale_session_before_reconnecting(self):
+        state = MysqlInventoryState()
+        state.logger = Mock()
+        first_cursor = MagicMock()
+        first_cursor.rowcount = 1
+        stale_connection = mysql_connection(first_cursor)
+        second_cursor = MagicMock()
+        second_cursor.rowcount = 1
+        replacement_connection = mysql_connection(second_cursor)
+        connections = iter([stale_connection, replacement_connection])
+
+        def connect_with_counter():
+            state.client_sessions_active += 1
+            return next(connections)
+
+        state.connect = Mock(side_effect=connect_with_counter)
+
+        self.assertEqual(state.reserve("order-17", "checkout-key-v1")[0], 200)
+        stale_connection.ping.side_effect = pymysql.err.OperationalError(2006, "server has gone away")
+        self.assertEqual(state.reserve("order-18", "checkout-key-v1")[0], 200)
+
+        self.assertEqual(state.connect.call_count, 2)
+        stale_connection.close.assert_called_once()
+        self.assertEqual(state.client_sessions_active, 1)
+        self.assertEqual(state.db_failures["connection"], 0)
+        state.close()
+        replacement_connection.close.assert_called_once()
+        self.assertEqual(state.client_sessions_active, 0)
+
+    def test_mysql_failure_mode_transition_releases_normal_reservation_session(self):
+        state = MysqlInventoryState()
+        state.logger = Mock()
+        normal_cursor = MagicMock()
+        normal_cursor.rowcount = 1
+        normal_connection = mysql_connection(normal_cursor)
+
+        def connect_normal_with_counter():
+            state.client_sessions_active += 1
+            return normal_connection
+
+        state.connect = Mock(side_effect=connect_normal_with_counter)
+
+        self.assertEqual(state.reserve("order-17", "checkout-key-v1")[0], 200)
+        self.assertEqual(state.client_sessions_active, 1)
+        with patch("app.mysql_inventory.threading.Thread"):
+            state.set_failure_mode("token-collision", run_id=RUN_ID)
+
+        normal_connection.close.assert_called_once()
+        self.assertEqual(state.client_sessions_active, 0)
+        scenario_cursor = MagicMock()
+        scenario_cursor.rowcount = 1
+        scenario_connection = mysql_connection(scenario_cursor)
+
+        def connect_scenario_with_counter(_timeout=2):
+            state.client_sessions_active += 1
+            return scenario_connection
+
+        state.connect = Mock(side_effect=connect_scenario_with_counter)
+
+        self.assertEqual(state.reserve("order-18", "checkout-key-v1")[0], 200)
+
+        state.connect.assert_called_once_with(2)
+        scenario_connection.close.assert_called_once()
         self.assertEqual(state.client_sessions_active, 0)
 
     def test_mysql_duplicate_reservation_is_replayed_without_second_decrement(self):
         state = MysqlInventoryState()
         state.logger = Mock()
         transaction_cursor = MagicMock()
+        transaction_connection = mysql_connection(transaction_cursor)
         transaction_cursor.execute.side_effect = [None, pymysql.err.IntegrityError(1062, "duplicate key")]
         owner_cursor = MagicMock()
         owner_cursor.fetchone.return_value = ("order-17",)
-        state.connect = Mock(side_effect=[mysql_connection(transaction_cursor), mysql_connection(owner_cursor)])
+        state.connect = Mock(side_effect=[transaction_connection, mysql_connection(owner_cursor)])
 
         status, response = state.reserve("order-17", "checkout-key-v1")
 

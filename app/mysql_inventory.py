@@ -66,6 +66,9 @@ class InventoryState:
         self.reservation_admissions_inflight = 0
         self.reservation_admission_rejections = 0
         self._reservation_slots = threading.BoundedSemaphore(self.reservation_admission_limit)
+        self._reservation_connection_lock = threading.Lock()
+        self._normal_reservation_connection: pymysql.Connection | None = None
+        self._normal_reservation_connection_enabled = True
         self._held_connections: list[pymysql.Connection] = []
         self._collision_token: str | None = None
         self._collision_owner: str | None = None
@@ -105,6 +108,50 @@ class InventoryState:
             yield connection
         finally:
             self._close_connection(connection)
+
+    @contextmanager
+    def _managed_reservation_connection(self, reuse_normal: bool) -> Iterator[pymysql.Connection]:
+        if not reuse_normal:
+            with self._managed_connection() as connection:
+                yield connection
+            return
+
+        with self._reservation_connection_lock:
+            reusable = self._normal_reservation_connection_enabled
+            connection = self._normal_reservation_connection if reusable else None
+            if reusable:
+                self._normal_reservation_connection = None
+        if not reusable:
+            with self._managed_connection() as connection:
+                yield connection
+            return
+
+        if connection is not None:
+            try:
+                connection.ping(reconnect=False)
+            except (pymysql.MySQLError, OSError):
+                self._discard_reservation_connection(connection)
+                connection = None
+        if connection is None:
+            connection = self.connect()
+
+        try:
+            yield connection
+        except BaseException:
+            self._discard_reservation_connection(connection)
+            raise
+        else:
+            with self._reservation_connection_lock:
+                if self._normal_reservation_connection_enabled:
+                    self._normal_reservation_connection = connection
+                    return
+            self._discard_reservation_connection(connection)
+
+    def _discard_reservation_connection(self, connection: pymysql.Connection) -> None:
+        try:
+            self._close_connection(connection)
+        except (pymysql.MySQLError, OSError):
+            pass
 
     def _close_connection(self, connection: pymysql.Connection) -> None:
         try:
@@ -206,6 +253,8 @@ class InventoryState:
                 self.fixed_latency = 0.25 if mode == "fixed-latency" else 0.35 if mode == "downstream-latency" else 0.0
                 self._collision_token = f"reservation-collision-{uuid.uuid4().hex}" if mode == "token-collision" else None
                 self._control_run_id = run_id
+            with self._reservation_connection_lock:
+                self._normal_reservation_connection_enabled = mode == "normal"
             if mode == "connection-saturation":
                 threading.Thread(target=self._connection_storm, args=(self._task_stop,), daemon=True).start()
             elif mode == "lock-contention":
@@ -353,9 +402,15 @@ class InventoryState:
 
     def _release_connections(self) -> None:
         self._storm_stop.set()
+        with self._reservation_connection_lock:
+            self._normal_reservation_connection_enabled = False
+            reservation_connection = self._normal_reservation_connection
+            self._normal_reservation_connection = None
         with self._lock:
             connections = self._held_connections
             self._held_connections = []
+        if reservation_connection is not None:
+            self._discard_reservation_connection(reservation_connection)
         for connection in connections:
             try:
                 self._close_connection(connection)
@@ -492,7 +547,7 @@ class InventoryState:
         outcome = "pending"
         try:
             connection_stage_started_at = time.perf_counter()
-            with self._managed_connection() as connection:
+            with self._managed_reservation_connection(reuse_normal=mode == "normal") as connection:
                 stage_durations_ms["connect_ms"] = round(
                     (time.perf_counter() - connection_stage_started_at) * 1000, 2,
                 )
@@ -656,6 +711,10 @@ class InventoryState:
                                   error=str(exc)[:180])
             time.sleep(5)
 
+    def close(self) -> None:
+        self._task_stop.set()
+        self._release_connections()
+
     def _record_request(self, outcome: str) -> None:
         with self._lock:
             self.requests[outcome] += 1
@@ -789,7 +848,10 @@ def handler(state: InventoryState) -> type[QuietHandler]:
 def main() -> None:
     state = InventoryState()
     state.initialize_database()
-    serve(handler(state), int(os.environ.get("PORT", "8081")))
+    try:
+        serve(handler(state), int(os.environ.get("PORT", "8081")))
+    finally:
+        state.close()
 
 
 if __name__ == "__main__":
