@@ -102,18 +102,92 @@ class EvaluationTests(unittest.TestCase):
     def test_idempotency_rubric_accepts_a_specific_paraphrase(self):
         run = {
             "status": "ready",
+            "primary_incident_id": "incident-current",
             "assessment": {
                 "likely_mechanism": "Orders reused an idempotency key for a different order, so the local idempotency store rejected it before any inventory request.",
                 "next_action": "Scope key generation to an order and preserve the original response for legitimate retries.",
                 "uncertainty": "The captured records do not show the caller that supplied the duplicate key.",
                 "evidence_ids": ["L1"],
             },
-            "context": {"evidence": [{"id": "L1", "domain": "log_template"}]},
+            "context": {
+                "alerts": [{"incident_id": "incident-current", "alert_identity": "LabOrdersIdempotencyConflicts"}],
+                "evidence": [{"id": "L1", "domain": "log_template"}],
+            },
         }
         result = score_investigation(self.oracle["idempotency-conflict"], run)
         order_identity = next(item for item in result["findings"] if item["id"] == "order_identity")
         self.assertTrue(order_identity["matched"])
         self.assertGreaterEqual(result["score"], 90)
+        self.assertEqual(result["attribution_check"]["status"], "verified")
+
+    def test_saved_poison_job_paraphrase_counts_as_same_job_redelivery(self):
+        run = {
+            "status": "ready",
+            "assessment": {
+                "likely_mechanism": "The worker rejected malformed import content and retried the job.",
+                "hypotheses": [{
+                    "status": "supported",
+                    "explanation": "A specific job was poisoned and repeatedly retried, causing the alert.",
+                    "evidence_ids": ["L1"],
+                }],
+                "next_action": "Inspect the decoder contract and retained job.",
+                "uncertainty": "The producer of the malformed content is not identified.",
+                "evidence_ids": ["L1"],
+            },
+            "context": {"evidence": [{"id": "L1", "domain": "log_template"}]},
+        }
+        result = score_investigation(self.oracle["poison-job"], run)
+        redelivery = next(item for item in result["findings"] if item["id"] == "redelivery")
+        self.assertTrue(redelivery["matched"])
+        self.assertEqual(redelivery["evidence_ids"], ["L1"])
+
+    def test_saved_memory_accumulation_paraphrase_counts_without_claiming_threshold(self):
+        run = {
+            "status": "ready",
+            "assessment": {
+                "likely_mechanism": "Memory pressure from buffered export pages retained past delivery.",
+                "hypotheses": [{
+                    "status": "supported",
+                    "explanation": "Buffered report export pages stayed retained, causing memory accumulation and buffer pressure.",
+                    "evidence_ids": ["L1"],
+                }],
+                "next_action": "Inspect pod memory metrics and the memory breakdown at alert time.",
+                "uncertainty": "No direct memory gauge is available for the alert interval.",
+                "evidence_ids": ["L1"],
+            },
+            "context": {"evidence": [{"id": "L1", "domain": "log_template"}]},
+        }
+        result = score_investigation(self.oracle["memory-leak"], run)
+        retention = next(item for item in result["findings"] if item["id"] == "buffer_retention")
+        pressure = next(item for item in result["findings"] if item["id"] == "measured_pressure")
+        self.assertTrue(retention["matched"])
+        self.assertFalse(pressure["matched"])
+        self.assertEqual(result["action_criteria_matched"], [False, True])
+        self.assertEqual(result["domains"], ["logs"])
+
+    def test_stale_primary_incident_cannot_score_against_neighboring_alert(self):
+        run = {
+            "status": "ready",
+            "primary_incident_id": "older-incident",
+            "assessment": {
+                "likely_mechanism": "MySQL error 1062 shows a unique reservation token collision.",
+                "next_action": "Inspect token generation and reservation events.",
+                "uncertainty": "The request identities are not retained.",
+                "evidence_ids": ["L1"],
+            },
+            "context": {
+                "alerts": [
+                    {"incident_id": "older-incident", "alert_identity": "LabOrdersDependencyDocumentInvalid"},
+                    {"incident_id": "current-incident", "alert_identity": "LabInventoryConstraintFailures"},
+                ],
+                "evidence": [{"id": "L1", "domain": "log_template"}],
+            },
+        }
+        result = score_investigation(self.oracle["reservation-token-collision"], run)
+        self.assertEqual(result["score"], 0.0)
+        self.assertEqual(result["label"], "stale_incident_attribution")
+        self.assertEqual(result["attribution_check"]["status"], "mismatch")
+        self.assertFalse(any(item["matched"] for item in result["findings"]))
 
     def test_only_cited_domains_receive_evidence_credit(self):
         run = {

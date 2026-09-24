@@ -7,7 +7,7 @@
       "required_domains": ["logs"],
       "findings": [
         {"id": "decode_failure", "weight": 3, "all": [["base64", "encoding"], ["decode", "decoder", "payload"]]},
-        {"id": "redelivery", "weight": 2, "all": [["redeliver", "same job", "job id", "repeated delivery"], ["retry", "unacknowledged", "acknowledgement pending", "transaction rollback"]]}
+        {"id": "redelivery", "weight": 2, "all": [["redeliver", "same job", "job id", "repeated delivery", "single job", "specific job", "one job"], ["retry", "retried", "retries", "unacknowledged", "acknowledgement pending", "transaction rollback"]]}
       ],
       "actions": [["quarantine", "dead letter", "retry limit", "remove the message", "validate payload"], ["decoder", "producer contract", "schema"]],
       "contradictions": ["worker crashed", "worker process exited", "out of memory caused", "cpu saturation caused"]
@@ -61,10 +61,10 @@
       "mechanism": "A report export retains encoded pages instead of streaming them, driving the measured application buffer above 80 MiB toward its 96 MiB safety cap without an expected OOM.",
       "required_domains": ["logs", "metrics"],
       "findings": [
-        {"id": "buffer_retention", "weight": 3, "all": [["buffer", "retained pages", "allocated bytes"], ["export", "report"], ["growth", "increasing", "stream"]]},
+        {"id": "buffer_retention", "weight": 3, "all": [["buffer", "retained pages", "allocated bytes"], ["export", "report"], ["growth", "increasing", "stream", "accumulation", "accumulate", "build up", "building up"]]},
         {"id": "measured_pressure", "weight": 2, "all": [["80 mib", "80 mib threshold", "above the warning threshold", "buffer pressure"], ["96 mib", "safety cap", "bounded", "guardrail"]]}
       ],
-      "actions": [["stream", "bounded buffer", "flush pages"], ["memory profile", "heap", "allocation"]],
+      "actions": [["stream", "bounded buffer", "flush pages"], ["memory profile", "memory metrics", "memory breakdown", "heap", "allocation"]],
       "contradictions": ["worker was oomkilled during this run", "poison message caused", "cpu limit caused the worker failure"]
     },
     {

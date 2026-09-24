@@ -143,11 +143,56 @@ def evidence_domains(investigation: dict[str, Any]) -> set[str]:
     return domains
 
 
+def diagnostic_attribution(scenario: dict[str, Any], investigation: dict[str, Any]) -> dict[str, Any]:
+    """Check whether a primary incident in retained alert context is the scored alert."""
+    expected = scenario.get("expected_alert")
+    context = investigation.get("context") or {}
+    alerts = context.get("alerts") if isinstance(context, dict) else None
+    if not expected or not isinstance(alerts, list) or not alerts:
+        return {"status": "unavailable", "reason": "alert attribution metadata is absent"}
+
+    primary = investigation.get("primary_incident_id")
+    if not primary:
+        return {"status": "mismatch", "reason": "context has alerts but no primary incident"}
+    primary_alerts = [item for item in alerts if isinstance(item, dict)
+                      and str(item.get("incident_id") or "") == str(primary)]
+    if not primary_alerts:
+        return {"status": "mismatch", "reason": "primary incident is not in retained alert context"}
+
+    identities = set()
+    for alert in primary_alerts:
+        labels = alert.get("labels") if isinstance(alert.get("labels"), dict) else {}
+        identity = alert.get("alert_identity") or alert.get("alertname") or labels.get("alertname")
+        if identity:
+            identities.add(str(identity))
+    if not identities:
+        return {"status": "unavailable", "reason": "primary alert identity is absent"}
+    if expected not in identities:
+        return {"status": "mismatch", "reason": "primary incident belongs to a different alert"}
+    return {"status": "verified", "reason": "primary incident matches the expected alert"}
+
+
 def score_investigation(scenario: dict[str, Any], investigation: dict[str, Any]) -> dict[str, Any]:
+    attribution = diagnostic_attribution(scenario, investigation)
     status = investigation.get("status", "missing")
     if status not in {"ready", "incomplete", "inconclusive"} or not investigation.get("assessment"):
         return {"score": 0.0, "label": "failed", "status": status, "findings": [],
-                "domains": [], "contradictions": [], "components": {}}
+                "domains": [], "contradictions": [], "components": {},
+                "attribution_check": attribution}
+
+    if attribution["status"] == "mismatch":
+        return {
+            "score": 0.0, "label": "stale_incident_attribution", "status": status,
+            "findings": [{"id": item["id"], "matched": False, "evidence_ids": [],
+                          "weight": item["weight"]} for item in scenario["findings"]],
+            "grounding_basis": "diagnostic scoring suppressed because the primary incident does not match the expected alert",
+            "domains": [], "required_domains": sorted(set(scenario["required_domains"])),
+            "action_criteria_matched": [False for _ in scenario.get("actions", [])],
+            "contradictions": [],
+            "components": {"causal_findings": 0.0, "cited_evidence": 0.0,
+                           "next_action": 0.0, "epistemic_safety": 0},
+            "attribution_check": attribution,
+        }
 
     assessment = investigation["assessment"]
     assertions = supported_assertions(assessment, investigation)
@@ -187,6 +232,7 @@ def score_investigation(scenario: dict[str, Any], investigation: dict[str, Any])
     return {
         "score": total, "label": label, "status": status, "findings": findings,
         "grounding_basis": "claim-linked citations restricted to evidence present in this investigation",
+        "attribution_check": attribution,
         "domains": sorted(domains), "required_domains": sorted(required),
         "action_criteria_matched": action_matches, "contradictions": contradictions,
         "components": {"causal_findings": round(finding_score, 1), "cited_evidence": round(evidence_score, 1),
