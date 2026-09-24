@@ -21,6 +21,10 @@ def config():
             "api_key_configured": True, "capability": {"status": "ready"}}
 
 
+def media_clock(monotonic_values):
+    return SimpleNamespace(monotonic=Mock(side_effect=monotonic_values), sleep=Mock())
+
+
 def sample():
     return {"lab": {"active": None, "memory_error": None, **{k: {"reachable": True} for k in ("orders", "worker", "inventory")}},
         "pods": [{"node": "worker-1", "containers": [{"ready": True}]}], "node_addresses": {"worker-1": ["10.0.0.2"]},
@@ -542,8 +546,7 @@ class HistoryReviewPollingTests(unittest.TestCase):
     def test_missing_review_times_out_without_retry_or_replacing_original_outputs(self):
         original = self.accepted_attempt()
         self.reviews = iter([{**self.ready, "episode_id": "wrong-episode"}])
-        with patch.object(runner.media.time, "monotonic", side_effect=[0, 0, 160]), \
-             patch.object(runner.media.time, "sleep"), \
+        with patch.object(runner.media, "time", media_clock([0, 0, 160])), \
              self.assertRaisesRegex(TimeoutError, "history-status, do not repeat the POST"):
             runner.history_status(SimpleNamespace(case_dir=self.root))
         self.requests.assert_called_once_with("http://product/api/incidents/earlier-incident/report")
@@ -719,8 +722,7 @@ class AssessmentProvenanceTests(unittest.TestCase):
             root = Path(directory)
             record = self.record()
             with patch.object(runner, "request", side_effect=[stale, running, current, {}]) as api, \
-                 patch.object(runner.media.time, "monotonic", side_effect=[0, 0, 1, 2]), \
-                 patch.object(runner.media.time, "sleep"):
+                 patch.object(runner.media, "time", media_clock([0, 0, 1, 2])):
                 self.assertEqual(runner.await_assessment(record, root, seconds=3), current)
             self.assertEqual(runner.read(root / "investigation-before.json"), current)
             self.assertEqual(len(list((root / "raw-assessments").iterdir())), 3)
@@ -738,8 +740,7 @@ class AssessmentProvenanceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             with patch.object(runner, "request", return_value=stale) as api, \
-                 patch.object(runner.media.time, "monotonic", side_effect=[0, 0, 1]), \
-                 patch.object(runner.media.time, "sleep"), \
+                 patch.object(runner.media, "time", media_clock([0, 0, 1])), \
                  self.assertRaisesRegex(TimeoutError, "context.alerts; no retry started"):
                 runner.await_assessment(self.record(), root, seconds=1)
             api.assert_called_once_with("http://product/api/episodes/reused-episode/investigation")
@@ -772,8 +773,7 @@ class AssessmentProvenanceTests(unittest.TestCase):
                                    lab="http://lab", prometheus="http://prom")
             with patch.object(runner, "preflight", return_value={"model_config": config()}) as preflight, \
                  patch.object(runner, "request", side_effect=[state, running, terminal, report, {"capsule": {}}, {}]) as api, \
-                 patch.object(runner.media.time, "monotonic", side_effect=[0, 0, 1]), \
-                 patch.object(runner.media.time, "sleep"):
+                 patch.object(runner.media, "time", media_clock([0, 0, 1])):
                 runner.retain_prior(args)
             preflight.assert_called_once_with(args, root, require_owned=False)
             self.assertTrue(all(len(call.args) == 1 and not call.kwargs for call in api.call_args_list))
