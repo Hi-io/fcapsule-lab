@@ -3,7 +3,7 @@ import tempfile
 from pathlib import Path
 
 from app.scenario_catalog import DISCOVERY_SCENARIOS, SCENARIOS
-from evaluation.scoring import load_ground_truth, score_investigation, score_pipeline
+from evaluation.scoring import diagnostic_attribution, load_ground_truth, score_investigation, score_pipeline
 from tools.evaluate_models import observation_fingerprint, write_reports
 
 
@@ -22,6 +22,22 @@ class EvaluationTests(unittest.TestCase):
         self.assertTrue(all(self.oracle[key]["expected_alert"] == value["expected_alert"]
                             for key, value in SCENARIOS.items()))
         self.assertEqual(self.oracle["poison-job"]["required_domains"], ["logs"])
+        for scenario in ("downstream-latency", "lock-contention"):
+            self.assertEqual(self.oracle[scenario]["acceptable_primary_alerts"],
+                             SCENARIOS[scenario]["acceptable_primary_alerts"])
+
+    def test_diagnostic_attribution_accepts_declared_cofiring_primary_alerts_only(self):
+        scenario = self.oracle["downstream-latency"]
+        investigation = {
+            "primary_incident_id": "incident-dependency-latency",
+            "context": {"alerts": [{
+                "incident_id": "incident-dependency-latency",
+                "labels": {"alertname": "LabInventoryDependencyLatencyHigh"},
+            }]},
+        }
+        self.assertEqual(diagnostic_attribution(scenario, investigation)["status"], "verified")
+        investigation["context"]["alerts"][0]["labels"]["alertname"] = "LabCheckoutFailureRateHigh"
+        self.assertEqual(diagnostic_attribution(scenario, investigation)["status"], "mismatch")
 
     def test_monitoring_discovery_demos_have_a_separate_diagnostic_rubric(self):
         operational = load_ground_truth(Path(__file__).resolve().parents[1] / "evaluation/operational_ground_truth.json")
@@ -304,6 +320,15 @@ class EvaluationTests(unittest.TestCase):
         self.assertTrue(pipeline["checks"]["investigation_terminal"])
         self.assertTrue(pipeline["checks"]["investigation_usable"])
         self.assertEqual(pipeline["retained_log_lines_context_only"], 20)
+
+    def test_pipeline_accepts_a_declared_cofiring_primary_alert(self):
+        run = {
+            "expected_alert": "LabCheckoutLatencyHigh",
+            "acceptable_primary_alerts": ["LabCheckoutLatencyHigh", "LabInventoryDependencyLatencyHigh"],
+            "observed_alerts": [{"labels": {"alertname": "LabInventoryDependencyLatencyHigh"}}],
+        }
+        pipeline = score_pipeline(self.oracle["downstream-latency"], run, {"status": "missing"})
+        self.assertTrue(pipeline["checks"]["expected_alert"])
 
     def test_failed_investigation_is_terminal_but_not_a_successful_pipeline(self):
         run = {"alert_observed": True, "expected_alert": "LabOrdersDependencyDocumentInvalid",

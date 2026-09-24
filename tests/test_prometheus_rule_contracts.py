@@ -38,14 +38,15 @@ class PrometheusRuleContractTests(unittest.TestCase):
         cls.prometheus_rule = next(item for item in cls.objects if item.get("kind") == "PrometheusRule")
         cls.rules = _rules(cls.prometheus_rule["spec"])
 
-    def test_all_fifteen_diagnostic_and_two_discovery_controls_have_an_alert_rule(self):
-        expected = {item["expected_alert"] for item in (*SCENARIOS.values(), *DISCOVERY_SCENARIOS.values())}
+    def test_all_accepted_diagnostic_and_discovery_alerts_have_a_rule(self):
+        expected = {name for item in (*SCENARIOS.values(), *DISCOVERY_SCENARIOS.values())
+                    for name in [item["expected_alert"], *item.get("acceptable_primary_alerts", [])]}
         external = rule_document("offline-test-owner")
         external_names = {rule["alert"] for group in external["spec"]["groups"] for rule in group["rules"]}
 
         self.assertEqual(len(SCENARIOS), 15)
         self.assertEqual(len(DISCOVERY_SCENARIOS), 2)
-        self.assertEqual(len(expected), 17)
+        self.assertEqual(len(expected), 19)
         self.assertEqual(EXTERNAL_ALERT, "LabExporterScrapeFailed")
         self.assertEqual(expected - {EXTERNAL_ALERT}, set(self.rules).intersection(expected))
         self.assertEqual(external_names, {EXTERNAL_ALERT})
@@ -100,6 +101,11 @@ class PrometheusRuleContractTests(unittest.TestCase):
             self.assertIn(condition, dependency_expr)
         self.assertEqual(dependency_latency["for"], "20s")
 
+        admission = self.rules["LabInventoryAdmissionRejections"]
+        admission_expr = " ".join(admission["expr"].split())
+        self.assertIn('increase(inventory_reservation_admission_rejections_total{namespace="fcapsule-lab",service="inventory-api"}[1m]) > 5', admission_expr)
+        self.assertEqual(admission["for"], "15s")
+
         cpu = self.rules["LabWorkerCPUHigh"]
         cpu_expr = " ".join(cpu["expr"].split())
         self.assertIn("rate(container_cpu_usage_seconds_total", cpu_expr)
@@ -129,6 +135,7 @@ class PrometheusRuleContractTests(unittest.TestCase):
         self.assertIn("lab_worker_poison_retries_total", worker_metrics)
         self.assertIn("lab_worker_allocated_bytes 0", worker_exposition)
         self.assertTrue({"inventory_mysql_client_sessions_active", "inventory_mysql_server_max_connections",
+                         "inventory_reservation_admission_rejections_total",
                          "inventory_mysql_sample_timestamp_seconds"}.issubset(inventory_metrics))
         self.assertIn("inventory_mysql_client_sessions_active 0", inventory_exposition)
         self.assertIn("inventory_mysql_server_max_connections 0", inventory_exposition)
@@ -172,8 +179,9 @@ class PrometheusRuleContractTests(unittest.TestCase):
         for case in alert_tests:
             by_alert.setdefault(case["alertname"], []).append(case)
 
-        expected = {item["expected_alert"] for item in (*SCENARIOS.values(), *DISCOVERY_SCENARIOS.values())}
-        self.assertEqual(expected | {"LabInventoryDependencyLatencyHigh"}, set(by_alert))
+        expected = {name for item in (*SCENARIOS.values(), *DISCOVERY_SCENARIOS.values())
+                    for name in [item["expected_alert"], *item.get("acceptable_primary_alerts", [])]}
+        self.assertEqual(expected, set(by_alert))
         for alertname in sorted(expected):
             with self.subTest(alertname=alertname):
                 cases = by_alert[alertname]
@@ -200,6 +208,7 @@ class PrometheusRuleContractTests(unittest.TestCase):
             "LabMySQLConnectionsSaturated": ("20s", "25s"),
             "LabCheckoutLatencyHigh": ("20s", "25s"),
             "LabInventoryDependencyLatencyHigh": ("20s", "25s"),
+            "LabInventoryAdmissionRejections": ("15s", "20s"),
         }
         for alertname, (pending_at, firing_at) in expected_firing_windows.items():
             with self.subTest(alertname=alertname):
@@ -225,6 +234,7 @@ class PrometheusRuleContractTests(unittest.TestCase):
         self.assertTrue(stale_poison, "counter alert should clear after a stale marker expires the range")
         for alertname in sorted(expected - {"LabWorkerBufferPressure", "LabWorkerPoisonRetries",
                                             "LabMySQLConnectionsSaturated", "LabCheckoutLatencyHigh",
+                                            "LabInventoryDependencyLatencyHigh",
                                             "LabApplicationMetricsDiscoveryMissing", "LabExporterScrapeFailed"}):
             with self.subTest(stale_alert=alertname):
                 self.assertTrue(any("stale" in sample["values"]
@@ -257,11 +267,18 @@ class PrometheusRuleContractTests(unittest.TestCase):
                         "exporter scrape alert should clear after the target recovers")
         self.assertGreaterEqual(len(test["tests"]), 70)
 
+        admission_groups = [group for group in test["tests"]
+                            if group["alert_rule_test"][0]["alertname"] == "LabInventoryAdmissionRejections"]
+        self.assertTrue(any(any(case["exp_alerts"] for case in group["alert_rule_test"])
+                            for group in admission_groups))
+        self.assertTrue(any(any(not case["exp_alerts"] for case in group["alert_rule_test"])
+                            for group in admission_groups))
+
     def test_dependency_latency_fixtures_cover_guards_recovery_and_checkout_independence(self):
         test = build_rule_test(self.prometheus_rule["spec"])
         dependency_groups = [group for group in test["tests"]
                              if group["alert_rule_test"][0]["alertname"] == "LabInventoryDependencyLatencyHigh"]
-        self.assertEqual(len(dependency_groups), 8)
+        self.assertEqual(len(dependency_groups), 9)
         self.assertTrue(any(not group["input_series"] for group in dependency_groups),
                         "dependency alert needs an empty-input control")
 
@@ -315,6 +332,19 @@ class PrometheusRuleContractTests(unittest.TestCase):
         self.assertIsNotNone(positive_checkout)
         self.assertFalse(any("orders_inventory_dependency_latency" in sample["series"]
                              for sample in positive_checkout["input_series"]))
+
+        simultaneous = [group for group in test["tests"]
+                        if group["alert_rule_test"][0]["alertname"] in {
+                            "LabCheckoutLatencyHigh", "LabInventoryDependencyLatencyHigh"
+                        }
+                        and any(case["eval_time"] == "25s" and case["exp_alerts"]
+                                for case in group["alert_rule_test"])
+                        and any("orders_checkout_latency_p95_seconds" in sample["series"]
+                                for sample in group["input_series"])
+                        and any("orders_inventory_dependency_latency_p95_seconds" in sample["series"]
+                                for sample in group["input_series"])]
+        self.assertEqual({group["alert_rule_test"][0]["alertname"] for group in simultaneous},
+                         {"LabCheckoutLatencyHigh", "LabInventoryDependencyLatencyHigh"})
 
 
 if __name__ == "__main__":

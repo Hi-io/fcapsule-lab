@@ -76,12 +76,14 @@ SCENARIOS = {
         "summary": "Stock reconciliation holds a row while reservations wait and callers retry.",
         "actions": [action("inventory", "lock-contention")],
         "expected_alert": "LabInventoryLockContention",
+        "acceptable_primary_alerts": ["LabInventoryLockContention", "LabInventoryAdmissionRejections"],
     },
     "downstream-latency": {
         "title": "Inventory latency amplification", "class": "PM", "evidence_group": "metrics",
         "summary": "Inventory completes successfully, but its added processing delay pushes checkout latency above its alert threshold.",
         "actions": [action("inventory", "downstream-latency")],
         "expected_alert": "LabCheckoutLatencyHigh",
+        "acceptable_primary_alerts": ["LabCheckoutLatencyHigh", "LabInventoryDependencyLatencyHigh"],
     },
 
     # Configuration-led cases: the decisive difference is retained in a real ConfigMap.

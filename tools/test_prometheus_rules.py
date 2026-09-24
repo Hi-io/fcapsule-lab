@@ -85,6 +85,7 @@ COUNTER_SCENARIO_RULES = {
     "LabOrdersDependencyDocumentInvalid": ("orders_dependency_failures_total", "contract_shape", 5, 60, 15, "orders-api"),
     "LabInventoryConstraintFailures": ("inventory_transaction_failures_total", "constraint", 5, 60, 15, "inventory-api"),
     "LabInventoryDeadlockVictims": ("inventory_transaction_failures_total", "deadlock", 3, 60, 15, "inventory-api"),
+    "LabInventoryAdmissionRejections": ("inventory_reservation_admission_rejections_total", None, 5, 60, 15, "inventory-api"),
     "LabOrdersIdempotencyConflicts": ("orders_internal_failures_total", "idempotency_conflict", 5, 60, 15, "orders-api"),
     "LabInventoryLockContention": ("inventory_database_failures_total", "lock_timeout", 5, 120, 15, "inventory-api"),
     "LabInventoryQueryFailures": ("inventory_database_failures_total", "query", 5, 60, 15, "inventory-api"),
@@ -107,7 +108,7 @@ def _counter_rule_cases(rules: dict[str, dict[str, Any]]) -> list[dict[str, Any]
         firing_seconds = 5 + hold
         pending_seconds = firing_seconds - 5
         recovery_seconds = lookback + 10
-        labels = {"kind": kind}
+        labels = {"kind": kind} if kind else {}
         injected_values = _counter_values(lookback, threshold + 1)
         injected = _series(metric, pod, service, injected_values, labels)
         tests.append(_rule_case(
@@ -121,9 +122,10 @@ def _counter_rule_cases(rules: dict[str, dict[str, Any]]) -> list[dict[str, Any]
         tests.append(_rule_case(rules, alertname, [below_threshold], pod=pod, service=service,
                                 extra_labels=labels, absent_at=("0s", f"{firing_seconds}s")))
 
-        wrong_kind = _series(metric, pod, service, injected_values, {"kind": "unrelated"})
-        tests.append(_rule_case(rules, alertname, [wrong_kind], pod=pod, service=service,
-                                absent_at=(f"{firing_seconds}s",)))
+        if kind:
+            wrong_kind = _series(metric, pod, service, injected_values, {"kind": "unrelated"})
+            tests.append(_rule_case(rules, alertname, [wrong_kind], pod=pod, service=service,
+                                    absent_at=(f"{firing_seconds}s",)))
 
         stale = _series(metric, pod, service, f"0 {threshold + 1} stale", labels)
         tests.append(_rule_case(rules, alertname, [stale], pod=pod, service=service,
@@ -303,6 +305,22 @@ def build_rule_test(spec: dict[str, Any]) -> dict[str, Any]:
     tests.append(_rule_case(rules, "LabInventoryDependencyLatencyHigh", recovered_dependency,
                             pod=dependency_pod, service=dependency_service,
                             absent_at=("0s", "20s", "30s"), firing_at=("25s",)))
+
+    # Downstream latency raises both checkout and dependency p95 independently;
+    # the operator runner accepts either as the primary incident for that case.
+    co_firing_series = [
+        _series("orders_checkout_latency_p95_seconds", dependency_pod, dependency_service,
+                ".1 .35 .35 .35 .35 .35"),
+        _series("orders_checkout_latency_sample_count", dependency_pod, dependency_service,
+                "0 10 10 10 10 10"),
+        _series("orders_checkout_latency_latest_sample_timestamp_seconds", dependency_pod, dependency_service,
+                "0 1700000005 1700000005 1700000005 1700000005 1700000005"),
+        *dependency_series,
+    ]
+    tests.append(_rule_case(rules, "LabCheckoutLatencyHigh", co_firing_series,
+                            pod=dependency_pod, service=dependency_service, firing_at=("25s",)))
+    tests.append(_rule_case(rules, "LabInventoryDependencyLatencyHigh", co_firing_series,
+                            pod=dependency_pod, service=dependency_service, firing_at=("25s",)))
 
     dependency_at_threshold = [dict(item) for item in dependency_series]
     dependency_at_threshold[0] = _series("orders_inventory_dependency_latency_p95_seconds",

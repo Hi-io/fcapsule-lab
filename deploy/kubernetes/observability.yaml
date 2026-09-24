@@ -221,6 +221,17 @@ spec:
             summary: Inventory transactions are timing out on an InnoDB row lock.
             description: More than five lock-wait timeouts were recorded within two minutes. The blocker must be investigated separately.
 
+        - alert: LabInventoryAdmissionRejections
+          expr: increase(inventory_reservation_admission_rejections_total{namespace="fcapsule-lab",service="inventory-api"}[1m]) > 5
+          for: 15s
+          labels:
+            severity: warning
+            service: inventory-api
+            signal_class: PM
+          annotations:
+            summary: Inventory is shedding reservation attempts before opening MySQL sessions.
+            description: More than five reservation attempts were rejected by the local admission limit within one minute. Check checkout failures and the database operation holding the admitted slot.
+
         - alert: LabInventoryQueryFailures
           expr: increase(inventory_database_failures_total{namespace="fcapsule-lab",kind="query"}[1m]) > 5
           for: 15s

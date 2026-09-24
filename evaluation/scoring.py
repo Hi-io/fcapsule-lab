@@ -145,7 +145,9 @@ def evidence_domains(investigation: dict[str, Any]) -> set[str]:
 
 def diagnostic_attribution(scenario: dict[str, Any], investigation: dict[str, Any]) -> dict[str, Any]:
     """Check whether a primary incident in retained alert context is the scored alert."""
-    expected = scenario.get("expected_alert")
+    accepted = scenario.get("acceptable_primary_alerts") or scenario.get("expected_alert")
+    expected = ({str(item) for item in accepted if item} if isinstance(accepted, list)
+                else {str(accepted)} if accepted else set())
     context = investigation.get("context") or {}
     alerts = context.get("alerts") if isinstance(context, dict) else None
     if not expected or not isinstance(alerts, list) or not alerts:
@@ -167,9 +169,9 @@ def diagnostic_attribution(scenario: dict[str, Any], investigation: dict[str, An
             identities.add(str(identity))
     if not identities:
         return {"status": "unavailable", "reason": "primary alert identity is absent"}
-    if expected not in identities:
+    if not expected.intersection(identities):
         return {"status": "mismatch", "reason": "primary incident belongs to a different alert"}
-    return {"status": "verified", "reason": "primary incident matches the expected alert"}
+    return {"status": "verified", "reason": "primary incident matches an accepted alert"}
 
 
 def score_investigation(scenario: dict[str, Any], investigation: dict[str, Any]) -> dict[str, Any]:
@@ -249,10 +251,11 @@ def score_pipeline(scenario: dict[str, Any], run: dict[str, Any], investigation:
     usable = status in {"ready", "incomplete", "inconclusive"}
     expected_alert = run.get("alert_observed")
     if expected_alert is None:
-        expected_name = run.get("expected_alert")
+        expected_name = run.get("acceptable_primary_alerts") or run.get("expected_alert")
+        expected_names = set(expected_name) if isinstance(expected_name, list) else {expected_name}
         observed = run.get("observed_alerts") or []
         expected_alert = bool(expected_name and any(
-            (item.get("labels") or {}).get("alertname") == expected_name for item in observed
+            (item.get("labels") or {}).get("alertname") in expected_names for item in observed
         ))
     if expected_alert is None:
         expected_alert = bool(run.get("outcome") == "captured" and run.get("alert.json"))

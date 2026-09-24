@@ -75,6 +75,13 @@ class DemoCatalogTests(unittest.TestCase):
         self.assertEqual(runner.capture_spec("mysql-connections")["view"], "graph")
         self.assertEqual(runner.ALL_RUN_CASES[-1], "query-rollout-history")
         self.assertEqual(len(runner.ALL_RUN_CASES), 18)
+        self.assertEqual(SCENARIOS["downstream-latency"]["acceptable_primary_alerts"], [
+            "LabCheckoutLatencyHigh", "LabInventoryDependencyLatencyHigh",
+        ])
+        self.assertEqual(SCENARIOS["lock-contention"]["acceptable_primary_alerts"], [
+            "LabInventoryLockContention", "LabInventoryAdmissionRejections",
+        ])
+        self.assertNotIn("acceptable_primary_alerts", catalog["downstream-latency"])
 
     def test_all_case_selection_includes_history_without_relabeling_it_as_a_new_fault(self):
         self.assertEqual(runner.ALL_RUN_CASES, [*SCENARIOS, *DISCOVERY_SCENARIOS, "query-rollout-history"])
@@ -467,6 +474,21 @@ class DemoRunnerTests(unittest.TestCase):
         self.assertEqual(len(runner.matching_signals(state, "LabInventoryQueryFailures", "2026-09-23T12:00:00Z")), 1)
         signal["report_ready"] = 0
         self.assertEqual(runner.matching_signals(state, "LabInventoryQueryFailures", "2026-09-23T12:00:00Z"), [])
+
+    def test_matching_signals_accepts_the_declared_primary_alert_set(self):
+        signals = [
+            {"incident_id": "incident-LabInventoryDependencyLatencyHigh-1", "created_at": "2026-09-23T12:00:30Z",
+             "started_at": "2026-09-23T12:00:01Z", "app_id": "go15:fcapsule-lab:orders-api", "report_ready": 1},
+            {"incident_id": "incident-LabCheckoutFailureRateHigh-2", "created_at": "2026-09-23T12:00:40Z",
+             "started_at": "2026-09-23T12:00:01Z", "app_id": "go15:fcapsule-lab:orders-api", "report_ready": 1},
+        ]
+        state = {"overview": {"episodes": [{"episode_id": "ep", "signals": signals}]}}
+
+        matches = runner.matching_signals(
+            state, SCENARIOS["downstream-latency"]["acceptable_primary_alerts"], "2026-09-23T12:00:00Z")
+
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0][1]["incident_id"], signals[0]["incident_id"])
 
     def test_repeated_fresh_signals_in_one_episode_select_the_newest(self):
         episode = {"episode_id": "episode-1"}

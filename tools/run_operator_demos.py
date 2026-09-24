@@ -340,6 +340,7 @@ def retain_metrics(args, root, case, start):
 
 
 def matching_signals(state, expected, started):
+    expected_names = {item.lower() for item in expected} if isinstance(expected, (list, tuple, set)) else {expected.lower()}
     cutoff = datetime.fromisoformat(started.replace("Z", "+00:00"))
     matches = []
     for episode in state["overview"]["episodes"]:
@@ -351,7 +352,7 @@ def matching_signals(state, expected, started):
                 continue
             if "fcapsule-lab" not in signal.get("app_id", "") or not signal.get("report_ready"):
                 continue
-            if expected.lower() in signal.get("incident_id", "").lower():
+            if any(name in signal.get("incident_id", "").lower() for name in expected_names):
                 matches.append((episode, signal))
     return matches
 
@@ -576,6 +577,7 @@ def recover_owned(args, root, owner):
 def run_workload(args, case, root, config):
     scenario = DEMO_CASES.get(case, {}).get("scenario", case)
     expected = SIGNALS[scenario]["expected_alert"]
+    acceptable_primary_alerts = SIGNALS[scenario].get("acceptable_primary_alerts", [expected])
     before = snapshot(args, root, "before")
     safety(before, args.lab_node)
     baseline_config(before)
@@ -587,6 +589,7 @@ def run_workload(args, case, root, config):
         raise RuntimeError("Previous alerts have not cleared")
     owner = uuid.uuid4().hex
     record = {"case": case, "scenario": scenario, "expected_alert": expected, "owner": owner, "baseline_at": now(),
+              "acceptable_primary_alerts": acceptable_primary_alerts,
               "model_config": config, "fcapsule": args.fcapsule, "lab": args.lab, "prometheus": args.prometheus,
               "outcome": "starting", "samples": [], "observed_alerts": []}
     save(root / "run.json", record)
@@ -610,7 +613,7 @@ def run_workload(args, case, root, config):
             current = snapshot(args, root, "fault-latest")
             safety(current, args.lab_node, owner, 768 * 1024**2)
             alerts = firing(args.prometheus)
-            matches = [a for a in alerts if a["labels"].get("alertname") == expected]
+            matches = [a for a in alerts if a["labels"].get("alertname") in acceptable_primary_alerts]
             record["samples"].append({"at": current["at"], "memory": current["memory"], "active": current["lab"]["active"]})
             if matches and seen_at is None:
                 seen_at = time.monotonic()
@@ -620,7 +623,7 @@ def run_workload(args, case, root, config):
                 save(root / "alert.json", matches)
                 record["media_capture"] = capture(args, root, case)
             if seen_at is not None:
-                pairs = matching_signals(request(args.fcapsule + "/api/state"), expected, record["started_at"])
+                pairs = matching_signals(request(args.fcapsule + "/api/state"), acceptable_primary_alerts, record["started_at"])
                 record["candidate_signals"] = [{"episode_id": e["episode_id"], "incident_id": s["incident_id"]} for e, s in pairs]
                 selected = select_episode_signal(pairs)
                 if selected:

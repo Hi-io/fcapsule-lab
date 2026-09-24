@@ -91,6 +91,7 @@
     },
     {
       "id": "lock-contention", "category": "metrics", "expected_alert": "LabInventoryLockContention", "target_service": "inventory-api",
+      "acceptable_primary_alerts": ["LabInventoryLockContention", "LabInventoryAdmissionRejections"],
       "mechanism": "Stock reconciliation keeps an InnoDB row lock open while reservations wait, time out with 1205 and amplify retries.",
       "required_domains": ["logs", "metrics"],
       "findings": [
@@ -102,6 +103,7 @@
     },
     {
       "id": "downstream-latency", "category": "metrics", "expected_alert": "LabCheckoutLatencyHigh", "target_service": "orders-api",
+      "acceptable_primary_alerts": ["LabCheckoutLatencyHigh", "LabInventoryDependencyLatencyHigh"],
       "mechanism": "Inventory processing slows to roughly 350 ms, increasing checkout p95 and in-flight work without a resource crash.",
       "required_domains": ["logs", "metrics"],
       "findings": [
