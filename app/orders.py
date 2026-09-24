@@ -554,6 +554,7 @@ class OrdersState:
     def status(self) -> dict[str, Any]:
         with self._lock:
             return {"status": "ok", "mode": self.mode,
+                    "run_id": self._control_run_id,
                     "inventory_url": _safe_endpoint_url(self.inventory_url),
                     "timeout_seconds": self.timeout, "expected_schema": self.expected_schema}
 
