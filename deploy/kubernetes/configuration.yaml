@@ -70,7 +70,7 @@ data:
   WORKER_URL: http://lab-worker:8083
   ORDERS_URL: http://orders-api:8080
   REQUESTS_PER_SECOND: "25"
-  MAX_INFLIGHT: "48"
+  MAX_INFLIGHT: "12"
   INVENTORY_TIMEOUT_SECONDS: "1.5"
   MAX_RETRIES: "3"
   LOG_NAMESPACE: fcapsule-lab

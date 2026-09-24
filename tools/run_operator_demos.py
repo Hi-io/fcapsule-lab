@@ -36,6 +36,7 @@ CONFIG_KEYS = ("provider", "model", "max_tokens", "max_total_tokens", "max_promp
 MAXIMUMS = {"max_tokens": 3600, "max_total_tokens": 12000, "max_prompt_tokens": 3200, "max_checks": 1}
 SIGNALS = {**SCENARIOS, **DISCOVERY_SCENARIOS}
 SIGNALS["mysql-exporter-scrape-path"] = {"expected_alert": media.ALERT}
+ALL_RUN_CASES = [*SCENARIOS, *DISCOVERY_SCENARIOS, "query-rollout-history"]
 WORKLOAD_ORACLE = load_ground_truth()
 DISCOVERY_ORACLE = load_ground_truth(ROOT / "evaluation/operational_ground_truth.json")
 QUESTIONS = (
@@ -141,6 +142,32 @@ def safety(data, lab_node, owner=None, minimum=1024**3):
         raise RuntimeError("Hosting-node memory measurement missing or older than 60 seconds")
 
 
+def wait_for_lab_ready(args, root, case, ordinal, timeout=480):
+    """Wait for a safe, healthy baseline before the next owned fault injection."""
+    deadline = time.monotonic() + timeout
+    phase = "ready-" + case.replace("/", "-") + "-" + str(ordinal)
+    last_error = "Lab has not returned to a healthy baseline"
+    while time.monotonic() < deadline:
+        data = snapshot(args, root, phase)
+        if data["lab"].get("active"):
+            raise RuntimeError("Another Lab run is active; no fault injected")
+        try:
+            safety(data, args.lab_node)
+        except RuntimeError as error:
+            last_error = str(error)
+            if "must remain pinned" in last_error:
+                raise
+            time.sleep(5)
+            continue
+        baseline_config(data)
+        if firing(args.prometheus):
+            last_error = "Lab alerts are still firing"
+            time.sleep(5)
+            continue
+        return data
+    raise TimeoutError(f"Lab did not return to a safe, healthy baseline within {timeout}s: {last_error}")
+
+
 def baseline_config(data):
     if any(data["config"]["data"].get(k) != v for k, v in DEFAULT_SCENARIO_CONFIG.items()):
         raise RuntimeError("Lab scenario ConfigMap is not at baseline")
@@ -180,9 +207,18 @@ def capture(args, root, case):
         spec = {"view": "graph", "query":
                 '{__name__=~"mysql_global_status_threads_connected|mysql_global_variables_max_connections",namespace="fcapsule-lab"}'}
     if not spec:
-        return
-    subprocess.run([args.node, str(ROOT / "tools/capture_demo.cjs"), args.prometheus,
-                    str(root / "fault.png"), json.dumps(spec)], check=True, timeout=55)
+        return None
+    try:
+        subprocess.run([args.node, str(ROOT / "tools/capture_demo.cjs"), args.prometheus,
+                        str(root / "fault.png"), json.dumps(spec)], check=True, timeout=55)
+        result = {"status": "captured", "source": args.prometheus, "view": spec.get("view")}
+    except (OSError, subprocess.SubprocessError, ValueError) as error:
+        # A screenshot enriches an investigation but is not a prerequisite for
+        # collecting logs, waiting for the capsule, or scoring its diagnosis.
+        result = {"status": "unavailable", "error_type": type(error).__name__,
+                  "error": str(error)[:300], "view": spec.get("view")}
+    save(root / "media-capture.json", result)
+    return result
 
 
 def capture_spec(case):
@@ -197,6 +233,34 @@ def capture_spec(case):
 
 def scenario_rounds(case):
     return DEMO_CASES.get(case, {}).get("rounds", 1)
+
+
+def score_history_reuse(previous, current, investigation):
+    """Score actual use of the exact retained episode, not recurrence by itself."""
+    assessment = investigation.get("assessment") or {}
+    comparison = assessment.get("historical_comparison") or {}
+    prior_episode_id = previous.get("episode_id")
+    matching_checks = [check for check in investigation.get("checks", [])
+                       if check.get("tool") == "historical_episode"
+                       and (check.get("arguments") or {}).get("episode_id") == prior_episode_id
+                       and check.get("status") == "completed"]
+    cited = any(check.get("id") in comparison.get("evidence_ids", []) for check in matching_checks)
+    correct_comparison = comparison.get("episode_id") == prior_episode_id
+    same_mechanism = comparison.get("status") == "similar_mechanism"
+    score = (40 if matching_checks else 0) + (40 if correct_comparison and same_mechanism else 0) + (20 if cited else 0)
+    result = {
+        "score": score,
+        "label": "useful_retained_memory" if score == 100 else "partial_retained_memory" if score >= 60 else "history_not_used_effectively",
+        "previous_episode_id": prior_episode_id,
+        "historical_check_completed": bool(matching_checks),
+        "comparison_references_prior_episode": correct_comparison,
+        "same_mechanism_identified": same_mechanism,
+        "comparison_cites_retrieved_history": cited,
+        "comparison_status": comparison.get("status"),
+        "requires_human_review": True,
+        "current_episode_id": current.get("episode_id"),
+    }
+    return result
 
 
 def collect_logs(root, start):
@@ -228,6 +292,16 @@ def promql(case):
         expressions["query_errors"] = 'increase(inventory_database_failures_total{namespace="fcapsule-lab",kind="query"}[1m])'
     if case == "checkout-deadline":
         expressions["dependency_timeouts"] = 'increase(orders_dependency_failures_total{namespace="fcapsule-lab",kind="timeout"}[1m])'
+    if case == "cpu-saturation":
+        # Keep the pod-level series behind the alert so the investigation can
+        # distinguish high CPU use from actual CFS throttling and see progress.
+        expressions.update({
+            "worker_cpu_cores": 'sum by (namespace,pod,container) (rate(container_cpu_usage_seconds_total{namespace="fcapsule-lab",container="worker",image!=""}[1m]))',
+            "worker_cpu_limit": 'max by (namespace,pod,container) (kube_pod_container_resource_limits{namespace="fcapsule-lab",container="worker",resource="cpu",unit="core"})',
+            "worker_cpu_throttled_ratio": 'sum by (namespace,pod,container) (rate(container_cpu_cfs_throttled_periods_total{namespace="fcapsule-lab",container="worker"}[1m])) / sum by (namespace,pod,container) (rate(container_cpu_cfs_periods_total{namespace="fcapsule-lab",container="worker"}[1m]))',
+            "migration_backlog": 'lab_worker_migration_backlog{namespace="fcapsule-lab"}',
+            "migration_progress": 'increase(lab_worker_migration_records_total{namespace="fcapsule-lab"}[1m])',
+        })
     return expressions
 
 
@@ -301,13 +375,20 @@ def assessment_contains_incident(value, incident_id):
     )
 
 
+def assessment_matches_primary(value, incident_id):
+    return value.get("primary_incident_id") == incident_id
+
+
 def await_assessment(record, root, seconds=360, *, allow_retained_prior=False):
     base = record["fcapsule"] + "/api/episodes/" + quote(record["episode_id"], safe="")
     description = ("Retained assessment did not finish; no retry started" if allow_retained_prior else
-                   "No terminal assessment includes the run incident in context.alerts; no retry started")
+                   "No terminal assessment makes the run incident primary; no retry started")
     value = media.wait_for(lambda: retain_assessment(root, request(base + "/investigation")),
                            lambda v: v.get("status") in TERMINAL and
-                           (allow_retained_prior or assessment_contains_incident(v, record["incident_id"])),
+                           (allow_retained_prior or (
+                               assessment_contains_incident(v, record["incident_id"])
+                               and assessment_matches_primary(v, record["incident_id"])
+                           )),
                            seconds, description)
     save(root / "investigation-before.json", value)
     report = request(record["fcapsule"] + "/api/incidents/" + quote(record["incident_id"], safe="") + "/report")
@@ -323,7 +404,7 @@ def await_assessment(record, root, seconds=360, *, allow_retained_prior=False):
     record["assessment_matches_incident"] = value.get("primary_incident_id") == record["incident_id"]
     record["assessment_context_contains_incident"] = assessment_contains_incident(value, record["incident_id"])
     record["assessment_context_policy"] = "retained_prior_read_only" if allow_retained_prior else "current_incident_required"
-    if not record["assessment_context_contains_incident"]:
+    if not record["assessment_context_contains_incident"] or not record["assessment_matches_incident"]:
         record["comparison_valid"] = False
     record["usage"] = value.get("usage")
     record["quality"] = "requires_human_review"
@@ -339,16 +420,35 @@ def recover_owned(args, root, owner):
     active = state.get("active")
     if active and active.get("run_id") != owner:
         raise RuntimeError("Different run became active; no recovery write performed")
+    recovery_response = None
     if active:
-        value = request(args.lab + "/api/recover", {"expected_run_id": owner})
-        save(root / "recovery-request.json", value)
+        recovery_response = request(args.lab + "/api/recover", {"expected_run_id": owner})
+        save(root / "recovery-request.json", recovery_response)
+        if recovery_response.get("ok") is False:
+            raise RuntimeError("Owned recovery was rejected; preserve the run and stop before another fault")
     media.wait_for(lambda: request(args.lab + "/api/status"),
-                   lambda s: not s.get("active") and all(s.get(k, {}).get("reachable") for k in ("worker", "inventory", "orders")),
-                   90, "Owned Lab run did not recover; inspect watchdog and recovery errors")
+                   lambda s: not s.get("active"),
+                   90, "Owned Lab run did not release its controller lease; inspect recovery errors")
     after = snapshot(args, root, "after")
-    safety(after, args.lab_node)
+    if after["lab"].get("active"):
+        raise RuntimeError("Lab run became active during recovery verification")
+    if after["lab"].get("recovery_error"):
+        raise RuntimeError("Lab controller reports a recovery error; preserve evidence and stop before another fault")
+    media.require_node_headroom(after, 1024**3)
     baseline_config(after)
-    save(root / "recovery.json", {"at": now(), "restored": True, "owner": owner})
+    reachable = all(after["lab"].get(key, {}).get("reachable") for key in ("worker", "inventory", "orders"))
+    pods_ready = bool(after["pods"]) and all(
+        pod["containers"] and all(container["ready"] for container in pod["containers"])
+        for pod in after["pods"]
+    )
+    save(root / "recovery.json", {
+        "at": now(), "restored": True, "owner": owner,
+        "controller_lease_released": True,
+        "baseline_config_restored": True,
+        "recovery_response": recovery_response,
+        "runtime_readiness": {"services_reachable": reachable, "pods_ready": pods_ready},
+        "readiness_note": "Diagnosis may proceed from captured evidence; the next fault remains gated on a fully ready baseline.",
+    })
 
 
 def run_workload(args, case, root, config):
@@ -396,7 +496,7 @@ def run_workload(args, case, root, config):
                 record["alert_observed"] = True
                 save(root / "fault.json", current)
                 save(root / "alert.json", matches)
-                capture(args, root, case)
+                record["media_capture"] = capture(args, root, case)
             if seen_at is not None:
                 pairs = matching_signals(request(args.fcapsule + "/api/state"), expected, record["started_at"])
                 record["candidate_signals"] = [{"episode_id": e["episode_id"], "incident_id": s["incident_id"]} for e, s in pairs]
@@ -466,7 +566,7 @@ def run_suite(args):
     require_execute(args)
     root = args.out.resolve()
     root.mkdir(parents=True, exist_ok=False)
-    selected = ([*SCENARIOS, *DISCOVERY_SCENARIOS] if args.case == "all" else [args.case])
+    selected = (ALL_RUN_CASES if args.case == "all" else [args.case])
     summary = {"started_at": now(), "cases": selected, "rounds": [], "outcome": "running",
                "quality": "not_evaluated", "live_source_outage_induced": False}
     save(root / "suite.json", summary)
@@ -474,8 +574,6 @@ def run_suite(args):
         print("Waiting for a quiet Lab alert baseline before preflight...", flush=True)
         wait_for_lab_quiet(args)
         checked = preflight(args, root)
-        if any(capture_spec(case) for case in selected):
-            subprocess.run([args.node, "-e", "require(process.env.PLAYWRIGHT_MODULE || 'playwright')"], check=True, timeout=15)
         for case in selected:
             print(f"Starting demo: {case}", flush=True)
             case_failed = False
@@ -498,6 +596,7 @@ def run_suite(args):
                 round_dir = root / case / ("round-" + str(ordinal))
                 round_dir.parent.mkdir(exist_ok=True)
                 try:
+                    wait_for_lab_ready(args, root, case, ordinal)
                     if case in {"exporter-scrape", "mysql-exporter-scrape-path"}:
                         record = run_exporter(args, round_dir, checked["model_config"])
                     else:
@@ -509,6 +608,15 @@ def run_suite(args):
                         "diagnostic_label": record.get("diagnostic_label"),
                         "pipeline_score": record.get("pipeline_score"),
                         "observability_score": record.get("observability_score"), "usage": record.get("usage")})
+                    if case == "query-rollout-history" and ordinal == 2:
+                        prior = read(history_round(root / case, 1) / "run.json")
+                        history_result = score_history_reuse(
+                            prior, record, read(round_dir / "investigation-before.json"))
+                        save(round_dir / "history-use-score.json", history_result)
+                        record["history_use_score"] = history_result["score"]
+                        save(round_dir / "run.json", record)
+                        summary["rounds"][-1]["history_use_score"] = history_result["score"]
+                        summary["rounds"][-1]["history_use_label"] = history_result["label"]
                 except Exception as error:
                     case_failed = True
                     summary["rounds"].append({"case": case, "round": ordinal, "path": str(round_dir),
@@ -519,6 +627,8 @@ def run_suite(args):
                         raise
                     print(f"{case}: failed but owned recovery was confirmed; continuing with the next case", flush=True)
                 save(root / "suite.json", summary)
+                if case_failed and case == "query-rollout-history":
+                    break
                 if not case_failed:
                     print(f"{case}: captured, recovered; assessment {record.get('assessment_status', 'unknown')}", flush=True)
                 if case == "query-rollout-history" and ordinal == 2:
@@ -526,10 +636,15 @@ def run_suite(args):
                     if record["episode_id"] == prior["episode_id"]:
                         raise RuntimeError("Occurrences grouped into the same episode; no split or relabel attempted")
         wait_for_lab_quiet(args)
+        history_pair = [item for item in summary["rounds"] if item.get("case") == "query-rollout-history"]
+        if len(history_pair) == 2 and all(item.get("outcome") == "captured" for item in history_pair):
+            history(SimpleNamespace(execute=True, case_dir=root))
+            summary["retained_capsule_review"] = read(root / "history-review" / "evaluation.json")
         missing_or_weak = any(item.get("diagnostic_label") in {"failed", "weak_or_misdirected", "pipeline_failed"}
                               or item.get("diagnostic_score", 0) < 70
                               or item.get("pipeline_score", 0) < 100
                               or item.get("observability_score", 0) < 100
+                              or item.get("history_use_score", 100) < 100
                               for item in summary["rounds"] if item.get("outcome") != "failed")
         summary["outcome"] = ("completed_with_failures" if any(item.get("outcome") == "failed" for item in summary["rounds"])
                                else "completed_needs_diagnosis_review" if missing_or_weak
@@ -625,8 +740,9 @@ def attach(args):
         raise ValueError("Automatic investigation is still active or absent; no additional call started")
     if expected_revision and before["revision_id"] != expected_revision:
         raise ValueError("Current revision differs from --expected-revision; no upload started")
-    if not assessment_contains_incident(before, record["incident_id"]):
-        raise ValueError("Current assessment context.alerts does not contain this run incident; no upload started")
+    if (not assessment_contains_incident(before, record["incident_id"])
+            or not assessment_matches_primary(before, record["incident_id"])):
+        raise ValueError("Current assessment does not make this run incident primary; no upload started")
     original = read(root / "investigation-before.json")
     if before["revision_id"] != original.get("revision_id") and not incremental:
         raise ValueError("Baseline changed; inspect and explicitly reassess instead of mixing comparisons")
@@ -661,8 +777,9 @@ def attach(args):
     current = request(base + "/investigation")
     save(output / "investigation-pre-update.json", current)
     if (current.get("revision_id") != before["revision_id"] or current.get("status") not in TERMINAL or
-            not assessment_contains_incident(current, record["incident_id"])):
-        raise RuntimeError("Current assessment changed or lacks this incident; retain attachment and review explicitly")
+            not assessment_contains_incident(current, record["incident_id"])
+            or not assessment_matches_primary(current, record["incident_id"])):
+        raise RuntimeError("Current assessment changed or no longer makes this incident primary; retain attachment and review explicitly")
     current_evidence = request(base + "/evidence")
     save(output / "evidence-pre-update.json", current_evidence)
     prior_evidence = [item for item in current_evidence if item.get("attachment_id") != attachment_id]

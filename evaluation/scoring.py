@@ -210,15 +210,14 @@ def score_pipeline(scenario: dict[str, Any], run: dict[str, Any], investigation:
         ))
     if expected_alert is None:
         expected_alert = bool(run.get("outcome") == "captured" and run.get("alert.json"))
-    exact_incident = run.get("assessment_context_contains_incident")
+    # Episode membership alone is not enough: neighboring alerts may share an
+    # episode while representing unrelated phases. Score only the queued primary.
     incident_id = run.get("incident_id")
+    exact_incident = run.get("assessment_matches_incident")
     if exact_incident is None and incident_id:
-        exact_incident = any(
-            isinstance(item, dict) and item.get("incident_id") == incident_id
-            for item in ((investigation.get("context") or {}).get("alerts") or [])
-        )
+        exact_incident = investigation.get("primary_incident_id") == incident_id
     if exact_incident is None:
-        exact_incident = bool(run.get("assessment_pipeline_complete"))
+        exact_incident = False
     recovery = run.get("recovery") or {}
     recovery_confirmed = bool(run.get("recovery_confirmed") or recovery.get("restored") or recovery.get("ok"))
     owner = run.get("owner_run_id") or run.get("owner") or (run.get("control") or {}).get("run", {}).get("run_id")

@@ -21,6 +21,7 @@ class EvaluationTests(unittest.TestCase):
         self.assertNotIn("mechanism", SCENARIOS["timeout-budget"])
         self.assertTrue(all(self.oracle[key]["expected_alert"] == value["expected_alert"]
                             for key, value in SCENARIOS.items()))
+        self.assertEqual(self.oracle["poison-job"]["required_domains"], ["logs"])
 
     def test_monitoring_discovery_demos_have_a_separate_diagnostic_rubric(self):
         operational = load_ground_truth(Path(__file__).resolve().parents[1] / "evaluation/operational_ground_truth.json")
@@ -97,6 +98,22 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(result["domains"], ["logs"])
         run["assessment"]["likely_mechanism"] = "A generic database error occurred."
         self.assertLess(score_investigation(self.oracle["reservation-token-collision"], run)["score"], result["score"])
+
+    def test_idempotency_rubric_accepts_a_specific_paraphrase(self):
+        run = {
+            "status": "ready",
+            "assessment": {
+                "likely_mechanism": "Orders reused an idempotency key for a different order, so the local idempotency store rejected it before any inventory request.",
+                "next_action": "Scope key generation to an order and preserve the original response for legitimate retries.",
+                "uncertainty": "The captured records do not show the caller that supplied the duplicate key.",
+                "evidence_ids": ["L1"],
+            },
+            "context": {"evidence": [{"id": "L1", "domain": "log_template"}]},
+        }
+        result = score_investigation(self.oracle["idempotency-conflict"], run)
+        order_identity = next(item for item in result["findings"] if item["id"] == "order_identity")
+        self.assertTrue(order_identity["matched"])
+        self.assertGreaterEqual(result["score"], 90)
 
     def test_only_cited_domains_receive_evidence_credit(self):
         run = {
@@ -219,12 +236,15 @@ class EvaluationTests(unittest.TestCase):
                "observed_alerts": [{"labels": {"alertname": "LabOrdersDependencyDocumentInvalid"}}],
                "owner_run_id": "run-1", "control": {"run": {"run_id": "run-1"}},
                "incident_id": "incident-1", "assessment_context_contains_incident": True,
+               "assessment_matches_incident": False,
                "recovery": {"ok": True}}
-        investigation = {"status": "failed", "context": {"alerts": [{"incident_id": "incident-1"}]}}
+        investigation = {"status": "failed", "primary_incident_id": "older-incident",
+                         "context": {"alerts": [{"incident_id": "incident-1"}]}}
         pipeline = score_pipeline(self.oracle["response-contract"], run, investigation)
         self.assertTrue(pipeline["checks"]["investigation_terminal"])
         self.assertFalse(pipeline["checks"]["investigation_usable"])
-        self.assertEqual(pipeline["pipeline_score"], 80)
+        self.assertFalse(pipeline["checks"]["exact_incident_in_assessment"])
+        self.assertEqual(pipeline["pipeline_score"], 65)
 
     def test_grounded_abstention_is_recorded_separately_from_a_pipeline_failure(self):
         run = {
