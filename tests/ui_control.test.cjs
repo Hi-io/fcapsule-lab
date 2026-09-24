@@ -1,6 +1,6 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { canStart, selections, sourceUrl } = require('../app/control.js');
+const { canStart, selections, groupTracks, sourceUrl } = require('../app/control.js');
 const { graphUrl } = require('../tools/capture_demo.cjs');
 
 const healthy = () => ({ active: null, memory: { available_bytes: 2 * 1073741824, node_identity_verified: true }, worker: { reachable: true }, inventory: { reachable: true }, orders: { reachable: true } });
@@ -22,6 +22,18 @@ test('one catalog lists each failure mechanism once, including runner-only scena
   assert.deepEqual(selections(state).map(item => item.id), ['schema-drift', 'mysql-exporter-scrape-path']);
   assert.equal(selections(state)[1].runner_only, true);
   assert.deepEqual(selections(null), []);
+});
+
+test('the demo track stays limited to qualified logs and performance cases', () => {
+  const items = selections({ scenarios: {
+    'poison-job': { track: 'demo' },
+    'timeout-budget': { track: 'development' },
+    'cpu-saturation': { track: 'demo' },
+    'schema-drift': {},
+  } });
+  const tracks = groupTracks(items);
+  assert.deepEqual(tracks.demos.map(item => item.id), ['poison-job', 'cpu-saturation']);
+  assert.deepEqual(tracks.development.map(item => item.id), ['timeout-budget', 'schema-drift']);
 });
 
 test('graph links select both metric names without PromQL or dropping the ceiling', () => {

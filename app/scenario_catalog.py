@@ -25,6 +25,7 @@ SCENARIOS = {
     # Log-led cases: the distinguishing mechanism is recorded in execution logs.
     "poison-job": {
         "title": "Import retry loop", "class": "FM", "evidence_group": "logs",
+        "track": "demo",
         "summary": "A durable import remains unacknowledged and is retried after decode failures.",
         "actions": [action("database", "poison")], "expected_alert": "LabWorkerPoisonRetries",
     },
@@ -61,6 +62,7 @@ SCENARIOS = {
     },
     "cpu-saturation": {
         "title": "Credential migration backlog", "class": "PM", "evidence_group": "metrics",
+        "track": "demo",
         "summary": "A migration applies expensive password derivation under a small CPU quota.",
         "actions": [action("worker", "cpu-saturation")], "expected_alert": "LabWorkerCPUHigh",
     },
@@ -161,6 +163,7 @@ def public_scenarios() -> dict[str, dict[str, Any]]:
             if field in item
         }
         scenarios[key]["evidence_domains"] = domains
+        scenarios[key]["track"] = item.get("track", "development")
         scenarios[key]["execution"] = "guarded_runner" if item.get("runner_only") else "controller"
         scenarios[key]["resource_profile"] = (
             "bounded_memory" if key == "memory-leak" else

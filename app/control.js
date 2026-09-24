@@ -12,6 +12,13 @@ function selections(state) {
   return Object.entries(state?.scenarios || {}).map(([id, item]) => ({ ...item, id, scenario: id }));
 }
 
+function groupTracks(items) {
+  return {
+    demos: items.filter(item => item.track === 'demo'),
+    development: items.filter(item => item.track !== 'demo'),
+  };
+}
+
 function sourceUrl(base, sourceView) {
   if (!['prometheus_graph', 'prometheus_targets'].includes(sourceView)) return null;
   const graph = sourceView === 'prometheus_graph';
@@ -24,7 +31,7 @@ function sourceUrl(base, sourceView) {
   return url.href;
 }
 
-if (typeof module !== 'undefined') module.exports = { canStart, selections, sourceUrl };
+if (typeof module !== 'undefined') module.exports = { canStart, selections, groupTracks, sourceUrl };
 
 if (typeof document !== 'undefined') {
   const $ = selector => document.querySelector(selector);
@@ -36,7 +43,8 @@ if (typeof document !== 'undefined') {
     const nextShape = JSON.stringify(items) + state?.prometheus_url;
     // Preserve focused controls and tab order during status polling.
     if (shape !== nextShape) {
-      const fragment = document.createDocumentFragment();
+      const demos = document.createDocumentFragment();
+      const development = document.createDocumentFragment();
       for (const item of items) {
         const article = document.createElement('article'); article.className = 'scenario ' + item.class.toLowerCase();
         const title = document.createElement('h2'); title.textContent = item.title;
@@ -61,10 +69,15 @@ if (typeof document !== 'undefined') {
             link.textContent = item.source_view === 'prometheus_graph' ? 'Prometheus graph' : 'Prometheus targets'; actions.append(link);
           }
         }
-        article.append(title, summary, evidence, actions); fragment.append(article);
+        article.append(title, summary, evidence, actions);
+        (item.track === 'demo' ? demos : development).append(article);
       }
-      $('#scenarios').replaceChildren(fragment); shape = nextShape;
+      $('#demo-scenarios').replaceChildren(demos);
+      $('#development-scenarios').replaceChildren(development);
+      shape = nextShape;
     }
+    const developmentCount = groupTracks(items).development.length;
+    $('#development-count').textContent = `${developmentCount} ${developmentCount === 1 ? 'scenario' : 'scenarios'}`;
     for (const item of items) {
       const button = [...document.querySelectorAll('[data-start]')].find(b => b.dataset.start === item.id);
       if (!button) continue;
@@ -74,7 +87,7 @@ if (typeof document !== 'undefined') {
         item.runner_only ? 'Recorded runner only' : item.rounds === 2 ? 'Start one occurrence' : 'Start scenario';
       button.closest('article').classList.toggle('active', active);
     }
-    $('#scenarios').setAttribute('aria-busy', String(reading));
+    $('#scenario-catalog').setAttribute('aria-busy', String(reading));
     $('#duration').disabled = busy || Boolean(state?.active);
     $('#recover').disabled = busy || !available || Boolean(state?.read_only_preview);
   }

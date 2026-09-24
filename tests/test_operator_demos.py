@@ -54,6 +54,9 @@ class DemoCatalogTests(unittest.TestCase):
             state.recover.assert_called_once_with(expected_run_id="a" * 32)
             self.assertIn('aria-busy="true"', HTML)
             self.assertIn('aria-live="polite">Loading', HTML)
+            self.assertIn('aria-labelledby="demo-track-heading"', HTML)
+            self.assertIn('<details class="development-track">', HTML)
+            self.assertIn('id="development-count"', HTML)
         finally:
             server.shutdown(); thread.join(); server.server_close()
 
@@ -71,6 +74,9 @@ class DemoCatalogTests(unittest.TestCase):
         self.assertEqual(catalog["metrics-service-label-drift"]["source_view"], "prometheus_targets")
         self.assertEqual(catalog["mysql-exporter-scrape-path"]["execution"], "guarded_runner")
         self.assertEqual(catalog["memory-leak"]["resource_profile"], "bounded_memory")
+        self.assertEqual({key for key, item in catalog.items() if item["track"] == "demo"},
+                         {"poison-job", "cpu-saturation"})
+        self.assertEqual(catalog["timeout-budget"]["track"], "development")
         self.assertEqual(runner.scenario_rounds("mysql-connections"), 1)
         self.assertEqual(runner.capture_spec("mysql-connections")["view"], "graph")
         self.assertEqual(runner.ALL_RUN_CASES[-1], "query-rollout-history")
