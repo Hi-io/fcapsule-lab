@@ -30,9 +30,9 @@ an automatic retry.
 | `downstream-latency` | Successful inventory work around 350 ms pushes checkout latency above the alert threshold; retries are not expected | `LabCheckoutLatencyHigh` | Fixed bounded delay; no external dependency. |
 | `schema-drift` | Query revision v2 references `reserved_quantity`, which must be absent from the active table; correlate SQL 1054 with the applied ConfigMap revision | `LabInventoryQueryFailures` | A read-only schema precondition blocks an invalid run if the column already exists; narrow ConfigMap update and guarded restoration. |
 | `dependency-route` | Active URL targets port 8099 while the Kubernetes Service exposes 8081 | `LabOrdersDependencyTransportFailures` | Narrow ConfigMap update and guarded restoration. |
-| `timeout-budget` | Caller timeout of 50 ms is shorter than the dependency's 250 ms work budget | `LabOrdersDependencyTimeouts` | Narrow ConfigMap update; runner starts the stopped, bounded traffic generator only after this run is acknowledged as owned, then restores its observed replica count during recovery. |
+| `timeout-budget` | Caller timeout of 50 ms is shorter than the dependency's 250 ms work budget | `LabOrdersDependencyTimeouts` | Narrow ConfigMap update; runner starts the stopped, bounded traffic generator only after this run is acknowledged as owned, then restores its observed replica count during recovery. Current 25 RPS runs have produced Inventory admission co-alerts and assessment drift. |
 | `signing-key-skew` | Caller and dependency key identifiers disagree; explain authorization errors without exposing key material | `LabOrdersDependencyAuthorizationFailures` | Uses non-secret key IDs only. |
-| `response-schema-skew` | Checkout expects response v2 while Inventory emits v1 | `LabOrdersDependencySchemaRejected` | Narrow ConfigMap update and guarded restoration. |
+| `response-schema-skew` | Checkout expects response v2 while Inventory emits v1 | `LabOrdersDependencySchemaRejected` | Narrow ConfigMap update; runner starts the stopped, bounded traffic generator only after this run is acknowledged as owned, then restores its observed replica count during recovery. Inventory remains fast for this scenario. |
 | `metrics-service-label-drift` | ServiceMonitor selector no longer matches the Service label while application Pods remain healthy | `LabApplicationMetricsDiscoveryMissing` | Changes only the selected Service label and restores its captured baseline. |
 | `mysql-exporter-scrape-path` | Prometheus still discovers the MySQL exporter but `/metrics-v2` returns HTTP 404; distinguish scrape failure from target absence or a database outage | `LabExporterScrapeFailed` | Runner-only: captures real Prometheus Targets images and uses a saved baseline plus guarded rollback/watchdog. |
 
@@ -58,9 +58,9 @@ are not incident evidence.
 | `downstream-latency` | Included: a bounded dependency delay propagates to checkout latency and concurrency. |
 | `schema-drift` | Included: query revision and actual table schema diverge; a read-only precondition checks the column before injection and the active ConfigMap is retained. |
 | `dependency-route` | Included: the configured dependency port disagrees with the actual Kubernetes Service port. |
-| `timeout-budget` | Included: caller timeout is below normal dependency work duration. |
+| `timeout-budget` | Included: caller timeout is below normal dependency work duration. A live run at 25 RPS produced Inventory admission co-alerts, so the assessment can drift toward that secondary symptom. |
 | `signing-key-skew` | Included: harmless key IDs differ; the scenario does not expose or compromise credentials. |
-| `response-schema-skew` | Included: caller and dependency response-version settings disagree. |
+| `response-schema-skew` | Included: caller and dependency response-version settings disagree; bounded checkout traffic exercises the mismatch while Inventory remains fast. |
 | `metrics-service-label-drift` | Included: target discovery is lost while the selected application Pods remain healthy. |
 | `mysql-exporter-scrape-path` | Included as a runner-only case because real Prometheus screenshots and independent rollback are required. |
 
@@ -87,13 +87,17 @@ During an owned fault, degraded application health is recorded as evidence, not
 treated as node pressure. Ownership, placement, fresh measured memory and the
 768 MiB safety floor remain enforced throughout the fault.
 The Lab controller and workload leases remain independent safeguards. The traffic
-generator stays at zero replicas by default. For `timeout-budget` only, the runner
+generator stays at zero replicas by default. For `timeout-budget` and
+`response-schema-skew` only, the runner
 preflights its read/scale permissions, stopped replica/readiness state and 25 RPS / 12
 in-flight profile, then scales to one replica only after the controller acknowledges
 the owned scenario. Its `finally`/recovery path restores the observed prior replica
 count with UID, generation, replica and resource-version guards. This does not run for
-worker, discovery, MySQL connection, or other scenarios. No new Pods outside this
-bounded Lab deployment, OOM cases, CPU stress or shared-source outage is introduced.
+worker, discovery, MySQL connection, or other scenarios. The observed 25 RPS
+`timeout-budget` co-alerts can shift diagnosis away from the intended timeout; prefer
+`response-schema-skew` for the configuration demo because its Inventory path stays
+fast. No other workload is scaled, and no OOM cases, CPU stress or shared-source outage
+is introduced.
 
 The generic `deploy_kubernetes.py` applies all manifests, which can replace local
 placement or scrape customization. For this change a maintainer-coordinated update of

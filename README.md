@@ -21,9 +21,12 @@ workloads:
 | `lab-control` | Scenario UI and recovery controller | 150m CPU / 128 MiB |
 
 The traffic generator is stopped by default to avoid normal DNS-induced false alerts.
-The operator runner starts it only for an owned `timeout-budget` scenario, using the
-bounded profile of 25 checkout requests per second and at most 12 in flight. When all
-slots are busy, it sheds new attempts instead of building a request queue. That
+The operator runner starts it only for owned `timeout-budget` and
+`response-schema-skew` scenarios, using the bounded profile of 25 checkout requests
+per second and at most 12 in flight. When all slots are busy, it sheds new attempts
+instead of building a request queue. The current 25 RPS `timeout-budget` case has
+produced Inventory admission co-alerts during live demos; `response-schema-skew` keeps
+Inventory fast and is the preferred configuration demo. That
 concurrency cap is 30% of MySQL's configured 40-session ceiling even if every active
 checkout owns a database session. Twelve is also an
 explicit runtime safety ceiling: if a stale or edited ConfigMap requests a higher

@@ -343,6 +343,7 @@ class DemoRunnerTests(unittest.TestCase):
 
     def test_bounded_traffic_is_limited_to_request_driven_scenarios(self):
         self.assertTrue(runner.scenario_uses_traffic("timeout-budget"))
+        self.assertTrue(runner.scenario_uses_traffic("response-schema-skew"))
         for scenario in ("response-contract", "idempotency-conflict", "dependency-route", "schema-drift",
                          "signing-key-skew", "poison-job", "memory-leak", "cpu-saturation",
                          "mysql-connections", "metrics-service-label-drift", "mysql-exporter-scrape-path", "missing"):
