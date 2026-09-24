@@ -3,7 +3,8 @@ import tempfile
 from pathlib import Path
 
 from app.scenario_catalog import DISCOVERY_SCENARIOS, SCENARIOS
-from evaluation.scoring import diagnostic_attribution, load_ground_truth, score_investigation, score_pipeline
+from evaluation.scoring import (available_evidence_domains, diagnostic_attribution, load_ground_truth,
+                                score_investigation, score_pipeline)
 from tools.evaluate_models import observation_fingerprint, write_reports
 
 
@@ -266,6 +267,21 @@ class EvaluationTests(unittest.TestCase):
                         "status": "failed", "domain": "configuration", "result": {"error": "forbidden"}}],
         }
         self.assertEqual(score_investigation(self.oracle["response-contract"], run)["domains"], [])
+
+    def test_check_result_source_supplies_available_and_cited_domains(self):
+        operational = load_ground_truth(Path(__file__).resolve().parents[1] / "evaluation/operational_ground_truth.json")
+        run = {
+            "status": "ready",
+            "assessment": {"likely_mechanism": "The ServiceMonitor selector drops the target.",
+                           "next_action": "Restore the Service label.", "uncertainty": "Current snapshot.",
+                           "evidence_ids": ["Q1"]},
+            "context": {"evidence": []},
+            "checks": [{"id": "Q1", "tool": "scrape_discovery", "status": "completed",
+                        "result": {"source": "Prometheus target discovery + Kubernetes monitoring resources"}}],
+        }
+        self.assertEqual(available_evidence_domains(run), {"metrics", "configuration"})
+        result = score_investigation(operational["metrics-service-label-drift"], run)
+        self.assertEqual(set(result["domains"]), {"metrics", "configuration"})
 
     def test_pipeline_does_not_count_failed_log_collection_toward_volume(self):
         run = {"alert_observed": True,

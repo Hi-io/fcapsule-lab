@@ -116,6 +116,20 @@ def _domain(value: Any) -> set[str]:
     return found
 
 
+def _check_domains(check: dict[str, Any]) -> set[str]:
+    result = check.get("result")
+    result = result if isinstance(result, dict) else {}
+    return _domain({
+        "domain": check.get("domain"),
+        "source_domain": check.get("source_domain"),
+        "source": check.get("source"),
+        "tool": check.get("tool"),
+        "result_domain": result.get("domain"),
+        "result_source_domain": result.get("source_domain"),
+        "result_source": result.get("source"),
+    })
+
+
 def available_evidence_domains(investigation: dict[str, Any]) -> set[str]:
     domains: set[str] = set()
     for item in (investigation.get("context") or {}).get("evidence", []):
@@ -123,8 +137,7 @@ def available_evidence_domains(investigation: dict[str, Any]) -> set[str]:
     for check in investigation.get("checks", []):
         result = check.get("result")
         if check.get("status") in {"completed", "ok"} and result not in (None, {}, [], ""):
-            domains.update(_domain({"domain": check.get("domain"), "source": check.get("source_domain"),
-                                    "tool": check.get("tool")}))
+            domains.update(_check_domains(check))
     return domains
 
 
@@ -138,8 +151,7 @@ def evidence_domains(investigation: dict[str, Any]) -> set[str]:
         if (str(check.get("id")) not in citations or check.get("status") not in {"completed", "ok"}
                 or check.get("result") in (None, {}, [], "")):
             continue
-        domains.update(_domain({"domain": check.get("domain"), "source": check.get("source_domain"),
-                                "tool": check.get("tool")}))
+        domains.update(_check_domains(check))
     return domains
 
 
