@@ -678,10 +678,22 @@ def run_workload(args, case, root, config):
 def run_exporter(args, root, config):
     # The existing probe owns its guarded patch, watchdog and restoration. Do not
     # duplicate that fault or grant the controller more Kubernetes permissions.
-    episode_isolation = ensure_fresh_episode_context(args, root, "mysql-exporter-scrape-path")
+    if root.exists():
+        raise FileExistsError(f"Exporter run output already exists: {root}")
+    episode_isolation = ensure_fresh_episode_context(
+        args, root, "mysql-exporter-scrape-path", persist=False,
+    )
     probe = SimpleNamespace(**vars(args))
     probe.out = root
-    media.run(probe)
+    try:
+        media.run(probe)
+    except FileExistsError:
+        raise
+    except BaseException:
+        if root.exists():
+            save(root / "episode-isolation.json", episode_isolation)
+        raise
+    save(root / "episode-isolation.json", episode_isolation)
     record = read(root / "run.json")
     state = request(args.fcapsule + "/api/state")
     verification = verify_fresh_episode_context(state, record.get("episode_id", ""), record["started_at"])
@@ -1147,7 +1159,7 @@ def service_episode_wait_seconds(state, target_service, quiet_seconds, timestamp
     return max(0, max(starts) + quiet_seconds - timestamp)
 
 
-def ensure_fresh_episode_context(args, root, scenario):
+def ensure_fresh_episode_context(args, root, scenario, *, persist=True):
     oracle = WORKLOAD_ORACLE.get(scenario) or DISCOVERY_ORACLE.get(scenario)
     target_service = (oracle or {}).get("target_service")
     if not target_service:
@@ -1212,8 +1224,9 @@ def ensure_fresh_episode_context(args, root, scenario):
         "observations": observations,
         "reason": "No signal in the selected app scope can join the new incident within the configured window.",
     }
-    root.mkdir(parents=True, exist_ok=True)
-    save(root / "episode-isolation.json", result)
+    if persist:
+        root.mkdir(parents=True, exist_ok=True)
+        save(root / "episode-isolation.json", result)
     return result
 
 

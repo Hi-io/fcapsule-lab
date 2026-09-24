@@ -571,6 +571,21 @@ class DemoRunnerTests(unittest.TestCase):
             sleep.assert_not_called()
             self.assertEqual(runner.read(Path(directory) / "episode-isolation.json"), result)
 
+    def test_exporter_isolation_preserves_the_probe_output_directory_contract(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "round-1"
+            args = SimpleNamespace(out=root, fcapsule="http://product", lab="http://lab",
+                                   prometheus="http://prom", episode_quiet_seconds=960)
+
+            with patch.object(runner, "request", return_value={"overview": {"episodes": []}}), \
+                 patch.object(runner.media, "snapshot", side_effect=RuntimeError("stop after output setup")) as snapshot, \
+                 self.assertRaisesRegex(RuntimeError, "stop after output setup"):
+                runner.run_exporter(args, root, config())
+
+            snapshot.assert_called_once()
+            self.assertTrue(root.is_dir())
+            self.assertEqual(runner.read(root / "episode-isolation.json")["status"], "ready")
+
     def test_captured_episode_reuse_is_reported_as_contamination(self):
         state = {"overview": {"episodes": [{
             "episode_id": "reused", "signals": [
