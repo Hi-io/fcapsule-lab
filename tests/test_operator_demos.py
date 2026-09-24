@@ -91,6 +91,18 @@ class DemoCatalogTests(unittest.TestCase):
         self.assertLessEqual(int(runtime["MAX_INFLIGHT"]), int(mysql["MYSQL_MAX_CONNECTIONS"]) // 3)
         self.assertGreaterEqual(int(runtime["REQUESTS_PER_SECOND"]), int(runtime["MAX_INFLIGHT"]))
 
+    def test_mysql_init_bootstraps_inventory_schema_after_ephemeral_volume_reset(self):
+        documents = list(yaml.safe_load_all((runner.ROOT / "deploy/kubernetes/configuration.yaml").read_text()))
+        init_sql = next(item["data"] for item in documents if item and item.get("kind") == "ConfigMap"
+                        and item["metadata"]["name"] == "lab-mysql-init")
+        bootstrap = init_sql["00-inventory.sql"].lower()
+        for table in ("inventory_items", "reservation_events", "inventory_reconciliation_audit"):
+            self.assertIn(f"create table if not exists {table}", bootstrap)
+        self.assertIn("insert into inventory_items", bootstrap)
+        self.assertIn("sku-red-widget", bootstrap)
+        self.assertIn("sku-blue-widget", bootstrap)
+        self.assertLess(list(init_sql).index("00-inventory.sql"), list(init_sql).index("01-exporter.sql"))
+
     def test_history_use_requires_retrieving_and_citing_the_exact_prior_episode(self):
         previous = {"episode_id": "episode-prior"}
         current = {"episode_id": "episode-current"}
