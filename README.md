@@ -7,9 +7,10 @@ after deployment. The scenario oracle stays in this repository; FCAPSule receive
 only the observability data it would see from an ordinary workload. The Lab is not
 a runtime dependency of FCAPSule.
 
-**Demo status:** three scenarios are currently qualified for presentation: an import
-retry loop (logs), a credential-migration CPU backlog (performance), and a response
-schema mismatch (configuration). The other 14 UI cases remain available for
+**Demo status:** four scenarios are currently qualified for presentation: an import
+retry loop (logs), a credential-migration CPU backlog (performance), a response
+schema mismatch (configuration), and a missing metrics target caused by Service
+label drift (monitoring discovery). The other 13 UI cases remain available for
 development but are not claimed as successful AI demos. See
 [scenario validation](docs/SCENARIO_VALIDATION.md) for the evidence and known issues.
 The configuration case was qualified through the recorded runner, which owns bounded
@@ -124,8 +125,8 @@ Worker/inventory operations have their own leases; durable import jobs expire af
 five minutes even if the controller is unavailable. This is a single-node test harness,
 not a guarantee against unrelated workloads exhausting the host.
 
-The Lab control UI presents one catalog of 17 scenarios. Three qualified cases appear
-in **Demo track**; the remaining 14 are under **Development backlog**. Fifteen cases
+The Lab control UI presents one catalog of 17 scenarios. Four qualified cases appear
+in **Demo track**; the remaining 13 are under **Development backlog**. Fifteen cases
 form the balanced workload-diagnosis benchmark across logs, metrics and configuration;
 two more exercise Prometheus discovery and scrape-path failures. Being in the catalog
 means a mechanism and expected evidence are defined, not that FCAPSule has already
@@ -147,8 +148,9 @@ The two monitoring scenarios are designed to test observability failures:
 **Metrics Service label drift**
 removes an otherwise healthy application target from discovery; **MySQL exporter scrape
 path failure** keeps the target discovered but causes its scrape to return HTTP 404.
-Both should distinguish loss of observability from an application outage. Neither is
-qualified for the current demo track. The exporter case is runner-only because it
+Both should distinguish loss of observability from an application outage. The Service
+label drift case is qualified for the current demo track; the exporter case is not.
+The exporter case is runner-only because it
 needs actual Prometheus Targets screenshots and its own guarded rollback procedure.
 
 Alerts state symptoms, not injected causes. Application telemetry contains ordinary

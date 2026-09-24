@@ -133,6 +133,7 @@ SCENARIOS = {
 DISCOVERY_SCENARIOS = {
     "metrics-service-label-drift": {
         "title": "Metrics Service label drift", "class": "Discovery", "evidence_group": "discovery",
+        "track": "demo",
         "summary": "Metrics are no longer discovered even though the application pods remain healthy.",
         "source_view": "prometheus_targets",
         "service_metrics_label": "ture",

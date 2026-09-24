@@ -14,8 +14,9 @@ evidence that should carry the diagnosis. The grouping is not an FCAPS classific
 It describes what an investigator must use to distinguish the root mechanism from
 similar symptoms. The two discovery probes are also important evaluation cases, but
 are kept separate from the workload score because their target is monitoring
-coverage, not an application failure. Neither is currently qualified for the
-recommended demo track; see [scenario validation](SCENARIO_VALIDATION.md).
+coverage, not an application failure. Service label drift is qualified for the
+recommended demo track; exporter scrape-path failure remains unqualified. See
+[scenario validation](SCENARIO_VALIDATION.md).
 
 | Group | Scenario | Decisive mechanism | Expected symptom alert |
 |---|---|---|---|

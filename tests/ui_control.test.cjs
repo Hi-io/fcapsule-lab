@@ -24,16 +24,17 @@ test('one catalog lists each failure mechanism once, including runner-only scena
   assert.deepEqual(selections(null), []);
 });
 
-test('the demo track contains one qualified case per telemetry domain', () => {
+test('the demo track contains only qualified cases across telemetry and discovery', () => {
   const items = selections({ scenarios: {
     'poison-job': { track: 'demo' },
     'timeout-budget': { track: 'development' },
     'cpu-saturation': { track: 'demo' },
     'response-schema-skew': { track: 'demo' },
+    'metrics-service-label-drift': { track: 'demo' },
     'schema-drift': {},
   } });
   const tracks = groupTracks(items);
-  assert.deepEqual(tracks.demos.map(item => item.id), ['poison-job', 'cpu-saturation', 'response-schema-skew']);
+  assert.deepEqual(tracks.demos.map(item => item.id), ['poison-job', 'cpu-saturation', 'response-schema-skew', 'metrics-service-label-drift']);
   assert.deepEqual(tracks.development.map(item => item.id), ['timeout-budget', 'schema-drift']);
 });
 

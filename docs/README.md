@@ -4,7 +4,7 @@ FCAPSule Lab is a fault-generating workload and evaluation harness, separate fro
 
 ## Run and Evaluate Today
 
-- [Scenario validation](SCENARIO_VALIDATION.md): the three currently qualified demos, known issues and the deferred backlog. This is the status source before presenting a case.
+- [Scenario validation](SCENARIO_VALIDATION.md): the four currently qualified demos, known issues and the deferred backlog. This is the status source before presenting a case.
 - [Operator demos](OPERATOR_DEMOS.md): controlled execution, capture, recovery and review commands.
 - [Scenario contract](SCENARIO_CONTRACT.md): independent expected mechanisms and evidence, never sent to FCAPSule as an answer key.
 - [Evaluation method](EVALUATION.md): paired-model comparisons, scoring and interpretation limits.
