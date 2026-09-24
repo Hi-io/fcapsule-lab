@@ -26,6 +26,7 @@ MAX_BUFFERED_EXPORT_PAGES = 160
 MAX_BUFFERED_EXPORT_BYTES = 96 * 1024 * 1024
 CPU_MIGRATION_BATCH_SIZE = 160
 CPU_MIGRATION_ROUNDS = 600_000
+MAX_LOGGED_DELIVERY_ATTEMPT = 1_000_000
 
 
 class WorkerState:
@@ -34,6 +35,8 @@ class WorkerState:
         self.mode = "normal"
         self.jobs = 0
         self.poison_retries = 0
+        self._last_delivery_job_id: int | None = None
+        self._delivery_attempt = 0
         self.cpu_iterations = 0
         self.migration_backlog = 0
         self.migration_records_completed = 0
@@ -232,6 +235,21 @@ class WorkerState:
             page.write(b"\n")
         return page_number, page.getvalue()
 
+    def _record_delivery_attempt(self, job_id: int) -> int:
+        with self._lock:
+            if job_id == self._last_delivery_job_id:
+                self._delivery_attempt = min(self._delivery_attempt + 1, MAX_LOGGED_DELIVERY_ATTEMPT)
+            else:
+                self._last_delivery_job_id = job_id
+                self._delivery_attempt = 1
+            return self._delivery_attempt
+
+    def _clear_delivery_attempt(self, job_id: int | None = None) -> None:
+        with self._lock:
+            if job_id is None or self._last_delivery_job_id == job_id:
+                self._last_delivery_job_id = None
+                self._delivery_attempt = 0
+
     def _job_loop(self) -> None:
         while True:
             poison_retried = False
@@ -245,8 +263,11 @@ class WorkerState:
                         job = cursor.fetchone()
                         if job:
                             job_id, _kind, raw_payload, owner_run_id = job
+                            delivery_attempt = self._record_delivery_attempt(job_id)
                             self.logger.write("INFO", "Import delivery received", job_id=job_id,
-                                              owner_run_id=owner_run_id, acknowledgement="pending")
+                                              owner_run_id=owner_run_id, acknowledgement="pending",
+                                              delivery_attempt=delivery_attempt,
+                                              is_redelivery=delivery_attempt > 1)
                             try:
                                 document = decode_job(raw_payload)
                                 records = _validated_import_records(document)
@@ -264,13 +285,20 @@ class WorkerState:
                                     self.poison_retries += 1
                                 self.logger.write("ERROR", "Import decoder rejected document", job_id=job_id,
                                                   owner_run_id=owner_run_id, error_type=type(exc).__name__,
-                                                  error=str(exc), acknowledgement="pending")
+                                                  error=str(exc), acknowledgement="pending",
+                                                  delivery_attempt=delivery_attempt,
+                                                  is_redelivery=delivery_attempt > 1)
                                 poison_retried = True
                             if not poison_retried:
+                                self._clear_delivery_attempt(job_id)
                                 with self._lock:
                                     self.jobs += 1
                                 self.logger.write("INFO", "Import batch committed and acknowledged", job_id=job_id,
-                                                  owner_run_id=owner_run_id, records=len(records), acknowledgement="committed")
+                                                  owner_run_id=owner_run_id, records=len(records), acknowledgement="committed",
+                                                  delivery_attempt=delivery_attempt,
+                                                  is_redelivery=delivery_attempt > 1)
+                        else:
+                            self._clear_delivery_attempt()
             except pymysql.MySQLError as exc:
                 self.logger.write("WARN", "Worker queue poll failed", error=str(exc)[:180])
             time.sleep(5 if poison_retried else 2)
