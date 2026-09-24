@@ -256,17 +256,17 @@ def traffic_profile(deployment):
 def traffic_observation(check_permissions=True):
     if check_permissions:
         checks = (
-            ("get", "deployments", TRAFFIC_DEPLOYMENT),
-            ("get", "configmaps", "lab-runtime"),
-            ("update", "deployments/scale", TRAFFIC_DEPLOYMENT),
+            ("get", f"deployment.apps/{TRAFFIC_DEPLOYMENT}", None),
+            ("get", "configmaps/lab-runtime", None),
+            ("update", f"deployment.apps/{TRAFFIC_DEPLOYMENT}", "scale"),
         )
-        for verb, resource, name in checks:
-            result = traffic_kubectl(
-                "auth", "can-i", verb, resource, "--resource-name=" + name,
-                "-n", LAB_NAMESPACE, raw=True,
-            )
+        for verb, resource, subresource in checks:
+            command = ["auth", "can-i", verb, resource]
+            if subresource:
+                command.append("--subresource=" + subresource)
+            result = traffic_kubectl(*command, "-n", LAB_NAMESPACE, raw=True)
             if str(result).strip().lower() != "yes":
-                raise RuntimeError(f"Runner lacks required read/scale permission for {resource}/{name}")
+                raise RuntimeError(f"Runner lacks required read/scale permission for {resource}")
     deployment = traffic_deployment()
     spec = deployment["spec"]
     status = deployment.get("status", {})

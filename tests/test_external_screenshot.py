@@ -23,6 +23,13 @@ def baseline():
 
 
 class ExternalScreenshotTests(unittest.TestCase):
+    def test_kubectl_honors_explicit_runtime_path(self):
+        with patch.dict(os.environ, {"KUBECTL": "/tools/kubectl"}), patch.object(
+            runner.subprocess, "run", return_value=SimpleNamespace(stdout="yes\n")
+        ) as command:
+            self.assertEqual(runner.kubectl("auth", "can-i", "get", "pods", raw=True), "yes\n")
+        self.assertIn("/tools/kubectl", command.call_args.args[0])
+
     def test_node_runtime_uses_explicit_override_then_environment_then_path(self):
         with patch.dict(os.environ, {"FCAPSULE_NODE": "env-node"}, clear=False), patch.object(
             runner.shutil, "which", side_effect=lambda name: {

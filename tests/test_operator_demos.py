@@ -370,7 +370,12 @@ class DemoRunnerTests(unittest.TestCase):
         self.assertEqual(observed["previous_replicas"], 0)
         self.assertEqual(observed["bounded_profile"], {"requests_per_second": 25, "max_inflight": 12})
         self.assertEqual(sum(call.args[0] == "auth" for call in kubectl.call_args_list), 3)
-        self.assertEqual(kubectl.call_args_list[2].args[1:4], ("can-i", "update", "deployments/scale"))
+        self.assertEqual(kubectl.call_args_list[0].args[1:4],
+                         ("can-i", "get", "deployment.apps/traffic-generator"))
+        self.assertEqual(kubectl.call_args_list[1].args[1:4],
+                         ("can-i", "get", "configmaps/lab-runtime"))
+        self.assertEqual(kubectl.call_args_list[2].args[1:5],
+                         ("can-i", "update", "deployment.apps/traffic-generator", "--subresource=scale"))
 
     def test_traffic_preflight_refuses_live_or_unbounded_generator(self):
         for deployment, runtime, message in (

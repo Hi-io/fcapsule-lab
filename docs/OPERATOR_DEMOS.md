@@ -108,12 +108,16 @@ does not run or prescribe an unreviewed cluster mutation.
 Use Windows Python for the recorded run on this machine: kubectl is dispatched to
 WSL, while Node runs natively. Playwright's installed Chromium is the default; a
 system Chrome executable is an optional override. The runner itself needs only the
-standard library. WSL has no Node by default; Linux runs need local Node/Playwright.
+standard library. Linux runs need a compatible Node (20 or newer) and Playwright.
+Set `KUBECTL` to a working kubectl executable if the first one on `PATH` is a
+broken shim; the runner checks scale permissions before changing traffic.
 
 ```powershell
 Set-Location \\wsl.localhost\Ubuntu\home\hiio\uol\cm3070\fcapsule-lab
 $python = 'C:/Users/Hiros/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/python.exe'
 $env:PLAYWRIGHT_MODULE = 'C:/Users/Hiros/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright'
+# Optional kubectl override when the WSL default is unavailable.
+# $env:KUBECTL = '/home/USER/.local/bin/kubectl'
 # Optional system-browser override; normally leave unset to use Playwright Chromium.
 # $env:CHROME_EXECUTABLE = 'C:/Program Files/Google/Chrome/Application/chrome.exe'
 $labNode = '<agreed-lab-node>'

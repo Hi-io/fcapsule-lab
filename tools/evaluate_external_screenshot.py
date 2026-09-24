@@ -36,7 +36,8 @@ TERMINAL = {"ready", "incomplete", "inconclusive", "not_configured", "failed", "
 
 
 def kubectl(*args, body=None, raw=False):
-    prefix = ["wsl.exe", "-d", "Ubuntu", "--exec", "/snap/bin/kubectl"] if os.name == "nt" else [shutil.which("kubectl") or "/snap/bin/kubectl"]
+    configured = os.environ.get("KUBECTL")
+    prefix = ["wsl.exe", "-d", "Ubuntu", "--exec", configured or "/snap/bin/kubectl"] if os.name == "nt" else [configured or shutil.which("kubectl") or "/snap/bin/kubectl"]
     result = subprocess.run([*prefix, *args], input=json.dumps(body) if body is not None else None,
                             capture_output=True, text=True, timeout=20, check=True)
     return json.loads(result.stdout) if not raw and result.stdout.strip().startswith("{") else result.stdout
