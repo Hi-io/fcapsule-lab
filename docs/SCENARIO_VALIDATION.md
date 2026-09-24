@@ -66,9 +66,12 @@ or a manually supplied answer for a fresh result.
   next-action synthesis changes. Their mechanisms are valid, but their final
   recommendations still need one read-only review of the retained revisions.
 - The discovery diagnosis passed human review on the fresh 25 September run, but
-  its lexical evaluator scored it weakly despite an exact cited selector/label
-  mismatch. The evaluator needs an independent citation/phrase audit; do not
-  use that number alone as evidence of model quality.
+  its lexical evaluator still scores it weakly. An audit fixed a general bug
+  that missed domains in cited completed checks. The remaining gap includes a
+  real omission of the healthy workload in the short answer, plus phrasing
+  differences between the supported hypothesis and the scoring contract. Do
+  not use the score alone as evidence of model quality or tune the oracle to
+  make this single response pass.
 - No backlog case is a claimed pass. Some need isolated traffic, dependency
   evidence, or a clearer incident-time configuration snapshot. The table above
   identifies the specific next step for each one.
