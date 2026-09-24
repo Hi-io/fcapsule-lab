@@ -26,6 +26,13 @@ namespace scope, or unrelated monitoring resource is changed.
 Requirements: idle healthy Lab, node-exporter memory readings above 1 GiB on every
 node hosting a Lab Pod, healthy exporter target, existing validated vision/core providers, kubectl
 permissions, and explicitly approved Chrome automation. No new cluster workloads.
+The runner resolves Node from `--node`, `FCAPSULE_NODE`, then `node`/`node.exe` on
+`PATH`, and verifies that Python can launch it before taking the Lab ownership lock.
+It captures and validates a real baseline PNG before claiming the lock or changing the
+ServiceMonitor. If the fault screenshot is unavailable, it aborts and restores its
+owned changes. Set `PLAYWRIGHT_MODULE` and `CHROME_EXECUTABLE` when they are not
+otherwise discoverable. A Windows `node.exe` must be launched by a compatible
+Windows Python environment; with WSL Python, use Linux Node.js.
 The fault loop is 180 seconds; a separate local watchdog attempts owned rollback
 at 240 seconds even if the parent process dies. Each sample stops the run below
 768 MiB or on failed health. `finally` restores the saved path using resource-version
@@ -38,12 +45,16 @@ From the Lab repository, with Node/Playwright/Chrome already installed:
 ```powershell
 $env:PLAYWRIGHT_MODULE='C:/Users/Hiros/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright'
 $env:CHROME_EXECUTABLE='C:/Program Files/Google/Chrome/Application/chrome.exe'
+# Optional when node.exe is not already on PATH:
+$env:FCAPSULE_NODE='C:/path/to/node.exe'
 $python='C:/Users/Hiros/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/python.exe'
 & $python tools/evaluate_external_screenshot.py run --out artifacts/external-scrape-<UTC>
 ```
 
 Windows uses WSL Ubuntu kubectl; Linux uses local kubectl. `--node` and the three
-service URLs are configurable. Use a new output directory for every attempt.
+service URLs are configurable. Use a new output directory for every attempt. The
+Node runtime and baseline browser capture are checked before the runner takes its
+Lab ownership lock, so startup failures cannot leave an injected fault behind.
 The helper drives normal Prometheus filtering and saves unedited viewport pixels,
 UTC observation time, URL, pool and SHA-256. Inspect `before.png`, `fault.png`, and
 `after.png` visually. Never infer screenshot success only from DOM text or API data.

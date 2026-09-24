@@ -162,18 +162,97 @@ def require_node_headroom(data, minimum=1024**3):
             raise RuntimeError("Every scheduled Lab node requires measured MemAvailable above the safety threshold")
 
 
-def capture(args, root, phase):
+def resolve_node(args):
+    """Resolve Node from the CLI, an environment override, or PATH."""
+    configured = getattr(args, "node", None) or os.environ.get("FCAPSULE_NODE")
+    if configured:
+        found = shutil.which(str(configured))
+        if found:
+            return found
+        if Path(configured).is_file():
+            return str(configured)
+        raise RuntimeError(
+            f"Configured Node.js executable was not found: {configured!r}. "
+            "Set --node or FCAPSULE_NODE to a runtime this Python environment can launch."
+        )
+    for name in ("node", "node.exe"):
+        found = shutil.which(name)
+        if found:
+            return found
+    raise RuntimeError(
+        "Node.js is required for the Prometheus screenshot. Install it or set "
+        "--node / FCAPSULE_NODE to an executable available to this Python environment."
+    )
+
+
+def preflight_node(args):
+    node = resolve_node(args)
     try:
-        subprocess.run([args.node, str(ROOT / "tools/capture_prometheus.cjs"), args.prometheus,
-                        str(root / (phase + ".png")), POOL], check=True, timeout=55)
+        result = subprocess.run([node, "--version"], check=True, capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError) as error:
+        detail = str(error)
+        if os.name != "nt" and node.lower().endswith(".exe"):
+            detail += "; use Linux Node with WSL Python, or run the runner with Windows Python"
+        raise RuntimeError(f"Node.js screenshot runtime preflight failed for {node!r}: {detail}") from error
+    version = result.stdout.strip()
+    if not version.startswith("v") or not all(part.isdigit() for part in version[1:].split(".")):
+        raise RuntimeError(f"Screenshot runtime {node!r} did not report a Node.js version")
+    return node
+
+
+def capture_environment():
+    env = os.environ.copy()
+    if not env.get("PLAYWRIGHT_MODULE"):
+        module = ROOT / ".deps" / "node_modules" / "playwright"
+        if module.exists():
+            env["PLAYWRIGHT_MODULE"] = str(module)
+    return env
+
+
+def validate_capture(image, prometheus):
+    metadata_path = Path(str(image) + ".json")
+    if not image.is_file() or not metadata_path.is_file():
+        raise ValueError("Screenshot command did not create both the PNG and provenance sidecar")
+    data = image.read_bytes()
+    metadata = json.loads(metadata_path.read_text())
+    expected, actual = urlparse(prometheus), urlparse(metadata["source_url"])
+    if (actual.scheme, actual.netloc, actual.path) != (expected.scheme, expected.netloc, "/targets"):
+        raise ValueError("Capture did not come from the configured external Prometheus /targets page")
+    if metadata.get("pool") != POOL or metadata.get("sha256") != hashlib.sha256(data).hexdigest():
+        raise ValueError("Capture provenance or image hash mismatch")
+    if not data.startswith(b"\x89PNG\r\n\x1a\n") or not 1024 < len(data) <= 6 * 1024**2:
+        raise ValueError("Expected a bounded actual PNG screenshot")
+
+
+def capture(args, root, phase, node=None):
+    try:
+        node = node or resolve_node(args)
+        image = root / (phase + ".png")
+        subprocess.run([node, str(ROOT / "tools/capture_prometheus.cjs"), args.prometheus,
+                        str(image), POOL], check=True, timeout=55, env=capture_environment())
+        validate_capture(image, args.prometheus)
         result = {"phase": phase, "status": "captured", "source": args.prometheus}
-    except (OSError, subprocess.SubprocessError, ValueError) as error:
-        # Preserve the telemetry experiment even if the optional browser capture
-        # cannot start; image attachment remains unavailable for this run.
+    except (OSError, subprocess.SubprocessError, ValueError, RuntimeError, KeyError) as error:
+        # Preserve the reason for a failed capture; run() decides whether it is safe to continue.
         result = {"phase": phase, "status": "unavailable", "error_type": type(error).__name__,
                   "error": str(error)[:300]}
     save(root / ("capture-" + phase + ".json"), result)
     return result
+
+
+def require_capture(result, phase, *, before_injection=False):
+    if result.get("status") == "captured":
+        return
+    if before_injection:
+        boundary = "No Lab resource was changed."
+    else:
+        boundary = "The runner is aborting and will restore its owned Lab changes."
+    error = result.get("error") or "capture did not produce a validated PNG"
+    raise RuntimeError(
+        f"Required {phase} Prometheus screenshot is unavailable. {boundary} "
+        "Check Node.js, PLAYWRIGHT_MODULE, CHROME_EXECUTABLE, and Prometheus reachability; "
+        f"capture error: {error}"
+    )
 
 
 def restore(root):
@@ -230,7 +309,9 @@ def run(args):
         raise RuntimeError("Expected the unmodified healthy /metrics baseline")
     if kubectl("get", "prometheusrule", RULE, "-n", NAMESPACE, "--ignore-not-found", "-o", "json"):
         raise RuntimeError("Another screenshot evaluation already owns the temporary rule")
-    capture(args, root, "before")
+    node = preflight_node(args)
+    before_capture = capture(args, root, "before", node=node)
+    require_capture(before_capture, "baseline", before_injection=True)
     owner = uuid.uuid4().hex
     record = {"scenario": "mysql-exporter-scrape-path", "owner": owner, "started_at": now(),
               "rollback_at": time.time() + 240, "outcome": "running", "samples": [],
@@ -262,10 +343,10 @@ def run(args):
             save(root / "run.json", record)
             if not fault_observed and target["health"] == "down" and "404" in target["lastError"]:
                 save(root / "fault.json", sample)
-                record["fault_screenshot"] = capture(args, root, "fault")
+                record["fault_screenshot"] = capture(args, root, "fault", node=node)
+                require_capture(record["fault_screenshot"], "fault")
                 fault_observed = True
-                if record["fault_screenshot"]["status"] == "captured":
-                    print("External 404 screenshot captured", flush=True)
+                print("External 404 screenshot captured", flush=True)
             if fault_observed and matching:
                 save(root / "alert.json", matching)
                 overview = request(args.fcapsule + "/api/state")["overview"]
@@ -293,7 +374,7 @@ def run(args):
                 guard.wait(timeout=max(5, record["rollback_at"] - time.time() + 30))
     wait_for(lambda: exporter_target(targets(args.prometheus)), lambda t: t["health"] == "up" and urlparse(t["scrapeUrl"]).path == "/metrics", 100, "Exporter scrape did not recover")
     snapshot(args, root, "after")
-    capture(args, root, "after")
+    capture(args, root, "after", node=node)
     print(json.dumps({"out": str(root), "episode_id": record["episode_id"], "outcome": record["outcome"]}), flush=True)
 
 
@@ -459,7 +540,7 @@ def main():
     parser.add_argument("--lab", default="http://192.168.0.102:30766")
     parser.add_argument("--prometheus", default="http://192.168.0.102:30090")
     parser.add_argument("--fcapsule", default="http://192.168.0.102:30765")
-    parser.add_argument("--node", default="node")
+    parser.add_argument("--node", help="Node.js executable; defaults to FCAPSULE_NODE, then node/node.exe on PATH")
     parser.add_argument("--pixels-reviewed", action="store_true")
     parser.add_argument("--expected-revision", help="Explicitly acknowledge a newer terminal baseline for reassess-existing")
     parser.add_argument("--follow-up-label", help="Named, separate follow-up after a further product fix; never overwrites earlier attempts")

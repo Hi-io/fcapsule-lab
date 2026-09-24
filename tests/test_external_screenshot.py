@@ -1,6 +1,7 @@
 import copy
 import hashlib
 import json
+import os
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -22,6 +23,84 @@ def baseline():
 
 
 class ExternalScreenshotTests(unittest.TestCase):
+    def test_node_runtime_uses_explicit_override_then_environment_then_path(self):
+        with patch.dict(os.environ, {"FCAPSULE_NODE": "env-node"}, clear=False), patch.object(
+            runner.shutil, "which", side_effect=lambda name: {
+                "explicit-node": "/tools/explicit-node",
+                "env-node": "/tools/env-node",
+                "node.exe": "/tools/node.exe",
+            }.get(name),
+        ):
+            self.assertEqual(runner.resolve_node(SimpleNamespace(node="explicit-node")), "/tools/explicit-node")
+            self.assertEqual(runner.resolve_node(SimpleNamespace(node=None)), "/tools/env-node")
+        with patch.dict(os.environ, {}, clear=True), patch.object(
+            runner.shutil, "which", side_effect=lambda name: "/tools/node.exe" if name == "node.exe" else None,
+        ):
+            self.assertEqual(runner.resolve_node(SimpleNamespace(node=None)), "/tools/node.exe")
+
+    def test_node_runtime_failure_is_actionable(self):
+        with patch.dict(os.environ, {}, clear=True), patch.object(runner.shutil, "which", return_value=None):
+            with self.assertRaisesRegex(RuntimeError, "Node.js is required.*FCAPSULE_NODE"):
+                runner.resolve_node(SimpleNamespace(node=None))
+        with patch.object(runner, "resolve_node", return_value="node.exe"), patch.object(
+            runner.subprocess, "run", side_effect=FileNotFoundError("cannot launch")
+        ):
+            with self.assertRaisesRegex(RuntimeError, "runtime preflight failed.*cannot launch"):
+                runner.preflight_node(SimpleNamespace(node=None))
+        with patch.object(runner, "resolve_node", return_value="not-node"), patch.object(
+            runner.subprocess, "run", return_value=SimpleNamespace(stdout="some other program")
+        ):
+            with self.assertRaisesRegex(RuntimeError, "did not report a Node.js version"):
+                runner.preflight_node(SimpleNamespace(node=None))
+
+    def test_capture_requires_a_real_external_png_and_matching_provenance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            args = SimpleNamespace(node="node", prometheus="http://prometheus:9090")
+            data = b"\x89PNG\r\n\x1a\n" + b"x" * 1500
+
+            def write_capture(command, **kwargs):
+                image = Path(command[3])
+                image.write_bytes(data)
+                runner.save(Path(str(image) + ".json"), {
+                    "source_url": args.prometheus + "/targets", "pool": runner.POOL,
+                    "sha256": hashlib.sha256(data).hexdigest(),
+                })
+
+            with patch.dict(os.environ, {"PLAYWRIGHT_MODULE": "/playwright"}), patch.object(
+                runner, "resolve_node", return_value="node"
+            ), patch.object(runner.subprocess, "run", side_effect=write_capture) as command:
+                result = runner.capture(args, root, "before")
+            self.assertEqual(result["status"], "captured")
+            self.assertEqual(command.call_args.kwargs["env"]["PLAYWRIGHT_MODULE"], "/playwright")
+            self.assertTrue((root / "before.png").exists())
+
+            with patch.object(runner, "resolve_node", return_value="node"), patch.object(runner.subprocess, "run"):
+                missing = runner.capture(args, root, "fault")
+            self.assertEqual(missing["status"], "unavailable")
+            self.assertIn("did not create both", missing["error"])
+
+    def test_unavailable_baseline_capture_stops_before_any_lab_mutation(self):
+        state = baseline()
+        state["targets"] = [{"scrapePool": runner.POOL, "health": "up"}]
+        args = SimpleNamespace(out=Path("unused"), node=None, prometheus="http://prometheus:9090",
+                               lab="http://lab", fcapsule="http://fcapsule")
+        with tempfile.TemporaryDirectory() as directory:
+            args.out = Path(directory) / "new-run"
+            with patch.object(runner, "preflight_node", return_value="node"), patch.object(
+                runner, "snapshot", return_value=state
+            ) as snapshot, patch.object(runner, "capture", return_value={
+                "phase": "before", "status": "unavailable", "error": "FileNotFoundError: node"
+            }), patch.object(runner, "kubectl", return_value="") as kubectl, patch.object(
+                runner, "claim_external_run"
+            ) as claim, patch.object(runner, "patch_monitor") as patch_monitor:
+                with self.assertRaisesRegex(RuntimeError, "No Lab resource was changed"):
+                    runner.run(args)
+            snapshot.assert_called_once_with(args, args.out, "before")
+            claim.assert_not_called()
+            patch_monitor.assert_not_called()
+            self.assertFalse(any("create" in call.args or "patch" in call.args for call in kubectl.call_args_list))
+
     def test_safety_accepts_measured_healthy_baseline(self):
         runner.require_safe(baseline())
 
