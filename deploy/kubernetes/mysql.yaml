@@ -44,10 +44,10 @@ spec:
           resources:
             requests:
               cpu: 100m
-              memory: 256Mi
+              memory: 512Mi
             limits:
               cpu: 600m
-              memory: 640Mi
+              memory: 1Gi
           volumeMounts:
             - name: mysql-data
               mountPath: /var/lib/mysql
