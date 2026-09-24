@@ -87,18 +87,44 @@ class PrometheusRuleContractTests(unittest.TestCase):
             self.assertIn(condition, latency_expr)
         self.assertEqual(latency["for"], "20s")
 
+        cpu = self.rules["LabWorkerCPUHigh"]
+        cpu_expr = " ".join(cpu["expr"].split())
+        self.assertIn("rate(container_cpu_usage_seconds_total", cpu_expr)
+        self.assertIn('kube_pod_container_resource_limits{', cpu_expr)
+        self.assertIn('resource="cpu", unit="core"', cpu_expr)
+        self.assertTrue(cpu_expr.endswith(") > 0.75"))
+        self.assertEqual(cpu["for"], "0s", "the one-minute rate already bounds transient CPU samples")
+
+        discovery = self.rules["LabApplicationMetricsDiscoveryMissing"]
+        discovery_expr = " ".join(discovery["expr"].split())
+        self.assertIn('absent_over_time(up{namespace="fcapsule-lab",service="orders-api"}[1m])', discovery_expr)
+        self.assertIn("and on(namespace)", discovery_expr)
+        self.assertIn('kube_deployment_status_replicas_available{ namespace="fcapsule-lab",deployment="orders-api" } > 0',
+                      discovery_expr)
+        self.assertEqual(discovery["for"], "30s")
+
     def test_alert_metric_names_are_emitted_by_the_corresponding_local_apps(self):
         with patch.dict(os.environ, {"INVENTORY_URL": "http://inventory-api:8081"}):
-            orders_metrics = _metric_names(OrdersState().metrics())
-        inventory_metrics = _metric_names(InventoryState().metrics())
-        worker_metrics = _metric_names(WorkerState().metrics())
+            orders_exposition = OrdersState().metrics()
+        inventory_exposition = InventoryState().metrics()
+        worker_exposition = WorkerState().metrics()
+        orders_metrics = _metric_names(orders_exposition)
+        inventory_metrics = _metric_names(inventory_exposition)
+        worker_metrics = _metric_names(worker_exposition)
 
         self.assertIn("lab_worker_allocated_bytes", worker_metrics)
         self.assertIn("lab_worker_poison_retries_total", worker_metrics)
+        self.assertIn("lab_worker_allocated_bytes 0", worker_exposition)
         self.assertTrue({"inventory_mysql_client_sessions_active", "inventory_mysql_server_max_connections",
                          "inventory_mysql_sample_timestamp_seconds"}.issubset(inventory_metrics))
+        self.assertIn("inventory_mysql_client_sessions_active 0", inventory_exposition)
+        self.assertIn("inventory_mysql_server_max_connections 0", inventory_exposition)
+        self.assertIn("inventory_mysql_sample_timestamp_seconds 0", inventory_exposition)
         self.assertTrue({"orders_checkout_latency_p95_seconds", "orders_checkout_latency_sample_count",
                          "orders_checkout_latency_latest_sample_timestamp_seconds"}.issubset(orders_metrics))
+        self.assertIn("orders_checkout_latency_p95_seconds 0", orders_exposition)
+        self.assertIn("orders_checkout_latency_sample_count 0", orders_exposition)
+        self.assertIn("orders_checkout_latency_latest_sample_timestamp_seconds 0", orders_exposition)
 
     def test_target_identity_relabeling_matches_rule_join_labels(self):
         monitor = next(item for item in self.objects if item.get("kind") == "ServiceMonitor"
@@ -110,29 +136,49 @@ class PrometheusRuleContractTests(unittest.TestCase):
         self.assertEqual(self.rules["LabCheckoutLatencyHigh"]["labels"]["service"], "orders-api")
         self.assertEqual(self.rules["LabWorkerBufferPressure"]["labels"]["service"], "lab-worker")
 
-    def test_promtool_fixture_covers_firing_negative_and_expired_data_paths(self):
+    def test_compose_rule_file_stays_parseable_and_covers_its_local_signals(self):
+        compose = yaml.safe_load((ROOT / "prometheus/alerts.yml").read_text(encoding="utf-8"))
+        compose_rules = {rule["alert"]: rule for group in compose["groups"] for rule in group["rules"]}
+        self.assertTrue({"OrdersCheckoutFailureRateHigh", "InventoryLockTimeouts",
+                         "OrdersRetryAmplification"}.issubset(compose_rules))
+        self.assertTrue(all(rule.get("expr") and rule.get("for") for rule in compose_rules.values()))
+        self.assertIn("orders_retry_amplification_ratio", compose_rules["OrdersRetryAmplification"]["expr"])
+        self.assertIn("inventory_database_failures_total", compose_rules["InventoryLockTimeouts"]["expr"])
+
+    def test_promtool_fixture_covers_all_scenario_alerts_and_recovery_paths(self):
         test = build_rule_test(self.prometheus_rule["spec"])
         alert_tests = [case for group in test["tests"] for case in group["alert_rule_test"]]
         by_alert = {}
         for case in alert_tests:
             by_alert.setdefault(case["alertname"], []).append(case)
 
-        for alertname in ("LabWorkerPoisonRetries", "LabWorkerBufferPressure",
-                          "LabMySQLConnectionsSaturated", "LabCheckoutLatencyHigh"):
+        expected = {item["expected_alert"] for item in (*SCENARIOS.values(), *DISCOVERY_SCENARIOS.values())}
+        self.assertEqual(expected, set(by_alert))
+        for alertname in sorted(expected):
             with self.subTest(alertname=alertname):
                 cases = by_alert[alertname]
                 self.assertTrue(any(case["exp_alerts"] for case in cases), "expected a positive firing fixture")
                 self.assertTrue(any(not case["exp_alerts"] for case in cases), "expected negative/stale fixtures")
+                self.assertTrue(any(case["eval_time"] == "0s" and not case["exp_alerts"] for case in cases),
+                                "the alert must be quiet before the scenario fault is injected")
                 groups = [group for group in test["tests"]
                           if group["alert_rule_test"][0]["alertname"] == alertname]
                 self.assertTrue(any(not group["input_series"] for group in groups),
                                 "expected an empty-input/no-data fixture")
+                self.assertTrue(any(
+                    any(case["exp_alerts"] for case in group["alert_rule_test"])
+                    and any(not case["exp_alerts"] and float(case["eval_time"].removesuffix("s"))
+                            > min(float(firing["eval_time"].removesuffix("s"))
+                                  for firing in group["alert_rule_test"] if firing["exp_alerts"])
+                            for case in group["alert_rule_test"])
+                    for group in groups
+                ), "expected a firing fixture that later clears after recovery")
 
         expected_firing_windows = {
             "LabWorkerBufferPressure": ("15s", "20s"),
             "LabWorkerPoisonRetries": ("10s", "15s"),
-            "LabMySQLConnectionsSaturated": ("15s", "20s"),
-            "LabCheckoutLatencyHigh": ("15s", "20s"),
+            "LabMySQLConnectionsSaturated": ("20s", "25s"),
+            "LabCheckoutLatencyHigh": ("20s", "25s"),
         }
         for alertname, (pending_at, firing_at) in expected_firing_windows.items():
             with self.subTest(alertname=alertname):
@@ -156,7 +202,34 @@ class PrometheusRuleContractTests(unittest.TestCase):
         )
         self.assertTrue(stale_buffer, "buffer alert should clear when its sampled gauge becomes stale")
         self.assertTrue(stale_poison, "counter alert should clear after a stale marker expires the range")
-        self.assertGreaterEqual(len(test["tests"]), 21)
+        for alertname in sorted(expected - {"LabWorkerBufferPressure", "LabWorkerPoisonRetries",
+                                            "LabMySQLConnectionsSaturated", "LabCheckoutLatencyHigh",
+                                            "LabApplicationMetricsDiscoveryMissing", "LabExporterScrapeFailed"}):
+            with self.subTest(stale_alert=alertname):
+                self.assertTrue(any("stale" in sample["values"]
+                                    for group in test["tests"]
+                                    if group["alert_rule_test"][0]["alertname"] == alertname
+                                    for sample in group["input_series"]),
+                                "counter alert should have a stale-marker recovery fixture")
+
+        for alertname in ("LabWorkerCPUHigh", "LabApplicationMetricsDiscoveryMissing", "LabExporterScrapeFailed"):
+            with self.subTest(stale_alert=alertname):
+                self.assertTrue(any("stale" in sample["values"]
+                                    for group in test["tests"]
+                                    if group["alert_rule_test"][0]["alertname"] == alertname
+                                    for sample in group["input_series"]),
+                                "alert should distinguish stale samples from an active signal")
+
+        cpu_cases = by_alert["LabWorkerCPUHigh"]
+        self.assertTrue(any(case["eval_time"] == "0s" and not case["exp_alerts"] for case in cpu_cases))
+        self.assertTrue(any(case["eval_time"] == "5s" and case["exp_alerts"] for case in cpu_cases),
+                        "CPU pressure should alert from the post-injection rate without an oversized hold")
+        external_cases = by_alert["LabExporterScrapeFailed"]
+        self.assertTrue(any(case["eval_time"] == "0s" and not case["exp_alerts"] for case in external_cases))
+        self.assertTrue(any(case["eval_time"] == "20s" and case["exp_alerts"] for case in external_cases))
+        self.assertTrue(any(case["eval_time"] == "25s" and not case["exp_alerts"] for case in external_cases),
+                        "exporter scrape alert should clear after the target recovers")
+        self.assertGreaterEqual(len(test["tests"]), 70)
 
 
 if __name__ == "__main__":

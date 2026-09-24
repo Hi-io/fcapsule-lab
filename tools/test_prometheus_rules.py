@@ -10,6 +10,7 @@ import yaml
 
 
 RULE_FILE = Path("deploy/kubernetes/observability.yaml")
+COMPOSE_RULE_FILE = Path("prometheus/alerts.yml")
 
 
 def load_rule_spec(root: Path | None = None) -> dict[str, Any]:
@@ -22,15 +23,28 @@ def _rules_by_name(spec: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return {rule["alert"]: rule for group in spec.get("groups", []) for rule in group.get("rules", [])}
 
 
-def _series(metric: str, pod: str, service: str, values: str) -> dict[str, str]:
+def _series(
+    metric: str,
+    pod: str,
+    service: str,
+    values: str,
+    extra_labels: dict[str, str] | None = None,
+) -> dict[str, str]:
+    labels = {"namespace": "fcapsule-lab", "pod": pod, "service": service, **(extra_labels or {})}
+    rendered_labels = ",".join(f'{name}="{value}"' for name, value in labels.items())
     return {
-        "series": f'{metric}{{namespace="fcapsule-lab",pod="{pod}",service="{service}"}}',
+        "series": f"{metric}{{{rendered_labels}}}",
         "values": values,
     }
 
 
-def _alert_expectation(rule: dict[str, Any], pod: str | None, service: str) -> dict[str, Any]:
-    labels = {"namespace": "fcapsule-lab", **rule.get("labels", {}), "service": service}
+def _alert_expectation(
+    rule: dict[str, Any],
+    pod: str | None,
+    service: str,
+    extra_labels: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    labels = {"namespace": "fcapsule-lab", **rule.get("labels", {}), **(extra_labels or {}), "service": service}
     if pod:
         labels["pod"] = pod
     return {"exp_labels": labels, "exp_annotations": rule.get("annotations", {})}
@@ -43,24 +57,88 @@ def _rule_case(
     *,
     pod: str | None,
     service: str,
+    extra_labels: dict[str, str] | None = None,
     absent_at: tuple[str, ...] = (),
     firing_at: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     rule = rules[alertname]
-    expected = _alert_expectation(rule, pod, service)
-    tests = [
-        {"eval_time": value, "alertname": alertname,
-         "exp_alerts": [] if value in absent_at else [expected]}
-        for value in (*absent_at, *firing_at)
-    ]
+    expected = _alert_expectation(rule, pod, service, extra_labels)
+    expected_by_time = {value: [] for value in absent_at}
+    expected_by_time.update({value: [expected] for value in firing_at})
+    tests = [{"eval_time": value, "alertname": alertname, "exp_alerts": expected_by_time[value]}
+             for value in sorted(expected_by_time, key=lambda item: float(item.removesuffix("s")))]
     return {"interval": "5s", "start_timestamp": "2023-11-14T22:13:20Z",
             "input_series": series, "alert_rule_test": tests}
+
+
+def _load_external_rule() -> dict[str, Any]:
+    try:
+        from tools.evaluate_external_screenshot import rule_document
+    except ModuleNotFoundError:
+        from evaluate_external_screenshot import rule_document
+    document = rule_document("promtool-fixture")
+    return document["spec"]
+
+
+COUNTER_SCENARIO_RULES = {
+    # alert: (metric, distinguishing kind, strict threshold, lookback seconds, for seconds, service)
+    "LabOrdersDependencyDocumentInvalid": ("orders_dependency_failures_total", "contract_shape", 5, 60, 15, "orders-api"),
+    "LabInventoryConstraintFailures": ("inventory_transaction_failures_total", "constraint", 5, 60, 15, "inventory-api"),
+    "LabInventoryDeadlockVictims": ("inventory_transaction_failures_total", "deadlock", 3, 60, 15, "inventory-api"),
+    "LabOrdersIdempotencyConflicts": ("orders_internal_failures_total", "idempotency_conflict", 5, 60, 15, "orders-api"),
+    "LabInventoryLockContention": ("inventory_database_failures_total", "lock_timeout", 5, 120, 15, "inventory-api"),
+    "LabInventoryQueryFailures": ("inventory_database_failures_total", "query", 5, 60, 15, "inventory-api"),
+    "LabOrdersDependencyTransportFailures": ("orders_dependency_failures_total", "transport", 5, 60, 15, "orders-api"),
+    "LabOrdersDependencyTimeouts": ("orders_dependency_failures_total", "timeout", 5, 60, 15, "orders-api"),
+    "LabOrdersDependencyAuthorizationFailures": ("orders_dependency_failures_total", "authorization", 5, 60, 15, "orders-api"),
+    "LabOrdersDependencySchemaRejected": ("orders_dependency_failures_total", "contract_version", 5, 60, 15, "orders-api"),
+}
+
+
+def _counter_values(lookback_seconds: int, fault_delta: int) -> str:
+    sample_count = (lookback_seconds + 10) // 5 + 1
+    return " ".join(["0", str(fault_delta), *([str(fault_delta)] * (sample_count - 2))])
+
+
+def _counter_rule_cases(rules: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    tests = []
+    for alertname, (metric, kind, threshold, lookback, hold, service) in COUNTER_SCENARIO_RULES.items():
+        pod = alertname.lower()
+        firing_seconds = 5 + hold
+        pending_seconds = firing_seconds - 5
+        recovery_seconds = lookback + 10
+        labels = {"kind": kind}
+        injected_values = _counter_values(lookback, threshold + 1)
+        injected = _series(metric, pod, service, injected_values, labels)
+        tests.append(_rule_case(
+            rules, alertname, [injected], pod=pod, service=service, extra_labels=labels,
+            absent_at=("0s", f"{pending_seconds}s", f"{recovery_seconds}s"),
+            firing_at=(f"{firing_seconds}s",),
+        ))
+
+        low_delta = max(1, threshold // 3)
+        below_threshold = _series(metric, pod, service, _counter_values(lookback, low_delta), labels)
+        tests.append(_rule_case(rules, alertname, [below_threshold], pod=pod, service=service,
+                                extra_labels=labels, absent_at=("0s", f"{firing_seconds}s")))
+
+        wrong_kind = _series(metric, pod, service, injected_values, {"kind": "unrelated"})
+        tests.append(_rule_case(rules, alertname, [wrong_kind], pod=pod, service=service,
+                                absent_at=(f"{firing_seconds}s",)))
+
+        stale = _series(metric, pod, service, f"0 {threshold + 1} stale", labels)
+        tests.append(_rule_case(rules, alertname, [stale], pod=pod, service=service,
+                                extra_labels=labels, absent_at=(f"{recovery_seconds}s",)))
+        tests.append(_rule_case(rules, alertname, [], pod=None, service=service,
+                                absent_at=(f"{recovery_seconds}s",)))
+    return tests
 
 
 def build_rule_test(spec: dict[str, Any]) -> dict[str, Any]:
     """Build synthetic rule tests; no cluster or telemetry endpoint is contacted."""
 
     rules = _rules_by_name(spec)
+    external_spec = _load_external_rule()
+    rules.update(_rules_by_name(external_spec))
     tests = []
 
     # Buffer pressure must stay pending for 15 seconds; transient and exact-limit
@@ -68,7 +146,12 @@ def build_rule_test(spec: dict[str, Any]) -> dict[str, Any]:
     tests.append(_rule_case(rules, "LabWorkerBufferPressure", [
         _series("lab_worker_allocated_bytes", "buffer-positive", "lab-worker",
                 "0 90000000 90000000 90000000 90000000 90000000"),
-    ], pod="buffer-positive", service="lab-worker", absent_at=("15s",), firing_at=("20s",)))
+    ], pod="buffer-positive", service="lab-worker", absent_at=("0s", "15s"), firing_at=("20s",)))
+    tests.append(_rule_case(rules, "LabWorkerBufferPressure", [
+        _series("lab_worker_allocated_bytes", "buffer-recovered", "lab-worker",
+                "0 90000000 90000000 90000000 90000000 90000000 0 0"),
+    ], pod="buffer-recovered", service="lab-worker", absent_at=("0s", "15s", "30s"),
+                            firing_at=("20s",)))
     tests.append(_rule_case(rules, "LabWorkerBufferPressure", [
         _series("lab_worker_allocated_bytes", "buffer-transient", "lab-worker",
                 "0 90000000 90000000 0 0 0 0"),
@@ -88,8 +171,9 @@ def build_rule_test(spec: dict[str, Any]) -> dict[str, Any]:
     # expired range and absent telemetry must not become a continuing alert.
     tests.append(_rule_case(rules, "LabWorkerPoisonRetries", [
         _series("lab_worker_poison_retries_total", "poison-positive", "lab-worker",
-                "0 3 3 3 3 3 3 3"),
-    ], pod="poison-positive", service="lab-worker", absent_at=("10s",), firing_at=("15s",)))
+                "0 " + " ".join(["3"] * 14)),
+    ], pod="poison-positive", service="lab-worker", absent_at=("0s", "10s", "70s"),
+                            firing_at=("15s",)))
     tests.append(_rule_case(rules, "LabWorkerPoisonRetries", [
         _series("lab_worker_poison_retries_total", "poison-flat", "lab-worker",
                 "4 4 4 4 4 4 4 4 4 4 4 4 4"),
@@ -106,14 +190,23 @@ def build_rule_test(spec: dict[str, Any]) -> dict[str, Any]:
     mysql_pod = "mysql-positive"
     mysql_service = "inventory-api"
     mysql_series = [
-        _series("inventory_mysql_client_sessions_active", mysql_pod, mysql_service, "9 9 9 9 9 9"),
+        _series("inventory_mysql_client_sessions_active", mysql_pod, mysql_service, "0 9 9 9 9 9"),
         _series("inventory_mysql_server_max_connections", mysql_pod, mysql_service, "10 10 10 10 10 10"),
         _series("inventory_mysql_sample_timestamp_seconds", mysql_pod, mysql_service,
-                "1700000000 1700000000 1700000000 1700000000 1700000000 1700000000"),
+                "1700000000 1700000005 1700000005 1700000005 1700000005 1700000005"),
         _series("up", mysql_pod, mysql_service, "1 1 1 1 1 1"),
     ]
     tests.append(_rule_case(rules, "LabMySQLConnectionsSaturated", mysql_series,
-                            pod=mysql_pod, service=mysql_service, absent_at=("15s",), firing_at=("20s",)))
+                            pod=mysql_pod, service=mysql_service, absent_at=("0s", "15s", "20s"),
+                            firing_at=("25s",)))
+    recovered_mysql = [dict(item) for item in mysql_series]
+    recovered_mysql[0] = _series("inventory_mysql_client_sessions_active", mysql_pod, mysql_service,
+                                 "0 9 9 9 9 9 0")
+    recovered_mysql[2] = _series("inventory_mysql_sample_timestamp_seconds", mysql_pod, mysql_service,
+                                 "1700000000 1700000005 1700000005 1700000005 1700000005 1700000030 1700000030")
+    tests.append(_rule_case(rules, "LabMySQLConnectionsSaturated", recovered_mysql,
+                            pod=mysql_pod, service=mysql_service, absent_at=("0s", "20s", "30s"),
+                            firing_at=("25s",)))
     stale_mysql = [dict(item) for item in mysql_series]
     stale_mysql[2] = _series("inventory_mysql_sample_timestamp_seconds", mysql_pod, mysql_service,
                              "1699999900 1699999900 1699999900 1699999900 1699999900 1699999900")
@@ -126,7 +219,7 @@ def build_rule_test(spec: dict[str, Any]) -> dict[str, Any]:
                             pod=mysql_pod, service=mysql_service, absent_at=("30s",)))
     at_limit = [dict(item) for item in mysql_series]
     at_limit[0] = _series("inventory_mysql_client_sessions_active", mysql_pod, mysql_service,
-                          "8 8 8 8 8 8")
+                          "0 8 8 8 8 8")
     tests.append(_rule_case(rules, "LabMySQLConnectionsSaturated", at_limit,
                             pod=mysql_pod, service=mysql_service, absent_at=("30s",)))
     target_down = [dict(item) for item in mysql_series]
@@ -141,14 +234,24 @@ def build_rule_test(spec: dict[str, Any]) -> dict[str, Any]:
     latency_pod = "latency-positive"
     latency_service = "orders-api"
     latency_series = [
-        _series("orders_checkout_latency_p95_seconds", latency_pod, latency_service, ".35 .35 .35 .35 .35 .35"),
-        _series("orders_checkout_latency_sample_count", latency_pod, latency_service, "10 10 10 10 10 10"),
+        _series("orders_checkout_latency_p95_seconds", latency_pod, latency_service, ".1 .35 .35 .35 .35 .35"),
+        _series("orders_checkout_latency_sample_count", latency_pod, latency_service, "0 10 10 10 10 10"),
         _series("orders_checkout_latency_latest_sample_timestamp_seconds", latency_pod, latency_service,
-                "1700000000 1700000000 1700000000 1700000000 1700000000 1700000000"),
+                "0 1700000005 1700000005 1700000005 1700000005 1700000005"),
         _series("up", latency_pod, latency_service, "1 1 1 1 1 1"),
     ]
     tests.append(_rule_case(rules, "LabCheckoutLatencyHigh", latency_series,
-                            pod=latency_pod, service=latency_service, absent_at=("15s",), firing_at=("20s",)))
+                            pod=latency_pod, service=latency_service, absent_at=("0s", "15s", "20s"),
+                            firing_at=("25s",)))
+    recovered_latency = [dict(item) for item in latency_series]
+    recovered_latency[0] = _series("orders_checkout_latency_p95_seconds", latency_pod, latency_service,
+                                   ".1 .35 .35 .35 .35 .35 .1")
+    recovered_latency[2] = _series("orders_checkout_latency_latest_sample_timestamp_seconds",
+                                   latency_pod, latency_service,
+                                   "0 1700000005 1700000010 1700000015 1700000020 1700000025 1700000030")
+    tests.append(_rule_case(rules, "LabCheckoutLatencyHigh", recovered_latency,
+                            pod=latency_pod, service=latency_service, absent_at=("0s", "20s", "30s"),
+                            firing_at=("25s",)))
     too_few = [dict(item) for item in latency_series]
     too_few[1] = _series("orders_checkout_latency_sample_count", latency_pod, latency_service,
                          "9 9 9 9 9 9")
@@ -161,7 +264,7 @@ def build_rule_test(spec: dict[str, Any]) -> dict[str, Any]:
                             pod=latency_pod, service=latency_service, absent_at=("30s",)))
     at_threshold = [dict(item) for item in latency_series]
     at_threshold[0] = _series("orders_checkout_latency_p95_seconds", latency_pod, latency_service,
-                              ".25 .25 .25 .25 .25 .25")
+                              ".1 .25 .25 .25 .25 .25")
     tests.append(_rule_case(rules, "LabCheckoutLatencyHigh", at_threshold,
                             pod=latency_pod, service=latency_service, absent_at=("30s",)))
     latency_target_down = [dict(item) for item in latency_series]
@@ -170,6 +273,70 @@ def build_rule_test(spec: dict[str, Any]) -> dict[str, Any]:
                             pod=latency_pod, service=latency_service, absent_at=("30s",)))
     tests.append(_rule_case(rules, "LabCheckoutLatencyHigh", [], pod=None,
                             service=latency_service, absent_at=("30s",)))
+
+    # CPU already uses a one-minute rate, which smooths short scheduling noise.
+    # The bounded migration stops after its finite batch, so the rule should not
+    # add a hold that can outlast the causal CPU signal.
+    cpu_pod = "cpu-positive"
+    cpu_service = "lab-worker"
+    cpu_labels = {"container": "worker"}
+    cpu_high = _series("container_cpu_usage_seconds_total", cpu_pod, cpu_service,
+                       "0 5 10 15 20 25 30 35 40 45 50 55 55 55 55 55",
+                       {**cpu_labels, "image": "worker-image"})
+    cpu_limit = {
+        "series": 'kube_pod_container_resource_limits{namespace="fcapsule-lab",pod="cpu-positive",'
+                  'container="worker",resource="cpu",unit="core"}',
+        "values": "1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1",
+    }
+    tests.append(_rule_case(rules, "LabWorkerCPUHigh", [cpu_high, cpu_limit], pod=cpu_pod,
+                            service=cpu_service, extra_labels=cpu_labels,
+                            absent_at=("0s", "70s"), firing_at=("5s",)))
+    cpu_below = _series("container_cpu_usage_seconds_total", cpu_pod, cpu_service,
+                        "0 2.5 5 7.5 10 12.5 15 17.5",
+                        {**cpu_labels, "image": "worker-image"})
+    cpu_below_limit = {**cpu_limit, "values": "1 1 1 1 1 1 1 1"}
+    tests.append(_rule_case(rules, "LabWorkerCPUHigh", [cpu_below, cpu_below_limit], pod=cpu_pod,
+                            service=cpu_service, extra_labels=cpu_labels, absent_at=("30s",)))
+    cpu_stale = _series("container_cpu_usage_seconds_total", cpu_pod, cpu_service, "0 5 stale",
+                        {**cpu_labels, "image": "worker-image"})
+    tests.append(_rule_case(rules, "LabWorkerCPUHigh", [cpu_stale, cpu_limit], pod=cpu_pod,
+                            service=cpu_service, extra_labels=cpu_labels, absent_at=("70s",)))
+    tests.append(_rule_case(rules, "LabWorkerCPUHigh", [], pod=None, service=cpu_service,
+                            absent_at=("30s",)))
+
+    # Discovery loss is meaningful only while the workload is actually available;
+    # an uninstalled or unready deployment must not page on the absence of `up`.
+    ready_series = {
+        "series": 'kube_deployment_status_replicas_available{namespace="fcapsule-lab",deployment="orders-api"}',
+        "values": " ".join(["1"] * 21),
+    }
+    discovery_up = _series("up", "orders-ready", "orders-api",
+                           "1 1 " + " ".join(["stale"] * 18) + " 1")
+    tests.append(_rule_case(rules, "LabApplicationMetricsDiscoveryMissing",
+                            [ready_series, discovery_up], pod=None, service="orders-api",
+                            absent_at=("0s", "60s", "90s", "100s"), firing_at=("95s",)))
+    unready_series = {**ready_series, "values": "0 0 0 0 0"}
+    tests.append(_rule_case(rules, "LabApplicationMetricsDiscoveryMissing",
+                            [unready_series], pod=None, service="orders-api",
+                            absent_at=("30s", "120s")))
+    tests.append(_rule_case(rules, "LabApplicationMetricsDiscoveryMissing", [], pod=None,
+                            service="orders-api", absent_at=("120s",)))
+
+    # The external screenshot runner's alert proves a discovered target is failing
+    # scrapes, not merely absent. Healthy and restored `up` values are controls.
+    exporter_pod = "exporter-positive"
+    exporter_service = "mysql-exporter"
+    exporter_up = _series("up", exporter_pod, exporter_service, "1 0 0 0 0 1")
+    tests.append(_rule_case(rules, "LabExporterScrapeFailed", [exporter_up],
+                            pod=exporter_pod, service=exporter_service,
+                            absent_at=("0s", "15s", "25s"), firing_at=("20s",)))
+    stale_exporter_up = _series("up", exporter_pod, exporter_service, "1 0 stale")
+    tests.append(_rule_case(rules, "LabExporterScrapeFailed", [stale_exporter_up],
+                            pod=exporter_pod, service=exporter_service, absent_at=("20s",)))
+    tests.append(_rule_case(rules, "LabExporterScrapeFailed", [], pod=None,
+                            service=exporter_service, absent_at=("30s",)))
+
+    tests.extend(_counter_rule_cases(rules))
 
     return {"evaluation_interval": "5s", "tests": tests}
 
@@ -183,11 +350,18 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="fcapsule-promtool-") as temporary:
         folder = Path(temporary)
         rule_file = folder / "rules.yml"
+        external_rule_file = folder / "external-rules.yml"
+        compose_rule_file = root / COMPOSE_RULE_FILE
         test_file = folder / "tests.yml"
+        external_spec = _load_external_rule()
         rule_file.write_text(yaml.safe_dump(spec), encoding="utf-8")
-        test = {"rule_files": [str(rule_file)], **build_rule_test(spec)}
+        external_rule_file.write_text(yaml.safe_dump(external_spec), encoding="utf-8")
+        test = {"rule_files": [str(rule_file), str(external_rule_file), str(compose_rule_file)],
+                **build_rule_test(spec)}
         test_file.write_text(yaml.safe_dump(test), encoding="utf-8")
         subprocess.run([args.promtool, "check", "rules", str(rule_file)], check=True)
+        subprocess.run([args.promtool, "check", "rules", str(external_rule_file)], check=True)
+        subprocess.run([args.promtool, "check", "rules", str(compose_rule_file)], check=True)
         subprocess.run([args.promtool, "test", "rules", str(test_file)], check=True)
 
 

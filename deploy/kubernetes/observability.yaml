@@ -177,14 +177,14 @@ spec:
                 namespace="fcapsule-lab", container="worker", resource="cpu", unit="core"
               }
             ) > 0.75
-          for: 45s
+          for: 0s
           labels:
             severity: warning
             service: lab-worker
             signal_class: PM
           annotations:
             summary: The lab worker has consumed more than 75 percent of its CPU limit.
-            description: The one-minute CPU rate exceeded 75 percent of the configured limit for 45 seconds.
+            description: The one-minute CPU rate is above 75 percent of the configured limit. Compare recent usage with worker activity and its resource limit.
 
         - alert: LabMySQLConnectionsSaturated
           expr: |
@@ -324,7 +324,12 @@ spec:
     - name: fcapsule-lab.monitoring-discovery
       rules:
         - alert: LabApplicationMetricsDiscoveryMissing
-          expr: absent_over_time(up{namespace="fcapsule-lab",service="orders-api"}[1m])
+          expr: |
+            absent_over_time(up{namespace="fcapsule-lab",service="orders-api"}[1m])
+            and on(namespace)
+              (kube_deployment_status_replicas_available{
+                namespace="fcapsule-lab",deployment="orders-api"
+              } > 0)
           for: 30s
           labels:
             severity: warning
@@ -334,4 +339,4 @@ spec:
             signal_class: discovery
           annotations:
             summary: Application metrics are no longer being discovered.
-            description: The expected orders metrics target has been absent for more than one minute. Inspect target discovery and monitoring selectors before assuming the workload failed.
+            description: The orders deployment has available replicas but its metrics target has not been scraped recently. Inspect target discovery and monitoring selectors before assuming the workload failed.
