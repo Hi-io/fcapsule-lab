@@ -64,6 +64,9 @@ class ExternalScreenshotTests(unittest.TestCase):
         self.assertIn('service="mysql-exporter"', rule["expr"])
         self.assertNotIn("metrics-v2", json.dumps(rule))
         self.assertNotIn("404", json.dumps(rule))
+        self.assertEqual(rule["labels"]["target_namespace"], "fcapsule-lab")
+        self.assertEqual(rule["labels"]["target_service"], "mysql-exporter")
+        self.assertEqual(rule["labels"]["target_workload"], "mysql-exporter")
 
     def test_patch_checks_resource_version_and_only_changes_path_and_owner(self):
         with patch.object(runner, "kubectl") as command:
@@ -71,6 +74,35 @@ class ExternalScreenshotTests(unittest.TestCase):
         operations = json.loads(command.call_args.args[-1])
         self.assertEqual(operations[0], {"op": "test", "path": "/metadata/resourceVersion", "value": "2"})
         self.assertEqual([o["path"] for o in operations[1:]], ["/spec/endpoints/0/path", "/metadata/annotations/fcapsule.lab~1screenshot-run"])
+
+    def test_shared_lock_uses_resource_version_and_rejects_other_owners(self):
+        config = {"metadata": {"resourceVersion": "17", "annotations": {}}}
+        with patch.object(runner, "get", return_value=config), patch.object(runner, "kubectl") as command:
+            runner.claim_external_run("a" * 32)
+        operations = json.loads(command.call_args.args[-1])
+        self.assertEqual(operations[0], {"op": "test", "path": "/metadata/resourceVersion", "value": "17"})
+        self.assertEqual(operations[1]["path"], "/metadata/annotations/fcapsule.lab~1screenshot-run")
+
+        for key in (runner.CONTROL_OWNER, runner.FIELD_OWNER, runner.OWNER):
+            existing = {"metadata": {"resourceVersion": "18", "annotations": {key: "b" * 32}}}
+            with patch.object(runner, "get", return_value=existing), patch.object(runner, "kubectl") as command:
+                with self.subTest(key=key), self.assertRaises(RuntimeError):
+                    runner.claim_external_run("c" * 32)
+            command.assert_not_called()
+
+    def test_shared_lock_release_requires_matching_owner_and_revision(self):
+        config = {"metadata": {"resourceVersion": "22", "annotations": {runner.OWNER: "a" * 32}}}
+        with patch.object(runner, "get", return_value=config), patch.object(runner, "kubectl") as command:
+            runner.release_external_run("a" * 32)
+        operations = json.loads(command.call_args.args[-1])
+        self.assertEqual(operations[:2], [
+            {"op": "test", "path": "/metadata/resourceVersion", "value": "22"},
+            {"op": "test", "path": "/metadata/annotations/fcapsule.lab~1screenshot-run", "value": "a" * 32},
+        ])
+        with patch.object(runner, "get", return_value=config), patch.object(runner, "kubectl") as command:
+            with self.assertRaisesRegex(RuntimeError, "ownership changed"):
+                runner.release_external_run("b" * 32)
+        command.assert_not_called()
 
     def test_restore_refuses_concurrent_owner_and_replaced_monitor(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -97,7 +129,7 @@ class ExternalScreenshotTests(unittest.TestCase):
             current["metadata"]["annotations"][runner.OWNER] = "ours"
             current["spec"]["endpoints"][0]["path"] = runner.FAULT_PATH
             rule = {"metadata": {"uid": "rule-uid", "annotations": {runner.OWNER: "ours"}}}
-            with patch.object(runner, "get", return_value=current), patch.object(runner, "patch_monitor") as edit, patch.object(runner, "kubectl", side_effect=[rule, {}]) as command:
+            with patch.object(runner, "get", return_value=current), patch.object(runner, "patch_monitor") as edit, patch.object(runner, "kubectl", side_effect=[rule, {}]) as command, patch.object(runner, "release_external_run"):
                 runner.restore(root)
             edit.assert_called_once_with(current, "/metrics", None)
             self.assertEqual(command.call_args.kwargs["body"]["preconditions"], {"uid": "rule-uid"})

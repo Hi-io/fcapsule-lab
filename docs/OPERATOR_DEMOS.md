@@ -1,52 +1,60 @@
-# Five Operator Demos
+# Scenario Operator Guide
 
-This is a practical demonstration suite, separate from the fifteen-case benchmark.
-It reuses three existing workload mechanisms and the two existing monitoring probes.
-It does not add five duplicate faults, change the independent benchmark rubric,
-change FCAPSule providers, or insert expected diagnoses into evidence notes.
+The control UI exposes one catalog of 17 scenarios. All are intended to work as
+operator demos and FCAPSule investigations. Fifteen workload cases retain the frozen
+balanced diagnostic benchmark; two monitoring cases exercise discovery and scrape
+failure. That scoring boundary is an evaluation detail, not a recommendation to omit
+either monitoring case from a demonstration.
 
-## Recommended Cases
+## Complete Scenario Catalog
 
-| Selection | Existing mechanism | Useful evidence | Bounded fault |
+| Scenario | Useful distinction the investigation should make | Symptom signal | Safety / execution |
 |---|---|---|---|
-| `connection-pressure` | `mysql-connections` | Session ownership/errors in logs; real sessions versus the 40-connection ceiling; MySQL configuration; actual Prometheus graph | 180 s |
-| `checkout-deadline` | `timeout-budget` | Caller timeouts versus dependency timing and active 50 ms timeout; retries and checkout PM | 180 s |
-| `metrics-discovery` | `metrics-service-label-drift` | ServiceMonitor selector, actual Service label, missing `up`, still-ready Pods and continued application logs | 180 s |
-| `exporter-scrape` | Existing external scrape-path probe | Discovered exporter DOWN/404 in actual Prometheus Targets; retained monitor configuration and independent workload health | 180 s, independent rollback at 240 s |
-| `query-rollout-history` | `schema-drift`, repeated or using a retained prior | SQL 1054, retained query revision, error PM; distinct episodes and earlier capsule retrieval; explicit retained-only question | 150 s per new occurrence |
+| `poison-job` | Repeated delivery of one malformed import and decoder failure while the worker remains live, not a generic worker outage | `LabWorkerPoisonRetries` | Durable job is owned by the run and removed only by exact identity during recovery. |
+| `response-contract` | Inventory returned HTTP 200, but its document did not satisfy checkout's required fields; this is not a transport failure | `LabOrdersDependencyDocumentInvalid` | Bounded lease; no real customer payloads. |
+| `reservation-token-collision` | MySQL error 1062 links distinct reservations to a reused uniqueness token | `LabInventoryConstraintFailures` | Generated Lab requests only. |
+| `transaction-deadlock` | MySQL deadlock victims (1213) follow opposite row-lock ordering; distinguish from lock-wait timeout | `LabInventoryDeadlockVictims` | Uses disposable Lab inventory rows. |
+| `idempotency-conflict` | A reused checkout key is bound to a different order identifier; the rejection occurs before the inventory call | `LabOrdersIdempotencyConflicts` | Generated checkout requests only. The API currently models order identity, not a multi-field cart payload. |
+| `memory-leak` | Export pages are retained; measured buffer exceeds 80 MiB and approaches a 96 MiB safety cap | `LabWorkerBufferPressure` | Bounded below the container memory limit; no OOM is expected or desired. |
+| `cpu-saturation` | Credential migration's PBKDF2 work keeps worker CPU use near its configured limit while progress remains observable | `LabWorkerCPUHigh` | Leased, finite workload on the existing worker; this alert alone does not prove CFS throttling. |
+| `mysql-connections` | Retained sessions approach the actual 40-connection ceiling; compare current connections with configured capacity | `LabMySQLConnectionsSaturated` | Bounded session count and automatic cleanup. |
+| `lock-contention` | Reconciliation holds an InnoDB row while reservations wait and time out; distinguish from deadlocks | `LabInventoryLockContention` | Holds only Lab-owned rows for the lease. |
+| `downstream-latency` | Successful inventory work around 350 ms pushes checkout latency above the alert threshold; retries are not expected | `LabCheckoutLatencyHigh` | Fixed bounded delay; no external dependency. |
+| `schema-drift` | Query revision v2 references `reserved_quantity`, which must be absent from the active table; correlate SQL 1054 with the applied ConfigMap revision | `LabInventoryQueryFailures` | A read-only schema precondition blocks an invalid run if the column already exists; narrow ConfigMap update and guarded restoration. |
+| `dependency-route` | Active URL targets port 8099 while the Kubernetes Service exposes 8081 | `LabOrdersDependencyTransportFailures` | Narrow ConfigMap update and guarded restoration. |
+| `timeout-budget` | Caller timeout of 50 ms is shorter than the dependency's 250 ms work budget | `LabOrdersDependencyTimeouts` | Narrow ConfigMap update; bounded request rate and lease. |
+| `signing-key-skew` | Caller and dependency key identifiers disagree; explain authorization errors without exposing key material | `LabOrdersDependencyAuthorizationFailures` | Uses non-secret key IDs only. |
+| `response-schema-skew` | Checkout expects response v2 while Inventory emits v1 | `LabOrdersDependencySchemaRejected` | Narrow ConfigMap update and guarded restoration. |
+| `metrics-service-label-drift` | ServiceMonitor selector no longer matches the Service label while application Pods remain healthy | `LabApplicationMetricsDiscoveryMissing` | Changes only the selected Service label and restores its captured baseline. |
+| `mysql-exporter-scrape-path` | Prometheus still discovers the MySQL exporter but `/metrics-v2` returns HTTP 404; distinguish scrape failure from target absence or a database outage | `LabExporterScrapeFailed` | Runner-only: captures real Prometheus Targets images and uses a saved baseline plus guarded rollback/watchdog. |
 
-The graph and Targets captures are the two required external images. The graph
-selects both metric names directly: a PromQL `or` between identically labeled gauges
-would drop one series. These screenshots must be captured during their respective
-faults. Healthy preflight images, Lab control screenshots, FCAPSule UI images,
-generated charts and rendered evaluator pages cannot substitute for incident evidence.
+The exporter screenshots must come from the external Prometheus Targets page during
+the fault. A graph is optional for workload cases; when attached, it must show the
+actual alert metric and affected workload/time range. Healthy preflight images, Lab
+control screenshots, FCAPSule UI images, generated charts and rendered evaluator pages
+are not incident evidence.
 
-The Lab selector starts only individual leased occurrences. Its history action says
-**Start one occurrence**, not "history passed". The exporter entry has no Start
-button: **External screenshot runner** links to an executable run plan, because the
-CLI probe owns its saved rollback record and watchdog. No RBAC expansion is needed.
+## Scenario Coverage Notes
 
-## Audit Of Existing Cases
-
-| Existing case | Demo decision |
+| Scenario | Implementation note |
 |---|---|
-| Poison job | Real durable redelivery; omit from the short suite because CrashLoopBackOff can delay recovery several minutes. |
-| Response contract | Real consumer rejection of HTTP 200 document shape; useful log benchmark, less complementary here. |
-| Reservation token collision | Real SQL uniqueness errors; keep in log benchmark. |
-| Transaction deadlock | Real opposing lock order; keep in benchmark rather than add contention alongside session saturation. |
-| Idempotency conflict | Real conflicting request payloads; keep in log benchmark. |
-| Memory leak | Real buffered pages/cgroup OOM; omit from low-impact demo, not needed to show PM. |
-| CPU saturation | Real PBKDF2 workload; omit to avoid unnecessary node CPU load. |
-| MySQL connections | Selected; limited to the existing 40-session server, with leases and headroom checks. |
-| Lock contention | Real row-lock blocker; useful alternate, overlaps database contention narrative. |
-| Downstream latency | Real delayed work; timeout-budget case additionally demonstrates configuration discrimination. |
-| Schema drift | Selected for repeat/history; real query revision before schema migration, no synthetic log errors. |
-| Dependency route | Real unused Service port; keep as an alternate configuration case. |
-| Timeout budget | Selected; small fixed dependency work, caller timeout mismatch, bounded retries. |
-| Signing key skew | Real request contract skew; no real credential compromise is simulated. |
-| Response schema skew | Real version configuration mismatch; omit alongside query and timeout configuration cases. |
-| Discovery probe | Selected outside benchmark; missing target is not proof of an application outage. |
-| External scrape probe | Selected outside benchmark; target remains discovered and fails scraping, distinct from discovery absence. |
+| `poison-job` | Included: one durable malformed import is correlated by exact run ownership and cleaned up without broad stale-job deletion. |
+| `response-contract` | Included: HTTP 200 with an invalid dependency document is distinguished from connectivity and server errors. |
+| `reservation-token-collision` | Included: real unique-key constraint rejection is generated by Lab traffic. |
+| `transaction-deadlock` | Included: opposing row-lock order creates real MySQL deadlock victims. |
+| `idempotency-conflict` | Included: different synthetic order identifiers reuse a key; ordinary same-order retries replay their stored result without a second inventory call. |
+| `memory-leak` | Included: allocation pressure is observable above 80 MiB; the 96 MiB buffer cap prevents an expected OOM. |
+| `cpu-saturation` | Included: finite PBKDF2 work is constrained by the existing worker quota and lease; diagnose throttling only when a throttling metric is available. |
+| `mysql-connections` | Included: real session usage is compared with MySQL's configured connection ceiling. |
+| `lock-contention` | Included: a Lab-owned transaction holds the target row only for the leased interval. |
+| `downstream-latency` | Included: a bounded dependency delay propagates to checkout latency and concurrency. |
+| `schema-drift` | Included: query revision and actual table schema diverge; a read-only precondition checks the column before injection and the active ConfigMap is retained. |
+| `dependency-route` | Included: the configured dependency port disagrees with the actual Kubernetes Service port. |
+| `timeout-budget` | Included: caller timeout is below normal dependency work duration. |
+| `signing-key-skew` | Included: harmless key IDs differ; the scenario does not expose or compromise credentials. |
+| `response-schema-skew` | Included: caller and dependency response-version settings disagree. |
+| `metrics-service-label-drift` | Included: target discovery is lost while the selected application Pods remain healthy. |
+| `mysql-exporter-scrape-path` | Included as a runner-only case because real Prometheus screenshots and independent rollback are required. |
 
 Audit also found a real controller defect: non-config action paths referenced an
 uninitialized settings variable. The baseline settings are now defined for every
@@ -303,8 +311,9 @@ paid action, with ceilings 3600 completion, 12000 total, 3200 prompt tokens and 
 check. The runner never increases them. The product can independently initiate
 more than one automatic member revision; this harness cannot enforce a global
 provider spend cap. Review raw revision histories and stop manually if spending
-limits require it. No claims about five-case correctness or source-outage resilience
-are warranted until the operator completes the real run and reviews the results.
+limits require it. A completed run of all 17 scenarios still needs human review of
+the unedited assessments and raw evidence; rubric scores are an auditable triage aid,
+not proof of correctness or source-outage resilience.
 
 The 3200 per-call prompt ceiling leaves more room for the bounded two-image
 evidence ledger, without guaranteeing all evidence fits. Lower configured budgets

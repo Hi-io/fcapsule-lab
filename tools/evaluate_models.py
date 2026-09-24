@@ -23,7 +23,7 @@ from evaluation.scoring import available_evidence_domains, load_ground_truth, sc
 from tools.run_scenarios import run_case, save
 
 
-TERMINAL = {"ready", "incomplete", "inconclusive", "not_configured"}
+TERMINAL = {"ready", "incomplete", "inconclusive", "not_configured", "failed", "blocked"}
 
 
 def request(url: str, payload: dict | None = None) -> dict:
@@ -119,12 +119,23 @@ def write_reports(folder: Path, rows: list[dict], models: list[str]) -> None:
         for pair in grouped.values():
             if not all(model in pair and pair[model]["comparison_valid"] for model in models):
                 continue
+            if len({pair[model].get("observation_fingerprint") for model in models}) != 1:
+                continue
             difference = pair[models[0]]["score"] - pair[models[1]]["score"]
             if abs(difference) < 0.1:
                 wins["ties"] += 1
             else:
                 wins[models[0] if difference > 0 else models[1]] += 1
-        lines.append(f"- Paired outcomes: `{models[0]}` {wins[models[0]]} wins, `{models[1]}` {wins[models[1]]} wins, {wins['ties']} ties.")
+        lines.append(f"- Strict paired outcomes (identical capsule and live observations): `{models[0]}` {wins[models[0]]} wins, `{models[1]}` {wins[models[1]]} wins, {wins['ties']} ties.")
+        comparable = 0
+        contextual = 0
+        for pair in grouped.values():
+            if all(model in pair and pair[model]["comparison_valid"] for model in models):
+                if len({pair[model].get("observation_fingerprint") for model in models}) == 1:
+                    comparable += 1
+                else:
+                    contextual += 1
+        lines.append(f"- Model pairs with the same retained capsule: {comparable + contextual}; strictly comparable: {comparable}; contextual live-source differences: {contextual}.")
     lines.extend(["", "Scores are diagnostic rubric coverage, not a universal model accuracy claim. A same-capsule pair with different live-observation fingerprints is contextual, not a strict identical-input comparison. One run per case is exploratory; use `--repetitions` for variance estimates.", ""])
     (folder / "REPORT.md").write_text("\n".join(lines), encoding="utf-8")
 
@@ -150,6 +161,7 @@ def main() -> None:
     selected = list(SCENARIOS) if args.scenario == "all" else [args.scenario]
     oracle = load_ground_truth()
     original = request(args.fcapsule.rstrip("/") + "/api/settings/ai")
+    last_owned_model = None
     folder = args.out / datetime.now(timezone.utc).strftime("evaluation-%Y%m%dT%H%M%SZ")
     folder.mkdir(parents=True)
     rows: list[dict] = []
@@ -164,6 +176,7 @@ def main() -> None:
                 record: dict = {}
                 try:
                     configure_model(args.fcapsule, first, args.max_tokens)
+                    last_owned_model = first
                     record = run_case(args, scenario_id, folder)
                     if case_name != scenario_id:
                         (folder / scenario_id).rename(folder / case_name)
@@ -176,7 +189,8 @@ def main() -> None:
                     # Source ingestion may launch a generic episode briefing before
                     # the evaluation runner sees the new incident. Let it settle,
                     # then make one focused revision for the exact captured signal.
-                    if incident_id and initial.get("primary_incident_id") != incident_id:
+                    if incident_id and not any(isinstance(item, dict) and item.get("incident_id") == incident_id
+                                               for item in ((initial.get("context") or {}).get("alerts") or [])):
                         initial = rerun(args.fcapsule, episode_id, args.investigation_timeout, incident_id)
                     if initial.get("model") == first:
                         outputs[first] = initial
@@ -184,6 +198,7 @@ def main() -> None:
                         if model in outputs:
                             continue
                         configure_model(args.fcapsule, model, args.max_tokens)
+                        last_owned_model = model
                         outputs[model] = rerun(args.fcapsule, episode_id, args.investigation_timeout, incident_id)
                     record["captured_domains"] = sorted(available_evidence_domains(next(iter(outputs.values()))))
                     fingerprints = {item.get("input_fingerprint") for item in outputs.values()}
@@ -206,7 +221,7 @@ def main() -> None:
                                   "episode_id": episode_id}
                         save(case_dir / (model.replace("/", "_") + "-score.json"), result)
                         rows.append(result)
-                except (HTTPError, OSError, TimeoutError, RuntimeError) as error:
+                except Exception as error:
                     case_dir = folder / case_name
                     case_dir.mkdir(exist_ok=True)
                     failure = {"scenario": scenario_id, "repetition": repetition,
@@ -226,19 +241,20 @@ def main() -> None:
                                   "episode_id": None, "evaluation_error": str(error)}
                         save(case_dir / (model.replace("/", "_") + "-score.json"), result)
                         rows.append(result)
-                finally:
-                    try:
-                        request(args.lab.rstrip("/") + "/api/recover", {})
-                    except OSError:
-                        pass
                 write_reports(folder, rows, args.models)
                 ordinal += 1
     finally:
-        configure_model(args.fcapsule, original["model"], int(original["max_tokens"]))
         try:
-            request(args.lab.rstrip("/") + "/api/recover", {})
-        except OSError:
-            pass
+            current = request(args.fcapsule.rstrip("/") + "/api/settings/ai")
+            if last_owned_model and current.get("model") == last_owned_model and int(current.get("max_tokens", -1)) == args.max_tokens:
+                configure_model(args.fcapsule, original["model"], int(original["max_tokens"]))
+                save(folder / "settings-restoration.json", {"restored": True, "model": original["model"]})
+            else:
+                save(folder / "settings-restoration.json", {"restored": False,
+                    "reason": "AI settings changed outside this evaluation; preserving the current operator value."})
+        except Exception as error:
+            save(folder / "settings-restoration.json", {"restored": False,
+                "error_type": type(error).__name__, "error": str(error)[:500]})
     print(folder.resolve())
 
 
