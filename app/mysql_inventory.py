@@ -528,6 +528,7 @@ class InventoryState:
             return {
                 "status": "ok",
                 "failure_mode": self.failure_mode,
+                "run_id": self._control_run_id,
                 "held_connections": len(self._held_connections),
                 "client_sessions_active": self.client_sessions_active,
                 "threads_connected": self.threads_connected,
