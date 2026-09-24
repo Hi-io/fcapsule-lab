@@ -14,6 +14,7 @@ import hashlib
 import json
 import math
 from pathlib import Path
+import signal
 import subprocess
 import sys
 import time
@@ -34,6 +35,8 @@ from tools.run_scenarios import firing, now, request, save, wait_for_lab_quiet
 TERMINAL = media.TERMINAL
 CONFIG_KEYS = ("provider", "model", "max_tokens", "max_total_tokens", "max_prompt_tokens", "max_checks")
 MAXIMUMS = {"max_tokens": 3600, "max_total_tokens": 12000, "max_prompt_tokens": 3200, "max_checks": 1}
+DEFAULT_ASSESSMENT_TIMEOUT = 360
+ASSESSMENT_REVISION_GRACE = 300
 SIGNALS = {**SCENARIOS, **DISCOVERY_SCENARIOS}
 SIGNALS["mysql-exporter-scrape-path"] = {"expected_alert": media.ALERT}
 ALL_RUN_CASES = [*SCENARIOS, *DISCOVERY_SCENARIOS, "query-rollout-history"]
@@ -212,7 +215,7 @@ def capture(args, root, case):
         subprocess.run([args.node, str(ROOT / "tools/capture_demo.cjs"), args.prometheus,
                         str(root / "fault.png"), json.dumps(spec)], check=True, timeout=55)
         result = {"status": "captured", "source": args.prometheus, "view": spec.get("view")}
-    except (OSError, subprocess.SubprocessError, ValueError) as error:
+    except Exception as error:
         # A screenshot enriches an investigation but is not a prerequisite for
         # collecting logs, waiting for the capsule, or scoring its diagnosis.
         result = {"status": "unavailable", "error_type": type(error).__name__,
@@ -248,6 +251,13 @@ def score_history_reuse(previous, current, investigation):
     correct_comparison = comparison.get("episode_id") == prior_episode_id
     same_mechanism = comparison.get("status") == "similar_mechanism"
     score = (40 if matching_checks else 0) + (40 if correct_comparison and same_mechanism else 0) + (20 if cited else 0)
+    previous_pod = previous.get("pod_identity")
+    current_pod = current.get("pod_identity")
+    previous_pod_source = previous.get("pod_identity_source")
+    current_pod_source = current.get("pod_identity_source")
+    pod_sources = {"incident_report", "exact_primary_assessment_scope", "retained_signal"}
+    cross_pod_verified = bool(previous_pod and current_pod and previous_pod != current_pod
+                              and previous_pod_source in pod_sources and current_pod_source in pod_sources)
     result = {
         "score": score,
         "label": "useful_retained_memory" if score == 100 else "partial_retained_memory" if score >= 60 else "history_not_used_effectively",
@@ -257,6 +267,15 @@ def score_history_reuse(previous, current, investigation):
         "same_mechanism_identified": same_mechanism,
         "comparison_cites_retrieved_history": cited,
         "comparison_status": comparison.get("status"),
+        "previous_incident_pod": previous_pod,
+        "current_incident_pod": current_pod,
+        "previous_incident_pod_source": previous_pod_source,
+        "current_incident_pod_source": current_pod_source,
+        "cross_pod_retrieval": "supported_by_distinct_incident_pods" if cross_pod_verified else "not_proven",
+        "cross_pod_generalization_score": None,
+        "interpretation": "Retrieval score measures exact retained-episode use and citation; it does not measure cross-pod generalization.",
+        "cross_pod_limitation": None if cross_pod_verified else
+            "Distinct old/new incident pod identities were not both retained; no cross-pod claim is supported.",
         "requires_human_review": True,
         "current_episode_id": current.get("episode_id"),
     }
@@ -358,13 +377,15 @@ def retain_assessment(root, value):
 
 def retain_revisions(record, output):
     if not record.get("capsule_id"):
-        return
+        return None
     try:
         value = request(record["fcapsule"] + "/artifacts/" + quote(record["capsule_id"], safe="") + "/investigation_revisions.json")
         save(output / "investigation-revisions.json", value)
+        return value
     except (OSError, ValueError) as error:
         save(output / "revision-export-unavailable.json", {"at": now(), "error": str(error),
             "limitation": "Older automatic revisions may be missing; do not report last-run usage as total usage"})
+        return None
 
 
 def assessment_contains_incident(value, incident_id):
@@ -379,27 +400,128 @@ def assessment_matches_primary(value, incident_id):
     return value.get("primary_incident_id") == incident_id
 
 
-def await_assessment(record, root, seconds=360, *, allow_retained_prior=False):
+def await_assessment(record, root, seconds=DEFAULT_ASSESSMENT_TIMEOUT, *, allow_retained_prior=False):
+    """Wait for a stable exact-target revision without starting another assessment."""
     base = record["fcapsule"] + "/api/episodes/" + quote(record["episode_id"], safe="")
     description = ("Retained assessment did not finish; no retry started" if allow_retained_prior else
-                   "No terminal assessment makes the run incident primary; no retry started")
-    value = media.wait_for(lambda: retain_assessment(root, request(base + "/investigation")),
-                           lambda v: v.get("status") in TERMINAL and
-                           (allow_retained_prior or (
-                               assessment_contains_incident(v, record["incident_id"])
-                               and assessment_matches_primary(v, record["incident_id"])
-                           )),
-                           seconds, description)
+                   "No stable terminal revision makes the run incident primary; no retry started")
+    started = media.time.monotonic()
+    deadline = started + seconds
+    maximum_deadline = deadline + ASSESSMENT_REVISION_GRACE
+    observations = []
+    prior_revision = None
+    prior_status = None
+    consecutive_exact = 0
+    accepted_at = None
+    value = None
+    while media.time.monotonic() < deadline:
+        current = retain_assessment(root, request(base + "/investigation"))
+        observed_at = now()
+        revision_id = current.get("revision_id")
+        exact_primary = (current.get("status") in TERMINAL
+                         and assessment_contains_incident(current, record["incident_id"])
+                         and assessment_matches_primary(current, record["incident_id"]))
+        if allow_retained_prior:
+            consecutive_exact = 0
+            accepted = current.get("status") in TERMINAL
+        else:
+            if exact_primary and revision_id:
+                consecutive_exact = consecutive_exact + 1 if revision_id == prior_revision else 1
+            else:
+                consecutive_exact = 0
+            accepted = consecutive_exact >= 2
+        observations.append({
+            "at": observed_at,
+            "assessment_sha256": digest(current),
+            "revision_id": revision_id,
+            "status": current.get("status"),
+            "primary_incident_id": current.get("primary_incident_id"),
+            "context_contains_target": assessment_contains_incident(current, record["incident_id"]),
+            "exact_target_primary": bool(exact_primary),
+            "consecutive_exact_revision_reads": consecutive_exact,
+        })
+        save(root / "assessment-observations.json", {
+            "episode_id": record["episode_id"], "target_incident_id": record["incident_id"],
+            "observations": observations,
+        })
+        if accepted:
+            value = current
+            accepted_at = observed_at
+            break
+        if not allow_retained_prior:
+            if revision_id != prior_revision and prior_revision is not None:
+                deadline = min(maximum_deadline, max(deadline, media.time.monotonic() + 60))
+            if current.get("status") == "running" and prior_status != "running":
+                deadline = min(maximum_deadline, max(deadline, media.time.monotonic() + 60))
+        prior_revision = revision_id
+        prior_status = current.get("status")
+        media.time.sleep(5)
+    if value is None:
+        raise TimeoutError(description)
     save(root / "investigation-before.json", value)
+    if not allow_retained_prior:
+        record.update(
+            assessment_revision_id=value.get("revision_id"),
+            assessment_parent_revision_id=value.get("parent_revision_id"),
+            assessment_sha256=digest(value),
+            assessment_stable_terminal_reads=consecutive_exact,
+            assessment_observation_count=len(observations),
+        )
+        save(root / "assessment-provenance.json", {
+            "episode_id": record["episode_id"], "target_incident_id": record["incident_id"],
+            "revision_id": value.get("revision_id"),
+            "parent_revision_id": value.get("parent_revision_id"),
+            "status": value.get("status"), "model": value.get("model"),
+            "policy_version": value.get("policy_version"),
+            "primary_incident_id": value.get("primary_incident_id"),
+            "context_contains_target": assessment_contains_incident(value, record["incident_id"]),
+            "exact_target_primary": assessment_matches_primary(value, record["incident_id"]),
+            "assessment_sha256": digest(value), "accepted_at": accepted_at,
+            "stable_terminal_reads": consecutive_exact,
+            "observation_file": "assessment-observations.json",
+            "observed_revision_ids": list(dict.fromkeys(
+                observation["revision_id"] for observation in observations if observation["revision_id"])),
+        })
     report = request(record["fcapsule"] + "/api/incidents/" + quote(record["incident_id"], safe="") + "/report")
     save(root / "report.json", report)
+    incident_pod = (report.get("incident") or {}).get("pod")
+    pod_source = "incident_report" if incident_pod else None
+    if (not incident_pod and not allow_retained_prior
+            and assessment_contains_incident(value, record["incident_id"])
+            and assessment_matches_primary(value, record["incident_id"])):
+        incident_pod = ((value.get("context") or {}).get("scope") or {}).get("pod")
+        if incident_pod:
+            pod_source = "exact_primary_assessment_scope"
+    if incident_pod:
+        record["pod_identity"] = incident_pod
+        record["pod_identity_source"] = pod_source
+    else:
+        record.setdefault("pod_identity", None)
+        record.setdefault("pod_identity_source", "not_retained")
     capsule_id = report.get("record", {}).get("capsule_id")
     if capsule_id:
         capsule = request(record["fcapsule"] + "/api/capsules/" + quote(capsule_id, safe=""))
         save(root / "capsule.json", capsule)
         record["capsule_id"] = capsule_id
         record["capsule_sha256"] = digest(capsule["capsule"])
-        retain_revisions(record, root)
+        revisions = retain_revisions(record, root)
+        if not allow_retained_prior:
+            exported_revisions = revisions.get("revisions") if isinstance(revisions, dict) else None
+            revision_export_valid = isinstance(exported_revisions, list)
+            if not revision_export_valid:
+                exported_revisions = []
+            revision_ids = [item.get("revision_id") for item in exported_revisions if isinstance(item, dict)]
+            save(root / "assessment-revision-provenance.json", {
+                "assessment_revision_id": value.get("revision_id"),
+                "capsule_id": capsule_id,
+                "revision_export_available": revision_export_valid,
+                "revision_export_generated_at": revisions.get("generated_at") if isinstance(revisions, dict) else None,
+                "revision_export_count": len(revision_ids),
+                "assessment_revision_listed": value.get("revision_id") in revision_ids,
+                "limitation": None if value.get("revision_id") in revision_ids else
+                    "Revision export was unavailable, malformed, or did not include the selected assessment revision; use the exact GET snapshot as its provenance.",
+            })
+            record["assessment_revision_listed_in_export"] = value.get("revision_id") in revision_ids
     record["assessment_status"] = value.get("status")
     record["assessment_matches_incident"] = value.get("primary_incident_id") == record["incident_id"]
     record["assessment_context_contains_incident"] = assessment_contains_incident(value, record["incident_id"])
@@ -526,7 +648,7 @@ def run_workload(args, case, root, config):
     record["retained_metrics"] = retain_metrics(args, root, case, record["baseline_at"])
     if record["outcome"] != "captured":
         raise RuntimeError("Fresh alert/capsule not captured within the lease; no reinjection")
-    assessment = await_assessment(record, root)
+    assessment = await_assessment(record, root, seconds=getattr(args, "assessment_timeout", DEFAULT_ASSESSMENT_TIMEOUT))
     result = record_diagnostic_score(scenario, assessment, root)
     record.update(diagnostic_score=result["score"], diagnostic_label=result["label"])
     pipeline = record_pipeline_score(scenario, record, assessment, root)
@@ -552,7 +674,7 @@ def run_exporter(args, root, config):
     save(root / "run.json", record)
     record["logs"] = collect_logs(root, record["started_at"])
     record["retained_metrics"] = retain_metrics(args, root, "exporter-scrape", record["started_at"])
-    assessment = await_assessment(record, root)
+    assessment = await_assessment(record, root, seconds=getattr(args, "assessment_timeout", DEFAULT_ASSESSMENT_TIMEOUT))
     result = record_diagnostic_score("mysql-exporter-scrape-path", assessment, root)
     record.update(diagnostic_score=result["score"], diagnostic_label=result["label"])
     pipeline = record_pipeline_score("mysql-exporter-scrape-path", record, assessment, root)
@@ -568,14 +690,30 @@ def run_suite(args):
     root.mkdir(parents=True, exist_ok=False)
     selected = (ALL_RUN_CASES if args.case == "all" else [args.case])
     summary = {"started_at": now(), "cases": selected, "rounds": [], "outcome": "running",
-               "quality": "not_evaluated", "live_source_outage_induced": False}
+               "quality": "not_evaluated", "live_source_outage_induced": False, "current": None}
     save(root / "suite.json", summary)
+    previous_sigterm = None
+    def interrupt_on_sigterm(_signum, _frame):
+        raise KeyboardInterrupt("Received SIGTERM")
+
     try:
+        previous_sigterm = signal.signal(signal.SIGTERM, interrupt_on_sigterm)
+    except ValueError:
+        # run_suite can be called from a worker thread in tests; SIGTERM handling
+        # is only available to the process main thread.
+        pass
+    try:
+        summary["current"] = {"phase": "waiting_for_initial_quiet_baseline"}
+        save(root / "suite.json", summary)
         print("Waiting for a quiet Lab alert baseline before preflight...", flush=True)
         wait_for_lab_quiet(args)
+        summary["current"] = {"phase": "preflight"}
+        save(root / "suite.json", summary)
         checked = preflight(args, root)
         for case in selected:
             print(f"Starting demo: {case}", flush=True)
+            summary["current"] = {"case": case, "phase": "starting_case"}
+            save(root / "suite.json", summary)
             case_failed = False
             first_ordinal = 1
             if case == "query-rollout-history" and args.previous_round:
@@ -589,6 +727,8 @@ def run_suite(args):
             for ordinal in range(1, scenario_rounds(case) + 1):
                 if ordinal < first_ordinal:
                     continue
+                summary["current"] = {"case": case, "round": ordinal, "phase": "waiting_for_quiet_baseline"}
+                save(root / "suite.json", summary)
                 wait_for_lab_quiet(args)
                 if not case_failed and case == "query-rollout-history" and ordinal == 2:
                     wait_history_gap(args, root / case)
@@ -596,7 +736,11 @@ def run_suite(args):
                 round_dir = root / case / ("round-" + str(ordinal))
                 round_dir.parent.mkdir(exist_ok=True)
                 try:
+                    summary["current"] = {"case": case, "round": ordinal, "phase": "waiting_for_ready_lab"}
+                    save(root / "suite.json", summary)
                     wait_for_lab_ready(args, root, case, ordinal)
+                    summary["current"] = {"case": case, "round": ordinal, "phase": "running_and_assessing"}
+                    save(root / "suite.json", summary)
                     if case in {"exporter-scrape", "mysql-exporter-scrape-path"}:
                         record = run_exporter(args, round_dir, checked["model_config"])
                     else:
@@ -617,16 +761,25 @@ def run_suite(args):
                         save(round_dir / "run.json", record)
                         summary["rounds"][-1]["history_use_score"] = history_result["score"]
                         summary["rounds"][-1]["history_use_label"] = history_result["label"]
-                except Exception as error:
+                        summary["rounds"][-1]["cross_pod_retrieval"] = history_result["cross_pod_retrieval"]
+                        summary["rounds"][-1]["cross_pod_generalization_score"] = None
+                        summary["rounds"][-1]["cross_pod_limitation"] = history_result["cross_pod_limitation"]
+                except BaseException as error:
                     case_failed = True
                     summary["rounds"].append({"case": case, "round": ordinal, "path": str(round_dir),
-                        "outcome": "failed", "error_type": type(error).__name__, "error": str(error)[:500]})
+                        "outcome": "interrupted" if not isinstance(error, Exception) else "failed",
+                        "error_type": type(error).__name__, "error": str(error)[:500]})
+                    summary["current"] = {"case": case, "round": ordinal,
+                        "phase": "interrupted" if not isinstance(error, Exception) else "failed"}
                     save(root / "suite.json", summary)
                     # If recovery was not confirmed, the next fault would be unsafe.
                     if not (round_dir / "recovery.json").exists() or not read(round_dir / "recovery.json").get("restored"):
                         raise
+                    if not isinstance(error, Exception):
+                        raise
                     print(f"{case}: failed but owned recovery was confirmed; continuing with the next case", flush=True)
                 save(root / "suite.json", summary)
+                summary["current"] = None
                 if case_failed and case == "query-rollout-history":
                     break
                 if not case_failed:
@@ -654,6 +807,10 @@ def run_suite(args):
         summary.update(outcome="incomplete", error=f"{type(error).__name__}: {error}")
         raise
     finally:
+        if previous_sigterm is not None:
+            signal.signal(signal.SIGTERM, previous_sigterm)
+        if summary.get("outcome") == "running":
+            summary.update(outcome="incomplete", error="Suite exited before a terminal outcome was recorded")
         summary["finished_at"] = now()
         save(root / "suite.json", summary)
 
@@ -954,6 +1111,8 @@ def retain_prior(args):
         "fault_ended_at": signal["ended_at"], "model_config": checked["model_config"],
         "fcapsule": args.fcapsule, "lab": args.lab, "prometheus": args.prometheus,
         "origin": "existing retained matching symptom; historical injection not independently reverified",
+        "pod_identity": signal.get("pod") or (signal.get("labels") or {}).get("pod"),
+        "pod_identity_source": "retained_signal" if signal.get("pod") or (signal.get("labels") or {}).get("pod") else "not_retained",
         "retained_at": now()}
     save(root / "run.json", record)
     await_assessment(record, root, seconds=30, allow_retained_prior=True)
@@ -986,6 +1145,8 @@ def main():
     parser.add_argument("--node", default="node")
     parser.add_argument("--baseline", type=int, choices=range(30, 121), default=45)
     parser.add_argument("--lab-quiet-timeout", type=int, default=420)
+    parser.add_argument("--assessment-timeout", type=int, default=DEFAULT_ASSESSMENT_TIMEOUT,
+                        help="Maximum initial wait for a stable exact-primary assessment; revision progress can extend it by up to five minutes")
     args = parser.parse_args()
     if args.incremental_evidence and (args.mode != "attach" or not args.expected_revision):
         parser.error("--incremental-evidence is attach-only and requires --expected-revision")
@@ -999,6 +1160,8 @@ def main():
         parser.error("Evidence source cannot be FCAPSule")
     if args.episode_quiet_seconds < 960:
         parser.error("Quiet period must cover the 15-minute grouping window plus a 60-second margin")
+    if args.assessment_timeout <= 0:
+        parser.error("Assessment timeout must be positive")
     if args.mode == "plan":
         print(json.dumps({"scenarios": public_scenarios(), "legacy_presets": DEMO_CASES,
                           "cluster_mutations": False, "paid_calls": 0}, indent=2))

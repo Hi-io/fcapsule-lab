@@ -112,12 +112,26 @@ class DemoCatalogTests(unittest.TestCase):
             "episode_id": "episode-prior", "status": "similar_mechanism", "evidence_ids": ["Q003"]}},
             "checks": [{"id": "Q003", "tool": "historical_episode", "status": "completed",
                         "arguments": {"episode_id": "episode-prior"}}]}
-        self.assertEqual(runner.score_history_reuse(previous, current, valid)["score"], 100)
+        exact_reuse = runner.score_history_reuse(previous, current, valid)
+        self.assertEqual(exact_reuse["score"], 100)
+        self.assertEqual(exact_reuse["cross_pod_retrieval"], "not_proven")
+        self.assertIsNone(exact_reuse["cross_pod_generalization_score"])
         valid["assessment"]["historical_comparison"]["episode_id"] = "invented"
         self.assertEqual(runner.score_history_reuse(previous, current, valid)["score"], 60)
         valid["assessment"]["historical_comparison"]["episode_id"] = "episode-prior"
         valid["assessment"]["historical_comparison"]["evidence_ids"] = []
         self.assertEqual(runner.score_history_reuse(previous, current, valid)["score"], 80)
+        cross_pod = runner.score_history_reuse(
+            {**previous, "pod_identity": "inventory-old-1", "pod_identity_source": "retained_signal"},
+            {**current, "pod_identity": "inventory-new-2", "pod_identity_source": "exact_primary_assessment_scope"},
+            valid)
+        self.assertEqual(cross_pod["cross_pod_retrieval"], "supported_by_distinct_incident_pods")
+        self.assertIsNone(cross_pod["cross_pod_generalization_score"])
+        same_pod = runner.score_history_reuse(
+            {**previous, "pod_identity": "inventory-1", "pod_identity_source": "retained_signal"},
+            {**current, "pod_identity": "inventory-1", "pod_identity_source": "incident_report"}, valid)
+        self.assertEqual(same_pod["cross_pod_retrieval"], "not_proven")
+        self.assertIn("Distinct old/new", same_pod["cross_pod_limitation"])
 
     def test_public_catalog_does_not_expose_oracle(self):
         text = json.dumps(public_demos())
@@ -548,6 +562,67 @@ class DemoRunnerTests(unittest.TestCase):
             self.assertEqual(calls, ["quiet", "preflight"])
             self.assertEqual(runner.read(args.out / "suite.json")["outcome"], "incomplete")
 
+    def test_suite_interruption_records_round_and_final_status_after_recovery(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "suite"
+            args = SimpleNamespace(execute=True, out=root, case="checkout-deadline", fcapsule="http://product")
+            prior_sigterm = runner.signal.getsignal(runner.signal.SIGTERM)
+            installed_handlers = []
+
+            def set_signal_handler(signum, handler):
+                self.assertEqual(signum, runner.signal.SIGTERM)
+                if handler != prior_sigterm:
+                    installed_handlers.append(handler)
+                return prior_sigterm
+
+            def interrupt_after_recovery(_args, _case, round_dir, _config):
+                runner.save(round_dir / "recovery.json", {"restored": True})
+                installed_handlers[-1](runner.signal.SIGTERM, None)
+
+            with patch.object(runner, "wait_for_lab_quiet"), \
+                 patch.object(runner, "preflight", return_value={"model_config": config()}), \
+                 patch.object(runner, "configuration", return_value=config()), \
+                 patch.object(runner, "wait_for_lab_ready"), \
+                 patch.object(runner, "run_workload", side_effect=interrupt_after_recovery), \
+                 patch.object(runner.signal, "signal", side_effect=set_signal_handler), \
+                 self.assertRaisesRegex(KeyboardInterrupt, "Received SIGTERM"):
+                runner.run_suite(args)
+
+            summary = runner.read(root / "suite.json")
+            self.assertEqual(summary["outcome"], "incomplete")
+            self.assertIn("Received SIGTERM", summary["error"])
+            self.assertEqual(summary["rounds"][0]["outcome"], "interrupted")
+            self.assertEqual(summary["current"], {"case": "checkout-deadline", "round": 1, "phase": "interrupted"})
+            self.assertIn("finished_at", summary)
+
+    def test_python_interrupt_during_owned_fault_still_recovers_before_propagating(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            args = SimpleNamespace(lab="http://lab", prometheus="http://prom", fcapsule="http://product",
+                                   lab_node="worker-1", baseline=0)
+            snapshots = iter([sample(), sample(), KeyboardInterrupt("stop during fault")])
+
+            def recover(_args, recovery_root, owner):
+                runner.save(recovery_root / "recovery.json", {"restored": True, "owner": owner})
+
+            def api(url, payload=None):
+                if payload is None:
+                    return {"capabilities": {"owned_runs": True}}
+                self.assertTrue(url.endswith("/start"))
+                return {"run": {"run_id": payload["request_id"]}}
+
+            with patch.object(runner, "snapshot", side_effect=snapshots), \
+                 patch.object(runner, "safety"), patch.object(runner, "baseline_config"), \
+                 patch.object(runner, "configuration", return_value=config()), \
+                 patch.object(runner, "firing", return_value=[]), patch.object(runner, "request", side_effect=api), \
+                 patch.object(runner, "recover_owned", side_effect=recover) as recovery, \
+                 patch.object(runner.time, "sleep"), self.assertRaisesRegex(KeyboardInterrupt, "stop during fault"):
+                runner.run_workload(args, "checkout-deadline", root, config())
+
+            recovery.assert_called_once()
+            self.assertTrue(runner.read(root / "recovery.json")["restored"])
+            self.assertEqual(runner.read(root / "run.json")["outcome"], "incomplete")
+
     def test_missing_optional_browser_capture_is_recorded_not_raised(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -556,6 +631,10 @@ class DemoRunnerTests(unittest.TestCase):
                 result = runner.capture(args, root, "mysql-connections")
             self.assertEqual(result["status"], "unavailable")
             self.assertEqual(runner.read(root / "media-capture.json"), result)
+            with patch.object(runner.subprocess, "run", side_effect=RuntimeError("capture worker failed")):
+                unexpected = runner.capture(args, root, "mysql-connections")
+            self.assertEqual(unexpected["status"], "unavailable")
+            self.assertEqual(unexpected["error_type"], "RuntimeError")
             with patch.object(runner.media.subprocess, "run", side_effect=FileNotFoundError("browser unavailable")):
                 external = runner.media.capture(args, root, "fault")
             self.assertEqual(external["status"], "unavailable")
@@ -841,7 +920,7 @@ class AssessmentProvenanceTests(unittest.TestCase):
 
     def assessment(self, status="ready", incident_id="new-incident"):
         return {"status": status, "model": config()["model"], "primary_incident_id": "old-incident",
-                "context": {"alerts": [{"incident_id": incident_id}]}}
+                "context": {"alerts": [{"incident_id": incident_id}], "scope": {"pod": "inventory-new-1"}}}
 
     def test_membership_requires_exact_structured_alert_not_primary_or_prose(self):
         contexts = (None, [], {}, {"alerts": None}, {"alerts": {}}, {"alerts": "new-incident"},
@@ -857,23 +936,41 @@ class AssessmentProvenanceTests(unittest.TestCase):
 
     def test_run_waits_past_stale_terminal_and_current_running_revision(self):
         stale = {**self.assessment(incident_id="old-incident"), "revision_id": "r1"}
-        running = {**self.assessment("running"), "revision_id": "r2"}
-        current = {**self.assessment(), "revision_id": "r2"}
+        superseded = {**self.assessment(), "revision_id": "r2"}
+        superseded["primary_incident_id"] = "new-incident"
+        running = {**self.assessment("running"), "revision_id": "r3"}
+        current = {**self.assessment(), "revision_id": "r4", "parent_revision_id": "r3",
+                   "policy_version": "policy-current"}
         current["primary_incident_id"] = "new-incident"
         current["context"]["alerts"].insert(0, {"incident_id": "old-incident"})
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             record = self.record()
-            with patch.object(runner, "request", side_effect=[stale, running, current, {}]) as api, \
-                 patch.object(runner.media, "time", media_clock([0, 0, 1, 2])):
+            with patch.object(runner, "request", side_effect=[stale, superseded, running, current, current,
+                                                                 {"record": {"capsule_id": "capsule-1"}},
+                                                                 {"capsule": {"retained": True}},
+                                                                 {"generated_at": "now", "revisions": [{"revision_id": "r4"}]}]) as api, \
+                 patch.object(runner.media, "time", media_clock([0, 0, 1, 2, 3, 4, 5, 6, 7, 8])):
                 self.assertEqual(runner.await_assessment(record, root, seconds=3), current)
             self.assertEqual(runner.read(root / "investigation-before.json"), current)
-            self.assertEqual(len(list((root / "raw-assessments").iterdir())), 3)
+            self.assertEqual(len(list((root / "raw-assessments").iterdir())), 4)
+            observations = runner.read(root / "assessment-observations.json")["observations"]
+            self.assertEqual([item["revision_id"] for item in observations], ["r1", "r2", "r3", "r4", "r4"])
+            self.assertEqual(observations[-1]["consecutive_exact_revision_reads"], 2)
+            provenance = runner.read(root / "assessment-provenance.json")
+            self.assertEqual(provenance["revision_id"], "r4")
+            self.assertTrue(provenance["exact_target_primary"])
+            self.assertEqual(provenance["stable_terminal_reads"], 2)
+            revision_link = runner.read(root / "assessment-revision-provenance.json")
+            self.assertTrue(revision_link["assessment_revision_listed"])
+            self.assertTrue(record["assessment_revision_listed_in_export"])
+            self.assertEqual(record["pod_identity"], "inventory-new-1")
             saved = runner.read(root / "run.json")
             self.assertTrue(saved["assessment_context_contains_incident"])
             self.assertTrue(saved["assessment_matches_incident"])
             self.assertEqual(saved["assessment_context_policy"], "current_incident_required")
-            self.assertEqual(api.call_count, 4)
+            self.assertEqual(saved["assessment_revision_id"], "r4")
+            self.assertEqual(api.call_count, 8)
             self.assertTrue(all(len(call.args) == 1 and not call.kwargs for call in api.call_args_list))
 
     def test_stale_only_times_out_without_selecting_baseline_or_triggering_request(self):
@@ -895,13 +992,14 @@ class AssessmentProvenanceTests(unittest.TestCase):
         for status in runner.TERMINAL:
             with self.subTest(status=status), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
-                value = self.assessment(status)
+                value = {**self.assessment(status), "revision_id": "r1"}
                 value["primary_incident_id"] = "new-incident"
                 record = self.record()
-                with patch.object(runner, "request", side_effect=[value, {}]) as api:
+                with patch.object(runner, "request", side_effect=[value, value, {}]) as api, \
+                     patch.object(runner.time, "sleep"):
                     self.assertEqual(runner.await_assessment(record, root), value)
                 self.assertEqual(runner.read(root / "run.json")["assessment_status"], status)
-                self.assertEqual(api.call_count, 2)
+                self.assertEqual(api.call_count, 3)
 
     def test_retain_prior_explicitly_permits_old_context_but_is_read_only_and_disclosed(self):
         incident = "incident-labinventoryqueryfailures-prior"
@@ -917,7 +1015,7 @@ class AssessmentProvenanceTests(unittest.TestCase):
                                    lab="http://lab", prometheus="http://prom")
             with patch.object(runner, "preflight", return_value={"model_config": config()}) as preflight, \
                  patch.object(runner, "request", side_effect=[state, running, terminal, report, {"capsule": {}}, {}]) as api, \
-                 patch.object(runner.media, "time", media_clock([0, 0, 1])):
+                 patch.object(runner.media, "time", media_clock([0, 0, 1, 2, 3])):
                 runner.retain_prior(args)
             preflight.assert_called_once_with(args, root, require_owned=False)
             self.assertTrue(all(len(call.args) == 1 and not call.kwargs for call in api.call_args_list))
