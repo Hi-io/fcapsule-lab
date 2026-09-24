@@ -419,11 +419,17 @@ class ApplicationMechanicsTests(unittest.TestCase):
         state = MysqlInventoryState()
         state.logger = Mock()
         with patch("app.mysql_inventory.threading.Thread"):
-            state.set_failure_mode("normal", run_id=RUN_ID)
+            state.set_failure_mode("response-contract", run_id=RUN_ID)
         event = state.logger.write.call_args.kwargs
         self.assertEqual(event["run_id"], RUN_ID)
         self.assertNotIn("mode", event)
         self.assertNotIn("scenario", event)
+        self.assertEqual(state.status()["run_id"], RUN_ID)
+
+        with patch("app.mysql_inventory.threading.Thread"):
+            state.set_failure_mode("normal", run_id=RUN_ID)
+        self.assertEqual(state.status()["failure_mode"], "normal")
+        self.assertEqual(state.status()["run_id"], RUN_ID)
 
     def test_mysql_successful_reservation_writes_idempotency_and_decrements_stock(self):
         state = MysqlInventoryState()
