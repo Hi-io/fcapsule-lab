@@ -12,7 +12,14 @@ import pymysql
 import yaml
 
 from app.common import JsonLogger
-from app.control import EXTERNAL_PROBE_OWNER, ControlState, SCENARIOS
+from app.control import (
+    EXTERNAL_PROBE_OWNER,
+    FIELD_APPLIED,
+    FIELD_BASELINE,
+    FIELD_OWNER,
+    ControlState,
+    SCENARIOS,
+)
 from app.scenario_catalog import DEFAULT_SCENARIO_CONFIG, DISCOVERY_SCENARIOS, public_scenarios
 from app.mysql_inventory import InventoryState
 from app.orders import OrdersState
@@ -98,6 +105,12 @@ class KubernetesLabTests(unittest.TestCase):
         result = state._start("metrics-service-label-drift", 120)
 
         self.assertEqual(result["results"], [{"target": "metrics-service", "status": "label updated"}])
+        audit = json.dumps([
+            (call.args[:2], {key: value for key, value in call.kwargs.items() if key != "run_id"})
+            for call in state.logger.write.call_args_list
+        ]).lower()
+        for answer in ("ture", "selector", "servicemonitor", "discovery"):
+            self.assertNotIn(answer, audit)
         state._patch_scenario_config.assert_not_called()
         state._patch_metrics_service_label.assert_called_once_with("ture")
         state._post.assert_not_called()
@@ -108,6 +121,44 @@ class KubernetesLabTests(unittest.TestCase):
         self.assertTrue(recovery["ok"])
         state._patch_scenario_config.assert_not_called()
         state._patch_metrics_service_label.assert_not_called()
+
+    def test_discovery_service_label_journal_restores_only_its_owned_field(self):
+        state = ControlState()
+        state.active = {"run_id": "discovery-run"}
+        service = {"metadata": {"resourceVersion": "12", "labels": {
+            "fcapsule.io/app-metrics": "true", "unrelated": "preserve"}, "annotations": {}}}
+        state._kubernetes_get = Mock(return_value=service)
+        state._kubernetes_patch = Mock()
+
+        state._patch_metrics_service_label("ture")
+
+        changed = state._kubernetes_patch.call_args.args[2]
+        self.assertEqual(set(changed), {"metadata"})
+        self.assertEqual(changed["metadata"]["labels"], {"fcapsule.io/app-metrics": "ture"})
+        annotations = changed["metadata"]["annotations"]
+        self.assertEqual(annotations[FIELD_OWNER], "discovery-run")
+        self.assertEqual(json.loads(annotations[FIELD_BASELINE]), {"fcapsule.io/app-metrics": "true"})
+        self.assertEqual(json.loads(annotations[FIELD_APPLIED]), {"fcapsule.io/app-metrics": "ture"})
+
+        service["metadata"]["labels"]["fcapsule.io/app-metrics"] = "ture"
+        service["metadata"]["annotations"].update(annotations)
+        state._kubernetes_patch.reset_mock()
+        state._restore_owned_fields("services", "lab-app-metrics", "labels", "discovery-run")
+
+        restored = state._kubernetes_patch.call_args.args[2]
+        self.assertEqual(restored["metadata"]["labels"], {"fcapsule.io/app-metrics": "true"})
+        self.assertEqual(restored["metadata"]["annotations"][FIELD_OWNER], None)
+
+    def test_discovery_catalog_exposes_prometheus_targets_without_fault_oracle(self):
+        catalog = public_scenarios()
+        for scenario_id in ("metrics-service-label-drift", "mysql-exporter-scrape-path"):
+            with self.subTest(scenario=scenario_id):
+                scenario = catalog[scenario_id]
+                self.assertEqual(scenario["source_view"], "prometheus_targets")
+                self.assertNotIn("expected_alert", scenario)
+                self.assertNotIn("service_metrics_label", scenario)
+        self.assertNotIn("ture", json.dumps(catalog))
+        self.assertNotIn("metrics-v2", json.dumps(catalog))
 
     def test_real_decoder_accepts_valid_document_and_raises_on_invalid_encoding(self):
         value = {"sku": "example", "quantity": 4}
@@ -417,13 +468,45 @@ class KubernetesLabTests(unittest.TestCase):
         self.assertTrue(all(rule["for"] for rule in rules))
 
     def test_discovery_rule_and_service_monitor_use_the_real_service_label(self):
-        objects = list(yaml.safe_load_all((ROOT / "deploy/kubernetes/observability.yaml").read_text()))
-        monitor = next(item for item in objects if item["kind"] == "ServiceMonitor" and item["metadata"]["name"] == "fcapsule-lab-applications")
+        observability = [item for item in yaml.safe_load_all(
+            (ROOT / "deploy/kubernetes/observability.yaml").read_text()) if item]
+        applications = [item for item in yaml.safe_load_all(
+            (ROOT / "deploy/kubernetes/applications.yaml").read_text()) if item]
+        mysql = [item for item in yaml.safe_load_all(
+            (ROOT / "deploy/kubernetes/mysql.yaml").read_text()) if item]
+
+        monitor = next(item for item in observability if item["kind"] == "ServiceMonitor"
+                       and item["metadata"]["name"] == "fcapsule-lab-applications")
+        service = next(item for item in applications if item["kind"] == "Service"
+                       and item["metadata"]["name"] == "lab-app-metrics")
+        orders = next(item for item in applications if item["kind"] == "Deployment"
+                      and item["metadata"]["name"] == "orders-api")
+        self.assertEqual(service["metadata"]["labels"]["fcapsule.io/app-metrics"], "true")
         self.assertEqual(monitor["spec"]["selector"]["matchLabels"], {"fcapsule.io/app-metrics": "true"})
-        rules = [rule for obj in objects if obj["kind"] == "PrometheusRule" for group in obj["spec"]["groups"] for rule in group["rules"]]
+        self.assertEqual(monitor["spec"]["endpoints"][0]["path"], "/metrics")
+        self.assertEqual(service["spec"]["selector"], {"fcapsule.io/metrics": "true"})
+        self.assertEqual(orders["spec"]["template"]["metadata"]["labels"]["fcapsule.io/metrics"], "true")
+
+        rules = [rule for obj in observability if obj["kind"] == "PrometheusRule"
+                 for group in obj["spec"]["groups"] for rule in group["rules"]]
         discovery = next(rule for rule in rules if rule["alert"] == "LabApplicationMetricsDiscoveryMissing")
         self.assertIn("absent_over_time", discovery["expr"])
         self.assertIn('service="orders-api"', discovery["expr"])
+        self.assertNotIn("ture", json.dumps(discovery["annotations"]).lower())
+        self.assertNotIn("metrics-v2", json.dumps(discovery["annotations"]).lower())
+
+        mysql_monitor = next(item for item in observability if item["kind"] == "ServiceMonitor"
+                            and item["metadata"]["name"] == "fcapsule-lab-mysql")
+        exporter_service = next(item for item in mysql if item["kind"] == "Service"
+                                and item["metadata"]["name"] == "mysql-exporter")
+        exporter = next(item for item in mysql if item["kind"] == "Deployment"
+                        and item["metadata"]["name"] == "mysql-exporter")
+        exporter_container = exporter["spec"]["template"]["spec"]["containers"][0]
+        self.assertEqual(exporter_service["metadata"]["labels"]["fcapsule.io/mysql-metrics"], "true")
+        self.assertEqual(exporter_service["spec"]["selector"], exporter["spec"]["selector"]["matchLabels"])
+        self.assertEqual(mysql_monitor["spec"]["selector"]["matchLabels"], {"fcapsule.io/mysql-metrics": "true"})
+        self.assertEqual(mysql_monitor["spec"]["endpoints"][0]["path"], "/metrics")
+        self.assertEqual(exporter_container["readinessProbe"]["httpGet"]["path"], "/metrics")
 
 
 if __name__ == "__main__":

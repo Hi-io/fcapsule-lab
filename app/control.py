@@ -339,8 +339,8 @@ class ControlState:
         if scenario.get("service_metrics_label"):
             self._patch_metrics_service_label(str(scenario["service_metrics_label"]))
             self.logger.write(
-                "WARN", "Metrics discovery intervention applied", run_id=self.active["run_id"],
-                service="lab-app-metrics",
+                "WARN", "Bounded intervention applied", run_id=self.active["run_id"],
+                target_count=1,
             )
             results.append({"target": "metrics-service", "status": "label updated"})
             return {"ok": True, "scenario": scenario_id, "results": results}
