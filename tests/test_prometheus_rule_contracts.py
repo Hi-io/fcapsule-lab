@@ -86,6 +86,19 @@ class PrometheusRuleContractTests(unittest.TestCase):
         ):
             self.assertIn(condition, latency_expr)
         self.assertEqual(latency["for"], "20s")
+        self.assertNotIn("orders_inventory_dependency_latency", latency_expr,
+                         "dependency latency must remain an independent alert condition")
+
+        dependency_latency = self.rules["LabInventoryDependencyLatencyHigh"]
+        dependency_expr = " ".join(dependency_latency["expr"].split())
+        for condition in (
+            'orders_inventory_dependency_latency_p95_seconds{namespace="fcapsule-lab",service="orders-api"} > 0.25',
+            'orders_inventory_dependency_latency_sample_count{namespace="fcapsule-lab",service="orders-api"} >= 10',
+            'time() - orders_inventory_dependency_latency_latest_sample_timestamp_seconds{namespace="fcapsule-lab",service="orders-api"} < 30',
+            'up{namespace="fcapsule-lab",service="orders-api"} == 1',
+        ):
+            self.assertIn(condition, dependency_expr)
+        self.assertEqual(dependency_latency["for"], "20s")
 
         cpu = self.rules["LabWorkerCPUHigh"]
         cpu_expr = " ".join(cpu["expr"].split())
@@ -122,9 +135,15 @@ class PrometheusRuleContractTests(unittest.TestCase):
         self.assertIn("inventory_mysql_sample_timestamp_seconds 0", inventory_exposition)
         self.assertTrue({"orders_checkout_latency_p95_seconds", "orders_checkout_latency_sample_count",
                          "orders_checkout_latency_latest_sample_timestamp_seconds"}.issubset(orders_metrics))
+        self.assertTrue({"orders_inventory_dependency_latency_p95_seconds",
+                         "orders_inventory_dependency_latency_sample_count",
+                         "orders_inventory_dependency_latency_latest_sample_timestamp_seconds"}.issubset(orders_metrics))
         self.assertIn("orders_checkout_latency_p95_seconds 0", orders_exposition)
         self.assertIn("orders_checkout_latency_sample_count 0", orders_exposition)
         self.assertIn("orders_checkout_latency_latest_sample_timestamp_seconds 0", orders_exposition)
+        self.assertIn("orders_inventory_dependency_latency_p95_seconds 0", orders_exposition)
+        self.assertIn("orders_inventory_dependency_latency_sample_count 0", orders_exposition)
+        self.assertIn("orders_inventory_dependency_latency_latest_sample_timestamp_seconds 0", orders_exposition)
 
     def test_target_identity_relabeling_matches_rule_join_labels(self):
         monitor = next(item for item in self.objects if item.get("kind") == "ServiceMonitor"
@@ -134,6 +153,7 @@ class PrometheusRuleContractTests(unittest.TestCase):
         self.assertEqual(service_relabel["sourceLabels"], ["__meta_kubernetes_pod_label_app_kubernetes_io_name"])
         self.assertEqual(self.rules["LabMySQLConnectionsSaturated"]["labels"]["service"], "inventory-api")
         self.assertEqual(self.rules["LabCheckoutLatencyHigh"]["labels"]["service"], "orders-api")
+        self.assertEqual(self.rules["LabInventoryDependencyLatencyHigh"]["labels"]["service"], "orders-api")
         self.assertEqual(self.rules["LabWorkerBufferPressure"]["labels"]["service"], "lab-worker")
 
     def test_compose_rule_file_stays_parseable_and_covers_its_local_signals(self):
@@ -153,7 +173,7 @@ class PrometheusRuleContractTests(unittest.TestCase):
             by_alert.setdefault(case["alertname"], []).append(case)
 
         expected = {item["expected_alert"] for item in (*SCENARIOS.values(), *DISCOVERY_SCENARIOS.values())}
-        self.assertEqual(expected, set(by_alert))
+        self.assertEqual(expected | {"LabInventoryDependencyLatencyHigh"}, set(by_alert))
         for alertname in sorted(expected):
             with self.subTest(alertname=alertname):
                 cases = by_alert[alertname]
@@ -179,6 +199,7 @@ class PrometheusRuleContractTests(unittest.TestCase):
             "LabWorkerPoisonRetries": ("10s", "15s"),
             "LabMySQLConnectionsSaturated": ("20s", "25s"),
             "LabCheckoutLatencyHigh": ("20s", "25s"),
+            "LabInventoryDependencyLatencyHigh": ("20s", "25s"),
         }
         for alertname, (pending_at, firing_at) in expected_firing_windows.items():
             with self.subTest(alertname=alertname):
@@ -235,6 +256,65 @@ class PrometheusRuleContractTests(unittest.TestCase):
         self.assertTrue(any(case["eval_time"] == "25s" and not case["exp_alerts"] for case in external_cases),
                         "exporter scrape alert should clear after the target recovers")
         self.assertGreaterEqual(len(test["tests"]), 70)
+
+    def test_dependency_latency_fixtures_cover_guards_recovery_and_checkout_independence(self):
+        test = build_rule_test(self.prometheus_rule["spec"])
+        dependency_groups = [group for group in test["tests"]
+                             if group["alert_rule_test"][0]["alertname"] == "LabInventoryDependencyLatencyHigh"]
+        self.assertEqual(len(dependency_groups), 8)
+        self.assertTrue(any(not group["input_series"] for group in dependency_groups),
+                        "dependency alert needs an empty-input control")
+
+        all_series = [sample["series"] for group in dependency_groups for sample in group["input_series"]]
+        self.assertTrue(any("dependency-latency-positive" in series for series in all_series))
+        self.assertTrue(any("dependency-latency-positive" in series and "1699999900" in sample["values"]
+                            for group in dependency_groups for sample in group["input_series"]
+                            for series in [sample["series"]]),
+                        "dependency alert needs a stale latest-observation fixture")
+        self.assertTrue(any(
+            any("orders_inventory_dependency_latency_p95_seconds" in sample["series"]
+                for sample in group["input_series"])
+            and not any("orders_inventory_dependency_latency_latest_sample_timestamp_seconds" in sample["series"]
+                        for sample in group["input_series"])
+            for group in dependency_groups
+        ), "dependency alert needs a missing-required-series fixture")
+
+        by_alert = {}
+        for group in test["tests"]:
+            for case in group["alert_rule_test"]:
+                by_alert.setdefault(case["alertname"], []).append((group, case))
+        dependency_cases = by_alert["LabInventoryDependencyLatencyHigh"]
+        self.assertTrue(any(case["eval_time"] == "25s" and case["exp_alerts"] for _, case in dependency_cases))
+        self.assertTrue(any(
+            case["eval_time"] == "30s" and not case["exp_alerts"]
+            and any("orders_inventory_dependency_latency_p95_seconds" in sample["series"]
+                    and sample["values"].endswith(" .1") for sample in group["input_series"])
+            and any("orders_inventory_dependency_latency_latest_sample_timestamp_seconds" in sample["series"]
+                    and sample["values"].endswith(" 1700000030") for sample in group["input_series"])
+            and any(firing["eval_time"] == "25s" and firing["exp_alerts"]
+                    for firing in group["alert_rule_test"])
+            for group, case in dependency_cases
+        ), "dependency alert needs a firing fixture that clears after recovery")
+        self.assertTrue(any(".25 .25 .25" in sample["values"]
+                            for group in dependency_groups for sample in group["input_series"]
+                            if "orders_inventory_dependency_latency_p95_seconds" in sample["series"]),
+                        "dependency alert needs an exact-threshold negative control")
+        self.assertTrue(any("9 9 9" in sample["values"]
+                            for group in dependency_groups for sample in group["input_series"]
+                            if "orders_inventory_dependency_latency_sample_count" in sample["series"]),
+                        "dependency alert needs an insufficient-sample negative control")
+        self.assertTrue(any('up{' in sample["series"] and sample["values"] == "0 0 0 0 0 0"
+                            for group in dependency_groups for sample in group["input_series"]),
+                        "dependency alert needs a target-down negative control")
+
+        checkout_groups = [group for group in test["tests"]
+                           if group["alert_rule_test"][0]["alertname"] == "LabCheckoutLatencyHigh"]
+        positive_checkout = next((group for group in checkout_groups
+                                  if any(case["eval_time"] == "25s" and case["exp_alerts"]
+                                         for case in group["alert_rule_test"])), None)
+        self.assertIsNotNone(positive_checkout)
+        self.assertFalse(any("orders_inventory_dependency_latency" in sample["series"]
+                             for sample in positive_checkout["input_series"]))
 
 
 if __name__ == "__main__":

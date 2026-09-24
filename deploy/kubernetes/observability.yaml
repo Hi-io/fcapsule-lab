@@ -277,6 +277,26 @@ spec:
             summary: Checkout p95 latency is above 250 milliseconds.
             description: The local checkout observation window has remained above the latency threshold for twenty seconds.
 
+        - alert: LabInventoryDependencyLatencyHigh
+          expr: |
+            (
+              orders_inventory_dependency_latency_p95_seconds{namespace="fcapsule-lab",service="orders-api"} > 0.25
+            )
+            and on(namespace,pod,service)
+              (orders_inventory_dependency_latency_sample_count{namespace="fcapsule-lab",service="orders-api"} >= 10)
+            and on(namespace,pod,service)
+              (time() - orders_inventory_dependency_latency_latest_sample_timestamp_seconds{namespace="fcapsule-lab",service="orders-api"} < 30)
+            and on(namespace,pod,service)
+              (up{namespace="fcapsule-lab",service="orders-api"} == 1)
+          for: 20s
+          labels:
+            severity: warning
+            service: orders-api
+            signal_class: PM
+          annotations:
+            summary: Orders-to-Inventory attempt p95 latency is above 250 milliseconds.
+            description: At least ten recent inventory attempts have remained above the latency threshold for twenty seconds.
+
         - alert: LabOrdersDependencyTransportFailures
           expr: increase(orders_dependency_failures_total{namespace="fcapsule-lab",kind="transport"}[1m]) > 5
           for: 15s

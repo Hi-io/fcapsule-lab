@@ -274,6 +274,67 @@ def build_rule_test(spec: dict[str, Any]) -> dict[str, Any]:
     tests.append(_rule_case(rules, "LabCheckoutLatencyHigh", [], pod=None,
                             service=latency_service, absent_at=("30s",)))
 
+    # Dependency latency is measured per Orders-to-Inventory attempt, separate
+    # from end-to-end checkout latency. Both conditions retain independent data
+    # quality guards and can alert on the same Orders scrape target.
+    dependency_pod = "dependency-latency-positive"
+    dependency_service = "orders-api"
+    dependency_series = [
+        _series("orders_inventory_dependency_latency_p95_seconds", dependency_pod, dependency_service,
+                ".1 .35 .35 .35 .35 .35"),
+        _series("orders_inventory_dependency_latency_sample_count", dependency_pod, dependency_service,
+                "0 10 10 10 10 10"),
+        _series("orders_inventory_dependency_latency_latest_sample_timestamp_seconds",
+                dependency_pod, dependency_service,
+                "0 1700000005 1700000005 1700000005 1700000005 1700000005"),
+        _series("up", dependency_pod, dependency_service, "1 1 1 1 1 1"),
+    ]
+    tests.append(_rule_case(rules, "LabInventoryDependencyLatencyHigh", dependency_series,
+                            pod=dependency_pod, service=dependency_service,
+                            absent_at=("0s", "20s"), firing_at=("25s",)))
+
+    recovered_dependency = [dict(item) for item in dependency_series]
+    recovered_dependency[0] = _series("orders_inventory_dependency_latency_p95_seconds",
+                                       dependency_pod, dependency_service,
+                                       ".1 .35 .35 .35 .35 .35 .1")
+    recovered_dependency[2] = _series("orders_inventory_dependency_latency_latest_sample_timestamp_seconds",
+                                       dependency_pod, dependency_service,
+                                       "0 1700000005 1700000010 1700000015 1700000020 1700000025 1700000030")
+    tests.append(_rule_case(rules, "LabInventoryDependencyLatencyHigh", recovered_dependency,
+                            pod=dependency_pod, service=dependency_service,
+                            absent_at=("0s", "20s", "30s"), firing_at=("25s",)))
+
+    dependency_at_threshold = [dict(item) for item in dependency_series]
+    dependency_at_threshold[0] = _series("orders_inventory_dependency_latency_p95_seconds",
+                                         dependency_pod, dependency_service,
+                                         ".1 .25 .25 .25 .25 .25")
+    tests.append(_rule_case(rules, "LabInventoryDependencyLatencyHigh", dependency_at_threshold,
+                            pod=dependency_pod, service=dependency_service, absent_at=("30s",)))
+
+    dependency_too_few = [dict(item) for item in dependency_series]
+    dependency_too_few[1] = _series("orders_inventory_dependency_latency_sample_count",
+                                     dependency_pod, dependency_service, "9 9 9 9 9 9")
+    tests.append(_rule_case(rules, "LabInventoryDependencyLatencyHigh", dependency_too_few,
+                            pod=dependency_pod, service=dependency_service, absent_at=("30s",)))
+
+    stale_dependency = [dict(item) for item in dependency_series]
+    stale_dependency[2] = _series("orders_inventory_dependency_latency_latest_sample_timestamp_seconds",
+                                   dependency_pod, dependency_service,
+                                   "1699999900 1699999900 1699999900 1699999900 1699999900 1699999900")
+    tests.append(_rule_case(rules, "LabInventoryDependencyLatencyHigh", stale_dependency,
+                            pod=dependency_pod, service=dependency_service, absent_at=("30s",)))
+
+    dependency_target_down = [dict(item) for item in dependency_series]
+    dependency_target_down[3] = _series("up", dependency_pod, dependency_service, "0 0 0 0 0 0")
+    tests.append(_rule_case(rules, "LabInventoryDependencyLatencyHigh", dependency_target_down,
+                            pod=dependency_pod, service=dependency_service, absent_at=("30s",)))
+
+    missing_dependency_timestamp = [item for index, item in enumerate(dependency_series) if index != 2]
+    tests.append(_rule_case(rules, "LabInventoryDependencyLatencyHigh", missing_dependency_timestamp,
+                            pod=dependency_pod, service=dependency_service, absent_at=("30s",)))
+    tests.append(_rule_case(rules, "LabInventoryDependencyLatencyHigh", [], pod=None,
+                            service=dependency_service, absent_at=("30s",)))
+
     # CPU already uses a one-minute rate, which smooths short scheduling noise.
     # The bounded migration stops after its finite batch, so the rule should not
     # add a hold that can outlast the causal CPU signal.
