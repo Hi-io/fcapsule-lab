@@ -3,6 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { createHash } = require('node:crypto');
 const { execFileSync } = require('node:child_process');
+const { launchChromium } = require('./playwright_browser.cjs');
 
 function graphUrl(base, query) {
   const url = new URL('/query', base);
@@ -37,7 +38,7 @@ async function capture(base, output, spec) {
   }
   if (spec.view !== 'graph' || !spec.query) throw new Error('Unknown capture specification');
   const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
-  const browser = await chromium.launch({ executablePath: process.env.CHROME_EXECUTABLE, channel: process.env.CHROME_EXECUTABLE ? undefined : 'chrome', headless: true });
+  const browser = await launchChromium(chromium);
   try {
     const viewport = { width: 1440, height: 980 };
     const page = await browser.newPage({ viewport });
@@ -49,7 +50,8 @@ async function capture(base, output, spec) {
     const bytes = fs.readFileSync(output);
     fs.writeFileSync(output + '.json', JSON.stringify({
       source_url: page.url(), observed_at: observedAt, sha256: createHash('sha256').update(bytes).digest('hex'),
-      bytes: bytes.length, viewport, query: spec.query, browser: 'Chrome / Playwright',
+      bytes: bytes.length, viewport, query: spec.query,
+      browser: process.env.CHROME_EXECUTABLE ? 'Configured executable / Playwright' : 'Playwright Chromium',
     }, null, 2) + '\n', { flag: 'wx' });
   } finally { await browser.close(); }
 }

@@ -25,13 +25,14 @@ namespace scope, or unrelated monitoring resource is changed.
 
 Requirements: idle healthy Lab, node-exporter memory readings above 1 GiB on every
 node hosting a Lab Pod, healthy exporter target, existing validated vision/core providers, kubectl
-permissions, and explicitly approved Chrome automation. No new cluster workloads.
+permissions, and explicitly approved browser automation. No new cluster workloads.
 The runner resolves Node from `--node`, `FCAPSULE_NODE`, then `node`/`node.exe` on
 `PATH`, and verifies that Python can launch it before taking the Lab ownership lock.
 It captures and validates a real baseline PNG before claiming the lock or changing the
 ServiceMonitor. If the fault screenshot is unavailable, it aborts and restores its
-owned changes. Set `PLAYWRIGHT_MODULE` and `CHROME_EXECUTABLE` when they are not
-otherwise discoverable. A Windows `node.exe` must be launched by a compatible
+owned changes. Set `PLAYWRIGHT_MODULE` if needed; without `CHROME_EXECUTABLE`, the
+runner uses Playwright's installed Chromium. Set `CHROME_EXECUTABLE` only to override
+that browser. A Windows `node.exe` must be launched by a compatible
 Windows Python environment; with WSL Python, use Linux Node.js.
 The fault loop is 180 seconds; a separate local watchdog attempts owned rollback
 at 240 seconds even if the parent process dies. Each sample stops the run below
@@ -40,11 +41,12 @@ and ownership guards. A replacement or concurrently changed object is not overwr
 The local watchdog cannot survive loss of the operator machine; retain `run.json`
 and use the restore command promptly after such a failure.
 
-From the Lab repository, with Node/Playwright/Chrome already installed:
+From the Lab repository, with Node/Playwright and its Chromium browser installed:
 
 ```powershell
 $env:PLAYWRIGHT_MODULE='C:/Users/Hiros/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright'
-$env:CHROME_EXECUTABLE='C:/Program Files/Google/Chrome/Application/chrome.exe'
+# Optional system-browser override; normally leave unset to use Playwright Chromium.
+# $env:CHROME_EXECUTABLE='C:/Program Files/Google/Chrome/Application/chrome.exe'
 # Optional when node.exe is not already on PATH:
 $env:FCAPSULE_NODE='C:/path/to/node.exe'
 $python='C:/Users/Hiros/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/python.exe'

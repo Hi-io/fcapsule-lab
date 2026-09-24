@@ -1,8 +1,20 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { waitForGraph } = require('../tools/capture_demo.cjs');
+const { launchChromium } = require('../tools/playwright_browser.cjs');
 
 const SERIES = ['mysql_global_status_threads_connected', 'mysql_global_variables_max_connections'];
+
+test('Playwright Chromium is the default while an explicit executable remains supported', async () => {
+  const calls = [];
+  const browser = { close() {} };
+  const chromium = { async launch(options) { calls.push(options); return browser; } };
+
+  assert.equal(await launchChromium(chromium, {}), browser);
+  assert.deepEqual(calls.pop(), { headless: true });
+  assert.equal(await launchChromium(chromium, { CHROME_EXECUTABLE: '/opt/chrome/chrome' }), browser);
+  assert.deepEqual(calls.pop(), { headless: true, executablePath: '/opt/chrome/chrome' });
+});
 
 function graphPage({ series = SERIES, width = 1200, height = 550, visible = true } = {}) {
   const checked = [];

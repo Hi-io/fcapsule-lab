@@ -96,14 +96,16 @@ its current Pod template. Publish the tested commit first. This guide intentiona
 does not run or prescribe an unreviewed cluster mutation.
 
 Use Windows Python for the recorded run on this machine: kubectl is dispatched to
-WSL, while Chrome/Node run natively. The runner itself needs only the standard
-library. WSL has no Node by default; Linux runs need local Node/Chrome/Playwright.
+WSL, while Node runs natively. Playwright's installed Chromium is the default; a
+system Chrome executable is an optional override. The runner itself needs only the
+standard library. WSL has no Node by default; Linux runs need local Node/Playwright.
 
 ```powershell
 Set-Location \\wsl.localhost\Ubuntu\home\hiio\uol\cm3070\fcapsule-lab
 $python = 'C:/Users/Hiros/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/python.exe'
 $env:PLAYWRIGHT_MODULE = 'C:/Users/Hiros/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright'
-$env:CHROME_EXECUTABLE = 'C:/Program Files/Google/Chrome/Application/chrome.exe'
+# Optional system-browser override; normally leave unset to use Playwright Chromium.
+# $env:CHROME_EXECUTABLE = 'C:/Program Files/Google/Chrome/Application/chrome.exe'
 $labNode = '<agreed-lab-node>'
 & $python tools/run_operator_demos.py plan
 & $python tools/run_operator_demos.py preflight --lab-node $labNode --out local_reports/demo-preflight-UNIQUE
