@@ -103,6 +103,10 @@ class DemoCatalogTests(unittest.TestCase):
         self.assertEqual(int(runtime["MAX_INFLIGHT"]), 12)
         self.assertLessEqual(int(runtime["MAX_INFLIGHT"]), int(mysql["MYSQL_MAX_CONNECTIONS"]) // 3)
         self.assertGreaterEqual(int(runtime["REQUESTS_PER_SECOND"]), int(runtime["MAX_INFLIGHT"]))
+        applications = list(yaml.safe_load_all((runner.ROOT / "deploy/kubernetes/applications.yaml").read_text()))
+        traffic = next(item for item in applications if item and item.get("kind") == "Deployment"
+                       and item["metadata"]["name"] == "traffic-generator")
+        self.assertEqual(traffic["spec"]["replicas"], 0)
 
     def test_mysql_init_bootstraps_operational_schema_after_ephemeral_volume_reset(self):
         documents = list(yaml.safe_load_all((runner.ROOT / "deploy/kubernetes/configuration.yaml").read_text()))
@@ -336,6 +340,106 @@ class DemoRunnerTests(unittest.TestCase):
         with patch.object(runner, "request") as api, self.assertRaisesRegex(ValueError, "execute"):
             runner.run_suite(SimpleNamespace(execute=False))
         api.assert_not_called()
+
+    def test_bounded_traffic_is_limited_to_request_driven_scenarios(self):
+        self.assertTrue(runner.scenario_uses_traffic("timeout-budget"))
+        for scenario in ("response-contract", "idempotency-conflict", "dependency-route", "schema-drift",
+                         "signing-key-skew", "poison-job", "memory-leak", "cpu-saturation",
+                         "mysql-connections", "metrics-service-label-drift", "mysql-exporter-scrape-path", "missing"):
+            with self.subTest(scenario=scenario):
+                self.assertFalse(runner.scenario_uses_traffic(scenario))
+        self.assertFalse(runner.case_uses_traffic("connection-pressure"))
+        self.assertTrue(runner.case_uses_traffic("checkout-deadline"))
+
+    @staticmethod
+    def traffic_deployment(replicas=0, generation=2, status=None):
+        labels = {"app.kubernetes.io/name": "traffic-generator"}
+        return {"metadata": {"name": "traffic-generator", "namespace": "fcapsule-lab",
+                "uid": "traffic-uid", "resourceVersion": str(generation * 10), "generation": generation},
+            "spec": {"replicas": replicas, "selector": {"matchLabels": labels},
+                "template": {"metadata": {"labels": labels}, "spec": {"containers": [{
+                    "name": "traffic-generator", "envFrom": [{"configMapRef": {"name": "lab-runtime"}}],
+                }]}}}, "status": status or {}}
+
+    def test_traffic_preflight_checks_scale_permission_and_bounded_stopped_profile(self):
+        deployment = self.traffic_deployment()
+        runtime = {"data": {"REQUESTS_PER_SECOND": "25", "MAX_INFLIGHT": "12"}}
+        with patch.object(runner, "traffic_kubectl", side_effect=["yes", "yes", "yes", deployment, runtime]) as kubectl:
+            observed = runner.traffic_observation()
+        self.assertEqual(observed["previous_replicas"], 0)
+        self.assertEqual(observed["bounded_profile"], {"requests_per_second": 25, "max_inflight": 12})
+        self.assertEqual(sum(call.args[0] == "auth" for call in kubectl.call_args_list), 3)
+        self.assertEqual(kubectl.call_args_list[2].args[1:4], ("can-i", "update", "deployments/scale"))
+
+    def test_traffic_preflight_refuses_live_or_unbounded_generator(self):
+        for deployment, runtime, message in (
+            (self.traffic_deployment(replicas=1), {"data": {"REQUESTS_PER_SECOND": "25", "MAX_INFLIGHT": "12"}}, "fully stopped"),
+            (self.traffic_deployment(), {"data": {"REQUESTS_PER_SECOND": "26", "MAX_INFLIGHT": "12"}}, "exceeds"),
+        ):
+            with self.subTest(message=message), patch.object(
+                runner, "traffic_kubectl", side_effect=["yes", "yes", "yes", deployment, runtime]
+            ), self.assertRaisesRegex(RuntimeError, message):
+                runner.traffic_observation()
+
+    def test_traffic_only_starts_after_matching_controller_ack_and_uses_replica_guards(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            record = {"namespace": "fcapsule-lab", "deployment": "traffic-generator", "uid": "traffic-uid",
+                "resource_version": "20", "generation": 2, "previous_replicas": 0,
+                "desired_replicas": 1, "owner": "a" * 32, "status": "prepared"}
+            runner.save(root / "traffic-generator.json", record)
+            with patch.object(runner, "traffic_kubectl") as kubectl, self.assertRaisesRegex(RuntimeError, "acknowledges"):
+                runner.start_owned_traffic(SimpleNamespace(), root, "a" * 32, {"run": {"run_id": "other"}})
+            kubectl.assert_not_called()
+
+            started = self.traffic_deployment(replicas=1, generation=3,
+                status={"replicas": 1, "readyReplicas": 1, "availableReplicas": 1})
+            with patch.object(runner, "traffic_kubectl", side_effect=["scaled", started, started]) as kubectl:
+                result = runner.start_owned_traffic(SimpleNamespace(), root, "a" * 32,
+                    {"run": {"run_id": "a" * 32}})
+            self.assertEqual(result["status"], "started")
+            self.assertTrue(result["controller_owner_confirmed"])
+            scale = kubectl.call_args_list[0].args
+            self.assertEqual(scale[:2], ("scale", "deployment/traffic-generator"))
+            self.assertIn("--current-replicas=0", scale)
+            self.assertIn("--resource-version=20", scale)
+
+    def test_traffic_startup_exception_is_recovered_and_previous_replicas_restored(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            record = {"namespace": "fcapsule-lab", "deployment": "traffic-generator", "uid": "traffic-uid",
+                "resource_version": "20", "generation": 2, "previous_replicas": 0,
+                "desired_replicas": 1, "owner": "a" * 32, "status": "prepared"}
+            runner.save(root / "traffic-generator.json", record)
+            started = self.traffic_deployment(replicas=1, generation=3,
+                status={"replicas": 1, "readyReplicas": 1, "availableReplicas": 1})
+            restored = self.traffic_deployment(replicas=0, generation=4)
+            with patch.object(runner, "traffic_kubectl", side_effect=["scaled", started]), \
+                 patch.object(runner, "traffic_readiness", side_effect=TimeoutError("readiness failed")), \
+                 self.assertRaisesRegex(TimeoutError, "readiness failed"):
+                runner.start_owned_traffic(SimpleNamespace(), root, "a" * 32, {"run": {"run_id": "a" * 32}})
+            self.assertEqual(runner.read(root / "traffic-generator.json")["applied_generation"], 3)
+
+            with patch.object(runner, "traffic_kubectl", side_effect=[started, "scaled", restored]) as kubectl:
+                result = runner.restore_owned_traffic(SimpleNamespace(), root, "a" * 32)
+            self.assertTrue(result["restored"])
+            self.assertEqual(result["previous_replicas"], 0)
+            self.assertEqual(kubectl.call_args_list[0].args[0:2], ("get", "deployment"))
+            self.assertEqual(kubectl.call_args_list[1].args[:2], ("scale", "deployment/traffic-generator"))
+            self.assertIn("--current-replicas=1", kubectl.call_args_list[1].args)
+            self.assertIn("--resource-version=30", kubectl.call_args_list[1].args)
+
+    def test_traffic_recovery_preserves_a_concurrent_deployment_edit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runner.save(root / "traffic-generator.json", {"uid": "traffic-uid", "generation": 2,
+                "applied_generation": 3, "previous_replicas": 0, "desired_replicas": 1,
+                "owner": "a" * 32, "status": "started"})
+            edited = self.traffic_deployment(replicas=1, generation=4)
+            with patch.object(runner, "traffic_kubectl", return_value=edited) as kubectl, \
+                 self.assertRaisesRegex(RuntimeError, "edited after runner scale-up"):
+                runner.restore_owned_traffic(SimpleNamespace(), root, "a" * 32)
+            kubectl.assert_called_once()
 
     def test_exact_pro_configuration_and_bounds(self):
         with patch.object(runner, "request", return_value=config()) as api:
@@ -648,8 +752,11 @@ class DemoRunnerTests(unittest.TestCase):
                  patch.object(runner, "safety"), patch.object(runner, "baseline_config"), \
                  patch.object(runner, "configuration", return_value=config()), \
                  patch.object(runner, "firing", side_effect=[[], [], [{"labels": {"alertname": "LabOrdersDependencyTransportFailures"}}]]), \
-                 patch.object(runner, "request", side_effect=api), \
-                 patch.object(runner, "recover_owned", side_effect=recover), \
+                  patch.object(runner, "request", side_effect=api), \
+                  patch.object(runner, "prepare_owned_traffic", return_value={"owner": "prepared", "status": "prepared"}), \
+                  patch.object(runner, "start_owned_traffic", side_effect=lambda _args, _root, owner, _control: {
+                      "owner": owner, "status": "started"}), \
+                  patch.object(runner, "recover_owned", side_effect=recover), \
                  patch.object(runner, "await_assessment") as assess, patch.object(runner.time, "sleep"), \
                  patch.object(runner, "now", return_value="2026-09-24T00:00:00.000000Z"), \
                  self.assertRaisesRegex(RuntimeError, "not fresh"):
@@ -730,7 +837,7 @@ class DemoRunnerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             args = SimpleNamespace(execute=True, out=Path(directory) / "run", case="checkout-deadline")
             calls = []
-            def preflight(*_):
+            def preflight(*_, **__):
                 calls.append("preflight")
                 raise ValueError("Stop before injection")
             with patch.object(runner, "wait_for_lab_quiet", side_effect=lambda _: calls.append("quiet")), \
@@ -794,6 +901,9 @@ class DemoRunnerTests(unittest.TestCase):
                  patch.object(runner, "safety"), patch.object(runner, "baseline_config"), \
                  patch.object(runner, "configuration", return_value=config()), \
                  patch.object(runner, "firing", return_value=[]), patch.object(runner, "request", side_effect=api), \
+                 patch.object(runner, "prepare_owned_traffic", return_value={"owner": "prepared", "status": "prepared"}), \
+                 patch.object(runner, "start_owned_traffic", side_effect=lambda _args, _root, owner, _control: {
+                     "owner": owner, "status": "started"}), \
                  patch.object(runner, "recover_owned", side_effect=recover) as recovery, \
                  patch.object(runner.time, "sleep"), self.assertRaisesRegex(KeyboardInterrupt, "stop during fault"):
                 runner.run_workload(args, "checkout-deadline", root, config())

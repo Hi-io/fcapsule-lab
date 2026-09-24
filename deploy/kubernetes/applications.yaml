@@ -204,7 +204,7 @@ metadata:
     app.kubernetes.io/name: traffic-generator
     app.kubernetes.io/part-of: fcapsule-lab
 spec:
-  replicas: 1
+  replicas: 0
   selector:
     matchLabels:
       app.kubernetes.io/name: traffic-generator

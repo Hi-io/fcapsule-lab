@@ -38,6 +38,13 @@ MAXIMUMS = {"max_tokens": 3600, "max_total_tokens": 12000, "max_prompt_tokens": 
 DEFAULT_ASSESSMENT_TIMEOUT = 360
 ASSESSMENT_REVISION_GRACE = 300
 MIN_EPISODE_QUIET_SECONDS = 960
+LAB_NAMESPACE = "fcapsule-lab"
+TRAFFIC_DEPLOYMENT = "traffic-generator"
+TRAFFIC_REPLICAS = 1
+TRAFFIC_MAX_RPS = 25
+TRAFFIC_MAX_INFLIGHT = 12
+TRAFFIC_START_TIMEOUT = 90
+TRAFFIC_SCENARIOS = frozenset({"timeout-budget"})
 SIGNALS = {**SCENARIOS, **DISCOVERY_SCENARIOS}
 SIGNALS["mysql-exporter-scrape-path"] = {"expected_alert": media.ALERT}
 ALL_RUN_CASES = [*SCENARIOS, *DISCOVERY_SCENARIOS, "query-rollout-history"]
@@ -48,6 +55,15 @@ QUESTIONS = (
     "what remains uncertain, and which preserved evidence supports the next check? "
     "Do not treat an earlier assessment as evidence or claim current source access."
 )
+
+
+def scenario_uses_traffic(scenario):
+    """Limit generated checkout load to the selected request-driven config demo."""
+    return scenario in TRAFFIC_SCENARIOS
+
+
+def case_uses_traffic(case):
+    return scenario_uses_traffic(DEMO_CASES.get(case, {}).get("scenario", case))
 
 
 def read(path):
@@ -188,7 +204,211 @@ def baseline_config(data):
         raise RuntimeError("An external Prometheus screenshot run owns the Lab")
 
 
-def preflight(args, root, require_owned=True):
+def traffic_kubectl(*args, raw=False):
+    return media.kubectl(*args, raw=raw)
+
+
+def traffic_deployment():
+    value = traffic_kubectl("get", "deployment", TRAFFIC_DEPLOYMENT, "-n", LAB_NAMESPACE, "-o", "json")
+    metadata = value.get("metadata", {})
+    spec = value.get("spec", {})
+    template = spec.get("template", {}).get("spec", {})
+    if metadata.get("namespace") != LAB_NAMESPACE or metadata.get("name") != TRAFFIC_DEPLOYMENT:
+        raise RuntimeError("Traffic deployment identity does not match the Lab workload")
+    selector = spec.get("selector", {}).get("matchLabels", {})
+    labels = spec.get("template", {}).get("metadata", {}).get("labels", {})
+    if selector.get("app.kubernetes.io/name") != TRAFFIC_DEPLOYMENT or any(
+        labels.get(key) != label for key, label in selector.items()
+    ):
+        raise RuntimeError("Traffic deployment selector is not the expected Lab workload")
+    replicas = spec.get("replicas", 1)
+    if not isinstance(replicas, int) or replicas < 0:
+        raise RuntimeError("Traffic deployment replica count is invalid")
+    return value
+
+
+def traffic_profile(deployment):
+    containers = deployment.get("spec", {}).get("template", {}).get("spec", {}).get("containers", [])
+    matches = [item for item in containers if item.get("name") == TRAFFIC_DEPLOYMENT]
+    if len(matches) != 1:
+        raise RuntimeError("Expected one bounded traffic-generator container")
+    container = matches[0]
+    runtime_refs = [item.get("configMapRef", {}).get("name")
+                    for item in container.get("envFrom", [])]
+    if runtime_refs != ["lab-runtime"]:
+        raise RuntimeError("Traffic generator is not configured from the bounded Lab runtime profile")
+    runtime = traffic_kubectl("get", "configmap", "lab-runtime", "-n", LAB_NAMESPACE, "-o", "json")
+    values = runtime.get("data", {})
+    explicit = {item.get("name"): item.get("value") for item in container.get("env", [])
+                if item.get("name") in {"REQUESTS_PER_SECOND", "MAX_INFLIGHT"}}
+    try:
+        rate = int(explicit["REQUESTS_PER_SECOND"] if "REQUESTS_PER_SECOND" in explicit
+                   else values["REQUESTS_PER_SECOND"])
+        inflight = int(explicit["MAX_INFLIGHT"] if "MAX_INFLIGHT" in explicit
+                       else values["MAX_INFLIGHT"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise RuntimeError("Traffic generator request bounds are missing or invalid") from error
+    if not 1 <= rate <= TRAFFIC_MAX_RPS or not 1 <= inflight <= TRAFFIC_MAX_INFLIGHT:
+        raise RuntimeError("Traffic generator exceeds the approved Lab request-rate or concurrency bound")
+    return {"requests_per_second": rate, "max_inflight": inflight}
+
+
+def traffic_observation(check_permissions=True):
+    if check_permissions:
+        checks = (
+            ("get", "deployments", TRAFFIC_DEPLOYMENT),
+            ("get", "configmaps", "lab-runtime"),
+            ("update", "deployments/scale", TRAFFIC_DEPLOYMENT),
+        )
+        for verb, resource, name in checks:
+            result = traffic_kubectl(
+                "auth", "can-i", verb, resource, "--resource-name=" + name,
+                "-n", LAB_NAMESPACE, raw=True,
+            )
+            if str(result).strip().lower() != "yes":
+                raise RuntimeError(f"Runner lacks required read/scale permission for {resource}/{name}")
+    deployment = traffic_deployment()
+    spec = deployment["spec"]
+    status = deployment.get("status", {})
+    if spec.get("replicas", 1) != 0 or any(
+        status.get(key, 0) for key in ("replicas", "readyReplicas", "availableReplicas", "updatedReplicas")
+    ):
+        raise RuntimeError("Traffic generator must be fully stopped before a request-driven fault")
+    profile = traffic_profile(deployment)
+    metadata = deployment["metadata"]
+    return {
+        "namespace": LAB_NAMESPACE,
+        "deployment": TRAFFIC_DEPLOYMENT,
+        "uid": metadata.get("uid"),
+        "resource_version": metadata.get("resourceVersion"),
+        "generation": metadata.get("generation", 0),
+        "previous_replicas": spec.get("replicas", 1),
+        "bounded_profile": profile,
+    }
+
+
+def traffic_scale(replicas, current_replicas, resource_version):
+    return traffic_kubectl(
+        "scale", "deployment/" + TRAFFIC_DEPLOYMENT,
+        "--replicas=" + str(replicas), "--current-replicas=" + str(current_replicas),
+        "--resource-version=" + str(resource_version), "-n", LAB_NAMESPACE, raw=True,
+    )
+
+
+def prepare_owned_traffic(args, root, owner):
+    observation = traffic_observation()
+    record = {**observation, "owner": owner, "status": "prepared",
+              "desired_replicas": TRAFFIC_REPLICAS, "prepared_at": now()}
+    exclusive(root / "traffic-generator.json", record)
+    return record
+
+
+def traffic_readiness(args, root, record):
+    deadline = time.monotonic() + TRAFFIC_START_TIMEOUT
+    while time.monotonic() < deadline:
+        current = traffic_deployment()
+        metadata = current.get("metadata", {})
+        status = current.get("status", {})
+        if metadata.get("uid") != record["uid"]:
+            raise RuntimeError("Traffic deployment identity changed during the owned run")
+        if current.get("spec", {}).get("replicas") != TRAFFIC_REPLICAS:
+            raise RuntimeError("Traffic deployment replica count changed during startup")
+        if metadata.get("generation") != record.get("applied_generation"):
+            raise RuntimeError("Traffic deployment was edited during startup")
+        if status.get("availableReplicas", 0) == TRAFFIC_REPLICAS and status.get("readyReplicas", 0) == TRAFFIC_REPLICAS:
+            record["status"] = "started"
+            record["ready_at"] = now()
+            save(root / "traffic-generator.json", record)
+            return
+        time.sleep(2)
+    raise TimeoutError("Traffic generator did not become ready within the bounded startup window")
+
+
+def start_owned_traffic(args, root, owner, control):
+    if control.get("run", {}).get("run_id") != owner:
+        raise RuntimeError("Traffic can start only after the controller acknowledges this run owner")
+    path = root / "traffic-generator.json"
+    record = read(path)
+    if record.get("owner") != owner or record.get("status") != "prepared":
+        raise RuntimeError("Traffic startup journal does not match the owned Lab run")
+    record.update(status="starting", controller_owner_confirmed=True, start_attempted_at=now())
+    save(path, record)
+    traffic_scale(TRAFFIC_REPLICAS, record["previous_replicas"], record["resource_version"])
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline:
+        current = traffic_deployment()
+        metadata = current.get("metadata", {})
+        if metadata.get("uid") != record["uid"]:
+            raise RuntimeError("Traffic deployment identity changed during scale-up")
+        if current.get("spec", {}).get("replicas") == TRAFFIC_REPLICAS:
+            generation = metadata.get("generation", 0)
+            if generation <= record["generation"]:
+                raise RuntimeError("Traffic deployment generation did not advance after scale-up")
+            record["applied_generation"] = generation
+            save(path, record)
+            traffic_readiness(args, root, record)
+            return record
+        time.sleep(1)
+    raise TimeoutError("Traffic generator scale-up was not observed")
+
+
+def restore_owned_traffic(args, root, owner):
+    path = root / "traffic-generator.json"
+    if not path.exists():
+        return {"status": "not_requested"}
+    record = read(path)
+    if record.get("owner") != owner:
+        raise RuntimeError("Traffic startup journal belongs to a different Lab run")
+    if record.get("status") == "prepared":
+        result = {"status": "not_started", "owner": owner, "restored": True}
+        save(root / "traffic-generator-recovery.json", result)
+        return result
+    current = traffic_deployment()
+    metadata = current.get("metadata", {})
+    spec = current.get("spec", {})
+    if metadata.get("uid") != record.get("uid"):
+        raise RuntimeError("Traffic deployment identity changed; preserving current replicas")
+    replicas = spec.get("replicas", 1)
+    previous = record["previous_replicas"]
+    if replicas == previous:
+        result = {"status": "already_restored", "owner": owner, "restored": True,
+                  "previous_replicas": previous}
+        record["status"] = "restored"
+        save(path, record)
+        save(root / "traffic-generator-recovery.json", result)
+        return result
+    if replicas != record.get("desired_replicas"):
+        raise RuntimeError("Traffic replicas changed during the run; preserving the operator's value")
+    expected_generation = record.get("applied_generation")
+    if expected_generation is None:
+        expected_generation = record.get("generation", 0) + 1
+    if metadata.get("generation") != expected_generation:
+        raise RuntimeError("Traffic deployment was edited after runner scale-up; preserving the current value")
+    traffic_scale(previous, replicas, metadata.get("resourceVersion"))
+    restore_generation = expected_generation + 1
+    deadline = time.monotonic() + TRAFFIC_START_TIMEOUT
+    while time.monotonic() < deadline:
+        current = traffic_deployment()
+        metadata = current.get("metadata", {})
+        status = current.get("status", {})
+        if metadata.get("uid") != record.get("uid"):
+            raise RuntimeError("Traffic deployment identity changed during scale-down")
+        if current.get("spec", {}).get("replicas") != previous:
+            raise RuntimeError("Traffic deployment did not restore its previous replica count")
+        if metadata.get("generation") != restore_generation:
+            raise RuntimeError("Traffic deployment was edited during scale-down")
+        if all(status.get(key, 0) == 0 for key in ("replicas", "readyReplicas", "availableReplicas")):
+            result = {"status": "restored", "owner": owner, "restored": True,
+                      "previous_replicas": previous, "restored_at": now()}
+            record["status"] = "restored"
+            save(path, record)
+            save(root / "traffic-generator-recovery.json", result)
+            return result
+        time.sleep(2)
+    raise TimeoutError("Traffic generator did not stop after restoring its previous replica count")
+
+
+def preflight(args, root, require_owned=True, traffic_required=False):
     result = {"at": now(), "model_config": configuration(args.fcapsule), "lab_node": args.lab_node,
               "lab": args.lab, "prometheus": args.prometheus, "fcapsule": args.fcapsule}
     data = snapshot(args, root, "preflight-sources")
@@ -196,6 +416,8 @@ def preflight(args, root, require_owned=True):
     baseline_config(data)
     status = request(args.lab + "/api/status")
     result["owned_runs_supported"] = bool(status.get("capabilities", {}).get("owned_runs"))
+    if traffic_required:
+        result["traffic_generator"] = traffic_observation()
     result["baseline_alerts"] = firing(args.prometheus)
     save(root / "preflight.json", result)
     if require_owned and not result["owned_runs_supported"]:
@@ -540,10 +762,30 @@ def await_assessment(record, root, seconds=DEFAULT_ASSESSMENT_TIMEOUT, *, allow_
 
 
 def recover_owned(args, root, owner):
-    state = request(args.lab + "/api/status")
+    try:
+        state = request(args.lab + "/api/status")
+    except BaseException as status_error:
+        try:
+            restore_owned_traffic(args, root, owner)
+        except BaseException as traffic_error:
+            save(root / "traffic-generator-recovery.json", {
+                "status": "failed", "owner": owner,
+                "error": f"{type(traffic_error).__name__}: {traffic_error}",
+            })
+        raise status_error
     active = state.get("active")
     if active and active.get("run_id") != owner:
         raise RuntimeError("Different run became active; no recovery write performed")
+    traffic_recovery = None
+    traffic_error = None
+    try:
+        traffic_recovery = restore_owned_traffic(args, root, owner)
+    except BaseException as error:
+        traffic_error = error
+        save(root / "traffic-generator-recovery.json", {
+            "status": "failed", "owner": owner,
+            "error": f"{type(error).__name__}: {error}",
+        })
     recovery_response = None
     if active:
         recovery_response = request(args.lab + "/api/recover", {"expected_run_id": owner})
@@ -570,9 +812,12 @@ def recover_owned(args, root, owner):
         "controller_lease_released": True,
         "baseline_config_restored": True,
         "recovery_response": recovery_response,
+        "traffic_generator": traffic_recovery,
         "runtime_readiness": {"services_reachable": reachable, "pods_ready": pods_ready},
         "readiness_note": "Diagnosis may proceed from captured evidence; the next fault remains gated on a fully ready baseline.",
     })
+    if traffic_error:
+        raise RuntimeError("Lab fault recovered, but traffic-generator restoration failed; preserve the run and inspect its recovery record") from traffic_error
 
 
 def run_workload(args, case, root, config):
@@ -602,14 +847,23 @@ def run_workload(args, case, root, config):
         raise RuntimeError("New alert appeared during healthy baseline; no injection performed")
     record["started_at"] = now()
     duration = DEMO_CASES.get(case, {}).get("duration_seconds", 180)
+    if scenario_uses_traffic(scenario) and not 1 <= duration <= 180:
+        raise RuntimeError("Request-driven traffic duration exceeds the 180-second Lab bound")
     save(root / "run.json", record)
     try:
+        if scenario_uses_traffic(scenario):
+            traffic = prepare_owned_traffic(args, root, owner)
+            record["traffic_generator"] = traffic
+            save(root / "run.json", record)
         # Persist ownership before the single POST, including ambiguous failures.
         exclusive(root / "injection-attempt.json", {"at": now(), "owner": owner})
         record["control"] = request(args.lab + "/api/scenarios/" + scenario + "/start",
                                     {"duration_seconds": duration, "request_id": owner})
         if record["control"].get("run", {}).get("run_id") != owner:
             raise RuntimeError("Controller did not acknowledge run ownership")
+        if scenario_uses_traffic(scenario):
+            record["traffic_generator"] = start_owned_traffic(args, root, owner, record["control"])
+            save(root / "run.json", record)
         deadline = time.monotonic() + duration
         seen_at = None
         while time.monotonic() < deadline:
@@ -750,7 +1004,7 @@ def run_suite(args):
         wait_for_lab_quiet(args)
         summary["current"] = {"phase": "preflight"}
         save(root / "suite.json", summary)
-        checked = preflight(args, root)
+        checked = preflight(args, root, traffic_required=any(case_uses_traffic(case) for case in selected))
         for case in selected:
             print(f"Starting demo: {case}", flush=True)
             summary["current"] = {"case": case, "phase": "starting_case"}

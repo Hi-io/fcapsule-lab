@@ -30,7 +30,7 @@ an automatic retry.
 | `downstream-latency` | Successful inventory work around 350 ms pushes checkout latency above the alert threshold; retries are not expected | `LabCheckoutLatencyHigh` | Fixed bounded delay; no external dependency. |
 | `schema-drift` | Query revision v2 references `reserved_quantity`, which must be absent from the active table; correlate SQL 1054 with the applied ConfigMap revision | `LabInventoryQueryFailures` | A read-only schema precondition blocks an invalid run if the column already exists; narrow ConfigMap update and guarded restoration. |
 | `dependency-route` | Active URL targets port 8099 while the Kubernetes Service exposes 8081 | `LabOrdersDependencyTransportFailures` | Narrow ConfigMap update and guarded restoration. |
-| `timeout-budget` | Caller timeout of 50 ms is shorter than the dependency's 250 ms work budget | `LabOrdersDependencyTimeouts` | Narrow ConfigMap update; bounded request rate and lease. |
+| `timeout-budget` | Caller timeout of 50 ms is shorter than the dependency's 250 ms work budget | `LabOrdersDependencyTimeouts` | Narrow ConfigMap update; runner starts the stopped, bounded traffic generator only after this run is acknowledged as owned, then restores its observed replica count during recovery. |
 | `signing-key-skew` | Caller and dependency key identifiers disagree; explain authorization errors without exposing key material | `LabOrdersDependencyAuthorizationFailures` | Uses non-secret key IDs only. |
 | `response-schema-skew` | Checkout expects response v2 while Inventory emits v1 | `LabOrdersDependencySchemaRejected` | Narrow ConfigMap update and guarded restoration. |
 | `metrics-service-label-drift` | ServiceMonitor selector no longer matches the Service label while application Pods remain healthy | `LabApplicationMetricsDiscoveryMissing` | Changes only the selected Service label and restores its captured baseline. |
@@ -86,8 +86,14 @@ Healthy services and pod readiness are required before injection and after recov
 During an owned fault, degraded application health is recorded as evidence, not
 treated as node pressure. Ownership, placement, fresh measured memory and the
 768 MiB safety floor remain enforced throughout the fault.
-The Lab controller and workload leases remain independent safeguards. No new Pods,
-OOM cases, CPU stress, traffic scaling or shared-source outage is introduced.
+The Lab controller and workload leases remain independent safeguards. The traffic
+generator stays at zero replicas by default. For `timeout-budget` only, the runner
+preflights its read/scale permissions, stopped replica/readiness state and 25 RPS / 12
+in-flight profile, then scales to one replica only after the controller acknowledges
+the owned scenario. Its `finally`/recovery path restores the observed prior replica
+count with UID, generation, replica and resource-version guards. This does not run for
+worker, discovery, MySQL connection, or other scenarios. No new Pods outside this
+bounded Lab deployment, OOM cases, CPU stress or shared-source outage is introduced.
 
 The generic `deploy_kubernetes.py` applies all manifests, which can replace local
 placement or scrape customization. For this change a maintainer-coordinated update of

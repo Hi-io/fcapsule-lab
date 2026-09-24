@@ -16,14 +16,16 @@ workloads:
 | `mysql-exporter` | Official Prometheus MySQL exporter | 100m CPU / 96 MiB |
 | `inventory-api` | MySQL-backed reservation service | 400m CPU / 256 MiB |
 | `orders-api` | Checkout orchestration and retry behavior | 400m CPU / 192 MiB |
-| `traffic-generator` | Continuous workload configured at 25 requests/second, capped at 12 in flight | 300m CPU / 128 MiB |
+| `traffic-generator` | Opt-in checkout workload at 25 requests/second, capped at 12 in flight | 300m CPU / 128 MiB |
 | `lab-worker` | Background jobs and resource incidents | 500m CPU / 192 MiB (effective `-k` limit) |
 | `lab-control` | Scenario UI and recovery controller | 150m CPU / 128 MiB |
 
-The baseline schedules 25 checkout requests per second and admits no more than 12
-concurrently; when all slots are busy, the generator sheds new attempts instead of
-building a request queue. That concurrency cap is 30% of MySQL's configured 40-session
-ceiling even if every active checkout owns a database session. Twelve is also an
+The traffic generator is stopped by default to avoid normal DNS-induced false alerts.
+The operator runner starts it only for an owned `timeout-budget` scenario, using the
+bounded profile of 25 checkout requests per second and at most 12 in flight. When all
+slots are busy, it sheds new attempts instead of building a request queue. That
+concurrency cap is 30% of MySQL's configured 40-session ceiling even if every active
+checkout owns a database session. Twelve is also an
 explicit runtime safety ceiling: if a stale or edited ConfigMap requests a higher
 `MAX_INFLIGHT`, the generator uses 12, emits a startup warning, and exposes both
 configured and effective limits in its health response and metrics. A healthy completed
