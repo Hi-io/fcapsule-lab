@@ -263,6 +263,16 @@ def matching_signals(state, expected, started):
     return matches
 
 
+def select_episode_signal(matches):
+    """Choose the newest matching signal only when all matches share one episode."""
+    if not matches:
+        return None
+    episodes = {episode.get("episode_id") for episode, _signal in matches}
+    if len(episodes) != 1:
+        raise RuntimeError("Multiple fresh episodes match; no automatic episode choice")
+    return max(matches, key=lambda pair: pair[1].get("created_at") or pair[1].get("started_at") or "")
+
+
 def retain_assessment(root, value):
     folder = root / "raw-assessments"
     folder.mkdir(exist_ok=True)
@@ -390,11 +400,10 @@ def run_workload(args, case, root, config):
             if seen_at is not None:
                 pairs = matching_signals(request(args.fcapsule + "/api/state"), expected, record["started_at"])
                 record["candidate_signals"] = [{"episode_id": e["episode_id"], "incident_id": s["incident_id"]} for e, s in pairs]
-                if len(pairs) == 1:
-                    episode, signal = pairs[0]
+                selected = select_episode_signal(pairs)
+                if selected:
+                    episode, signal = selected
                     record.update(episode_id=episode["episode_id"], incident_id=signal["incident_id"])
-                elif len(pairs) > 1:
-                    raise RuntimeError("Multiple fresh signals match; no automatic episode choice")
             save(root / "run.json", record)
             if seen_at is not None and time.monotonic() - seen_at >= 30 and record.get("episode_id"):
                 break

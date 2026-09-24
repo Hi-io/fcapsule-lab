@@ -345,6 +345,24 @@ class DemoRunnerTests(unittest.TestCase):
         signal["report_ready"] = 0
         self.assertEqual(runner.matching_signals(state, "LabInventoryQueryFailures", "2026-09-23T12:00:00Z"), [])
 
+    def test_repeated_fresh_signals_in_one_episode_select_the_newest(self):
+        episode = {"episode_id": "episode-1"}
+        matches = [
+            (episode, {"incident_id": "incident-old", "created_at": "2026-09-23T12:00:10Z"}),
+            (episode, {"incident_id": "incident-new", "created_at": "2026-09-23T12:00:40Z"}),
+        ]
+
+        self.assertEqual(runner.select_episode_signal(matches), matches[1])
+
+    def test_matching_signals_across_episodes_stay_ambiguous(self):
+        matches = [
+            ({"episode_id": "episode-1"}, {"incident_id": "incident-1", "created_at": "2026-09-23T12:00:10Z"}),
+            ({"episode_id": "episode-2"}, {"incident_id": "incident-2", "created_at": "2026-09-23T12:00:40Z"}),
+        ]
+
+        with self.assertRaisesRegex(RuntimeError, "Multiple fresh episodes"):
+            runner.select_episode_signal(matches)
+
     def test_ambiguous_injection_is_not_retried_and_owned_recovery_runs(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

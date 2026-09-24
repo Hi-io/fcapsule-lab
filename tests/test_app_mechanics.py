@@ -11,7 +11,7 @@ import pymysql
 
 from app.inventory import InventoryState as PostgresInventoryState
 from app.mysql_inventory import InventoryState as MysqlInventoryState
-from app.orders import OrdersState
+from app.orders import OrdersState, handler as orders_handler
 from app.worker import WorkerState, _validated_import_records, decode_job
 
 
@@ -107,6 +107,16 @@ class ApplicationMechanicsTests(unittest.TestCase):
         state.logger = Mock()
         state.set_mode("normal", run_id=RUN_ID)
         self.assertEqual(state.logger.write.call_args.kwargs["run_id"], RUN_ID)
+        self.assertEqual(state.status()["run_id"], RUN_ID)
+
+        handler_type = orders_handler(state)
+        request = handler_type.__new__(handler_type)
+        request.path = "/control/scenario"
+        request.body_json = Mock(return_value={"mode": "normal", "run_id": RUN_ID})
+        request.send_json = Mock()
+        request.do_POST()
+        self.assertEqual(request.send_json.call_args.args[1]["run_id"], RUN_ID)
+
         with self.assertRaises(ValueError):
             state.set_mode("normal", run_id="not-a-run-id")
 
