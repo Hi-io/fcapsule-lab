@@ -71,14 +71,19 @@ alert hold before judging the result.
 ## Execution Protocol
 
 1. Verify real node `MemAvailable`; do not infer headroom from allocatable memory.
-2. Hold healthy traffic before injecting exactly one leased scenario.
-3. Record the intervention only in the ignored evaluator artifacts.
-4. Wait for the scenario-specific symptom alert and retain a post-alert evidence window.
-5. Recover the workload and wait for alert windows to clear.
-6. Capture one FCAPSule episode and its immutable `input_fingerprint`.
-7. Run each candidate model against that same episode; reject comparisons whose
+2. Wait out the 16-minute incident-join window for recent signals in the target app
+   scope; this covers same-family joins across resources and same-resource joins.
+   If retained state cannot identify the target app ID, conservatively use all
+   retained app signals. Record the chosen scope in `episode-isolation.json`.
+3. Hold healthy traffic before injecting exactly one leased scenario.
+4. Record the intervention only in the ignored evaluator artifacts.
+5. Wait for the scenario-specific symptom alert and retain a post-alert evidence window.
+6. Recover the workload and wait for alert windows to clear.
+7. Capture one FCAPSule episode and its immutable `input_fingerprint`. Reject a
+   captured episode containing any pre-run signal before requesting an assessment.
+8. Run each candidate model against that same episode; reject comparisons whose
    fingerprints differ.
-8. Restore the original FCAPSule model setting even after interruption.
+9. Restore the original FCAPSule model setting even after interruption.
 
 The healthy baseline schedules 25 checkouts per second and caps concurrency at 12.
 The generator drops attempts when all slots are occupied instead of queueing them. A

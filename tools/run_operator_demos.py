@@ -37,6 +37,7 @@ CONFIG_KEYS = ("provider", "model", "max_tokens", "max_total_tokens", "max_promp
 MAXIMUMS = {"max_tokens": 3600, "max_total_tokens": 12000, "max_prompt_tokens": 3200, "max_checks": 1}
 DEFAULT_ASSESSMENT_TIMEOUT = 360
 ASSESSMENT_REVISION_GRACE = 300
+MIN_EPISODE_QUIET_SECONDS = 960
 SIGNALS = {**SCENARIOS, **DISCOVERY_SCENARIOS}
 SIGNALS["mysql-exporter-scrape-path"] = {"expected_alert": media.ALERT}
 ALL_RUN_CASES = [*SCENARIOS, *DISCOVERY_SCENARIOS, "query-rollout-history"]
@@ -578,6 +579,7 @@ def run_workload(args, case, root, config):
     scenario = DEMO_CASES.get(case, {}).get("scenario", case)
     expected = SIGNALS[scenario]["expected_alert"]
     acceptable_primary_alerts = SIGNALS[scenario].get("acceptable_primary_alerts", [expected])
+    episode_isolation = ensure_fresh_episode_context(args, root, scenario)
     before = snapshot(args, root, "before")
     safety(before, args.lab_node)
     baseline_config(before)
@@ -591,7 +593,8 @@ def run_workload(args, case, root, config):
     record = {"case": case, "scenario": scenario, "expected_alert": expected, "owner": owner, "baseline_at": now(),
               "acceptable_primary_alerts": acceptable_primary_alerts,
               "model_config": config, "fcapsule": args.fcapsule, "lab": args.lab, "prometheus": args.prometheus,
-              "outcome": "starting", "samples": [], "observed_alerts": []}
+              "outcome": "starting", "samples": [], "observed_alerts": [],
+              "episode_isolation": episode_isolation}
     save(root / "run.json", record)
     time.sleep(args.baseline)
     safety(snapshot(args, root, "baseline-end"), args.lab_node)
@@ -623,12 +626,21 @@ def run_workload(args, case, root, config):
                 save(root / "alert.json", matches)
                 record["media_capture"] = capture(args, root, case)
             if seen_at is not None:
-                pairs = matching_signals(request(args.fcapsule + "/api/state"), acceptable_primary_alerts, record["started_at"])
+                state = request(args.fcapsule + "/api/state")
+                pairs = matching_signals(state, acceptable_primary_alerts, record["started_at"])
                 record["candidate_signals"] = [{"episode_id": e["episode_id"], "incident_id": s["incident_id"]} for e, s in pairs]
                 selected = select_episode_signal(pairs)
                 if selected:
                     episode, signal = selected
                     record.update(episode_id=episode["episode_id"], incident_id=signal["incident_id"])
+                    verification = verify_fresh_episode_context(state, episode["episode_id"], record["started_at"])
+                    record["episode_isolation"]["capture_verification"] = verification
+                    record["episode_isolation"]["captured_episode_id"] = episode["episode_id"]
+                    save(root / "episode-isolation.json", record["episode_isolation"])
+                    if verification["status"] != "isolated":
+                        record["outcome"] = "contaminated_episode"
+                        save(root / "run.json", record)
+                        raise RuntimeError("Captured episode is not fresh; diagnosis request suppressed")
             save(root / "run.json", record)
             if seen_at is not None and time.monotonic() - seen_at >= 30 and record.get("episode_id"):
                 break
@@ -637,7 +649,9 @@ def run_workload(args, case, root, config):
             time.sleep(10)
         record["outcome"] = "captured" if record.get("episode_id") else "capture_incomplete"
     except BaseException as error:
-        record.update(outcome="incomplete", error=f"{type(error).__name__}: {error}")
+        if record.get("outcome") != "contaminated_episode":
+            record["outcome"] = "incomplete"
+        record["error"] = f"{type(error).__name__}: {error}"
         raise
     finally:
         try:
@@ -664,16 +678,28 @@ def run_workload(args, case, root, config):
 def run_exporter(args, root, config):
     # The existing probe owns its guarded patch, watchdog and restoration. Do not
     # duplicate that fault or grant the controller more Kubernetes permissions.
+    episode_isolation = ensure_fresh_episode_context(args, root, "mysql-exporter-scrape-path")
     probe = SimpleNamespace(**vars(args))
     probe.out = root
     media.run(probe)
     record = read(root / "run.json")
+    state = request(args.fcapsule + "/api/state")
+    verification = verify_fresh_episode_context(state, record.get("episode_id", ""), record["started_at"])
+    episode_isolation["capture_verification"] = verification
+    episode_isolation["captured_episode_id"] = record.get("episode_id")
+    save(root / "episode-isolation.json", episode_isolation)
+    if verification["status"] != "isolated":
+        record["outcome"] = "contaminated_episode"
+        record["episode_isolation"] = episode_isolation
+        save(root / "run.json", record)
+        raise RuntimeError("Captured episode is not fresh; diagnosis request suppressed")
     observed = read(root / "alert.json")
     recovery = read(root / "recovery.json")
     record.update(case="exporter-scrape", scenario="mysql-exporter-scrape-path", model_config=config,
                   expected_alert=media.ALERT, observed_alerts=observed,
                   alert_observed=any(item.get("labels", {}).get("alertname") == media.ALERT for item in observed),
-                  recovery=recovery, recovery_confirmed=bool(recovery.get("restored")))
+                  recovery=recovery, recovery_confirmed=bool(recovery.get("restored")),
+                  episode_isolation=episode_isolation)
     save(root / "run.json", record)
     record["logs"] = collect_logs(root, record["started_at"])
     record["retained_metrics"] = retain_metrics(args, root, "exporter-scrape", record["started_at"])
@@ -754,7 +780,8 @@ def run_suite(args):
                         "assessment_status": record.get("assessment_status"), "diagnostic_score": record.get("diagnostic_score"),
                         "diagnostic_label": record.get("diagnostic_label"),
                         "pipeline_score": record.get("pipeline_score"),
-                        "observability_score": record.get("observability_score"), "usage": record.get("usage")})
+                        "observability_score": record.get("observability_score"), "usage": record.get("usage"),
+                        "episode_isolation": record.get("episode_isolation")})
                     if case == "query-rollout-history" and ordinal == 2:
                         prior = read(history_round(root / case, 1) / "run.json")
                         history_result = score_history_reuse(
@@ -771,7 +798,9 @@ def run_suite(args):
                     case_failed = True
                     summary["rounds"].append({"case": case, "round": ordinal, "path": str(round_dir),
                         "outcome": "interrupted" if not isinstance(error, Exception) else "failed",
-                        "error_type": type(error).__name__, "error": str(error)[:500]})
+                        "error_type": type(error).__name__, "error": str(error)[:500],
+                        "episode_isolation": (read(round_dir / "episode-isolation.json")
+                                              if (round_dir / "episode-isolation.json").exists() else None)})
                     summary["current"] = {"case": case, "round": ordinal,
                         "phase": "interrupted" if not isinstance(error, Exception) else "failed"}
                     save(root / "suite.json", summary)
@@ -1074,6 +1103,143 @@ def history_wait_seconds(state, app_id, quiet_seconds, timestamp):
     latest = max((datetime.fromisoformat(s["started_at"].replace("Z", "+00:00")).timestamp()
                   for s in members if s.get("started_at")), default=0)
     return max(0, latest + quiet_seconds - timestamp)
+
+
+def target_service_app_ids(state, target_service):
+    aliases = {"lab-worker": {"lab-worker", "worker"}}
+    names = aliases.get(target_service, {target_service})
+    return {
+        episode.get("app_id")
+        for episode in state.get("overview", {}).get("episodes", [])
+        if isinstance(episode.get("app_id"), str)
+        and episode["app_id"].rsplit(":", 1)[-1].casefold() in {name.casefold() for name in names}
+    }
+
+
+def episode_isolation_scope(state, target_service):
+    app_ids = target_service_app_ids(state, target_service)
+    if app_ids:
+        return ([(episode, signal) for episode in state["overview"]["episodes"]
+                 if episode.get("app_id") in app_ids for signal in episode.get("signals", [])],
+                "target_app_id", sorted(app_ids))
+    # Without a retained target app id, don't assume another app is unrelated.
+    return ([(episode, signal) for episode in state["overview"]["episodes"]
+             for signal in episode.get("signals", [])], "all_retained_apps_fallback", [])
+
+
+def service_episode_wait_seconds(state, target_service, quiet_seconds, timestamp):
+    """Return the quiet period remaining for the target app, or all apps if unknown."""
+    episodes = state.get("overview", {}).get("episodes")
+    if not isinstance(episodes, list):
+        raise ValueError("FCAPSule state has no retained episode list")
+    members, _scope, _app_ids = episode_isolation_scope(state, target_service)
+    members = [signal for _episode, signal in members]
+    if not members:
+        return 0
+    if any(signal.get("status") == "firing" for signal in members):
+        return quiet_seconds
+    starts = []
+    for signal in members:
+        value = signal.get("started_at")
+        if not value:
+            raise ValueError("Cannot verify episode isolation: a scoped signal has no start time")
+        starts.append(datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp())
+    return max(0, max(starts) + quiet_seconds - timestamp)
+
+
+def ensure_fresh_episode_context(args, root, scenario):
+    oracle = WORKLOAD_ORACLE.get(scenario) or DISCOVERY_ORACLE.get(scenario)
+    target_service = (oracle or {}).get("target_service")
+    if not target_service:
+        raise ValueError(f"No target service is defined for episode isolation: {scenario}")
+    quiet_seconds = max(MIN_EPISODE_QUIET_SECONDS, int(getattr(args, "episode_quiet_seconds", 960)))
+    timeout = getattr(args, "history_wait_timeout", 1200)
+    started = time.monotonic()
+    deadline = started + timeout
+    observations = []
+    last_state = None
+    remaining = 0
+    while True:
+        last_state = request(args.fcapsule + "/api/state")
+        timestamp = time.time()
+        scoped_signals, scope, app_ids = episode_isolation_scope(last_state, target_service)
+        remaining = service_episode_wait_seconds(last_state, target_service, quiet_seconds, timestamp)
+        blocking = []
+        for episode, signal in scoped_signals:
+            started_at = signal.get("started_at")
+            if started_at and (signal.get("status") == "firing" or
+                               datetime.fromisoformat(started_at.replace("Z", "+00:00")).timestamp()
+                               + quiet_seconds > timestamp):
+                blocking.append({"episode_id": episode.get("episode_id"),
+                                 "incident_id": signal.get("incident_id"), "started_at": started_at})
+        observations.append({"at": now(), "remaining_seconds": remaining,
+                             "blocking_signals": blocking})
+        if remaining <= 0:
+            break
+        if time.monotonic() >= deadline:
+            result = {
+                "status": "timed_out",
+                "target_service": target_service,
+                "scope": scope,
+                "app_ids": app_ids,
+                "quiet_seconds": quiet_seconds,
+                "waited_seconds": round(time.monotonic() - started, 1),
+                "observations": observations,
+                "reason": "The selected app scope still has a signal inside the configured join window.",
+            }
+            root.mkdir(parents=True, exist_ok=True)
+            save(root / "episode-isolation.json", result)
+            raise TimeoutError(result["reason"])
+        time.sleep(min(30, remaining, max(0.1, deadline - time.monotonic())))
+
+    prior_signals, scope, app_ids = episode_isolation_scope(last_state, target_service)
+    prior_signals = [
+        {"episode_id": episode.get("episode_id"), "incident_id": signal.get("incident_id"),
+         "started_at": signal.get("started_at")}
+        for episode, signal in prior_signals
+    ]
+    result = {
+        "status": "ready",
+        "target_service": target_service,
+        "scope": scope,
+        "app_ids": app_ids,
+        "quiet_seconds": quiet_seconds,
+        "waited_seconds": round(time.monotonic() - started, 1),
+        "prior_episode_ids": sorted({item["episode_id"] for item in prior_signals if item.get("episode_id")}),
+        "prior_signal_count": len(prior_signals),
+        "latest_prior_signal_at": max((item["started_at"] for item in prior_signals if item.get("started_at")),
+                                       default=None),
+        "observations": observations,
+        "reason": "No signal in the selected app scope can join the new incident within the configured window.",
+    }
+    root.mkdir(parents=True, exist_ok=True)
+    save(root / "episode-isolation.json", result)
+    return result
+
+
+def verify_fresh_episode_context(state, episode_id, started_at):
+    overview = state.get("overview")
+    if not isinstance(overview, dict) or not isinstance(overview.get("episodes"), list):
+        return {"status": "unverifiable", "reason": "FCAPSule state has no retained episode list."}
+    episode = next((item for item in overview["episodes"]
+                    if item.get("episode_id") == episode_id), None)
+    if episode is None:
+        return {"status": "unverifiable", "reason": "Captured episode is absent from current FCAPSule state."}
+    cutoff = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+    prior = []
+    for signal in episode.get("signals", []):
+        value = signal.get("started_at")
+        if not value:
+            return {"status": "unverifiable", "reason": "Captured episode contains a signal with no start time."}
+        if datetime.fromisoformat(value.replace("Z", "+00:00")) < cutoff:
+            prior.append(signal.get("incident_id"))
+    return {
+        "status": "contaminated" if prior else "isolated",
+        "prior_incident_ids": [item for item in prior if item],
+        "signal_count": len(episode.get("signals", [])),
+        "reason": "Captured episode contains pre-run incidents." if prior else
+                  "All retained signals in the captured episode began during this run.",
+    }
 
 
 def wait_history_gap(args, root):

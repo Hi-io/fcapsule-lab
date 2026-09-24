@@ -508,6 +508,139 @@ class DemoRunnerTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "Multiple fresh episodes"):
             runner.select_episode_signal(matches)
 
+    def test_episode_wait_is_scoped_to_target_service_and_join_window(self):
+        state = {"overview": {"episodes": [
+            {"episode_id": "orders", "app_id": "go15:fcapsule-lab:orders-api", "signals": [
+                {"incident_id": "orders-recent", "started_at": "2026-09-23T12:00:00Z", "status": "resolved"}]},
+            {"episode_id": "inventory", "app_id": "go15:fcapsule-lab:inventory-api", "signals": [
+                {"incident_id": "inventory-newer", "started_at": "2026-09-23T12:04:55Z", "status": "resolved"}]},
+            {"episode_id": "worker", "app_id": "go15:fcapsule-lab:worker", "signals": [
+                {"incident_id": "worker-old", "started_at": "2026-09-23T11:00:00Z", "status": "resolved"}]},
+        ]}}
+        at = datetime.fromisoformat("2026-09-23T12:05:00+00:00").timestamp()
+
+        self.assertEqual(runner.service_episode_wait_seconds(state, "orders-api", 960, at), 660)
+        self.assertEqual(runner.service_episode_wait_seconds(state, "lab-worker", 960, at), 0)
+        signals, scope, app_ids = runner.episode_isolation_scope(state, "orders-api")
+        self.assertEqual(scope, "target_app_id")
+        self.assertEqual(app_ids, ["go15:fcapsule-lab:orders-api"])
+        self.assertEqual([signal[1]["incident_id"] for signal in signals], ["orders-recent"])
+
+    def test_unknown_target_app_scope_falls_back_to_all_retained_signals(self):
+        state = {"overview": {"episodes": [{
+            "episode_id": "inventory", "app_id": "go15:fcapsule-lab:inventory-api", "signals": [
+                {"incident_id": "inventory-recent", "started_at": "2026-09-23T12:04:55Z", "status": "resolved"}]
+        }]}}
+        at = datetime.fromisoformat("2026-09-23T12:05:00+00:00").timestamp()
+
+        self.assertEqual(runner.service_episode_wait_seconds(state, "orders-api", 960, at), 955)
+        signals, scope, app_ids = runner.episode_isolation_scope(state, "orders-api")
+        self.assertEqual(scope, "all_retained_apps_fallback")
+        self.assertEqual(app_ids, [])
+        self.assertEqual([signal[1]["incident_id"] for signal in signals], ["inventory-recent"])
+
+    def test_active_target_incident_requires_full_quiet_window(self):
+        state = {"overview": {"episodes": [{
+            "episode_id": "orders", "app_id": "go15:fcapsule-lab:orders-api", "signals": [
+                {"incident_id": "orders-active", "started_at": "2026-09-23T11:00:00Z", "status": "firing"}]
+        }]}}
+        self.assertEqual(runner.service_episode_wait_seconds(state, "orders-api", 960, 1790165100), 960)
+
+    def test_episode_isolation_skips_wait_for_old_target_signal_and_records_decision(self):
+        state = {"overview": {"episodes": [
+            {"episode_id": "old-orders", "app_id": "go15:fcapsule-lab:orders-api", "signals": [
+                {"incident_id": "old-order-alert", "started_at": "2026-09-23T11:00:00Z", "status": "resolved"}]},
+            {"episode_id": "recent-inventory", "app_id": "go15:fcapsule-lab:inventory-api", "signals": [
+                {"incident_id": "unrelated-alert", "started_at": "2026-09-23T12:04:55Z", "status": "resolved"}]},
+        ]}}
+        args = SimpleNamespace(fcapsule="http://product", episode_quiet_seconds=60)
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(runner, "request", return_value=state) as api, \
+             patch.object(runner.time, "sleep") as sleep:
+            result = runner.ensure_fresh_episode_context(args, Path(directory), "dependency-route")
+
+            self.assertEqual(result["status"], "ready")
+            self.assertEqual(result["target_service"], "orders-api")
+            self.assertEqual(result["scope"], "target_app_id")
+            self.assertEqual(result["app_ids"], ["go15:fcapsule-lab:orders-api"])
+            self.assertEqual(result["quiet_seconds"], 960)
+            self.assertEqual(result["prior_signal_count"], 1)
+            self.assertEqual(result["prior_episode_ids"], ["old-orders"])
+            self.assertEqual(result["waited_seconds"], 0)
+            self.assertEqual(api.call_count, 1)
+            sleep.assert_not_called()
+            self.assertEqual(runner.read(Path(directory) / "episode-isolation.json"), result)
+
+    def test_captured_episode_reuse_is_reported_as_contamination(self):
+        state = {"overview": {"episodes": [{
+            "episode_id": "reused", "signals": [
+                {"incident_id": "prior-incident", "started_at": "2026-09-23T11:59:00Z"},
+                {"incident_id": "current-incident", "started_at": "2026-09-23T12:00:01Z"},
+            ]
+        }]}}
+        result = runner.verify_fresh_episode_context(state, "reused", "2026-09-23T12:00:00Z")
+        self.assertEqual(result["status"], "contaminated")
+        self.assertEqual(result["prior_incident_ids"], ["prior-incident"])
+
+        isolated = runner.verify_fresh_episode_context(state, "reused", "2026-09-23T11:59:00Z")
+        self.assertEqual(isolated["status"], "isolated")
+
+    def test_missing_episode_start_time_fails_closed(self):
+        state = {"overview": {"episodes": [{
+            "episode_id": "orders", "app_id": "go15:fcapsule-lab:orders-api", "signals": [{"status": "resolved"}]
+        }]}}
+        with self.assertRaisesRegex(ValueError, "no start time"):
+            runner.service_episode_wait_seconds(state, "orders-api", 960, 1790165100)
+
+    def test_reused_episode_recovers_owned_fault_without_assessment_call(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            args = SimpleNamespace(lab="http://lab", prometheus="http://prom", fcapsule="http://product",
+                                   lab_node="worker-1", baseline=0)
+            fault = sample()
+            fault["at"] = "2026-09-24T00:00:01.000000Z"
+            fault["lab"]["active"] = {"run_id": "owned-run"}
+            current_state = {"overview": {"episodes": [{
+                "episode_id": "reused-episode", "signals": [
+                    {"incident_id": "prior-order-incident", "started_at": "2026-09-23T23:59:00Z"},
+                    {"incident_id": "incident-LabOrdersDependencyTransportFailures-current",
+                     "started_at": "2026-09-24T00:00:01Z", "created_at": "2026-09-24T00:00:02Z",
+                     "app_id": "go15:fcapsule-lab:orders-api", "report_ready": 1},
+                ]
+            }]}}
+            snapshots = iter([sample(), sample(), fault])
+
+            def api(url, payload=None):
+                if url.endswith("/api/status"):
+                    return {"capabilities": {"owned_runs": True}}
+                if url.endswith("/start"):
+                    return {"run": {"run_id": payload["request_id"]}}
+                if url.endswith("/api/state"):
+                    return current_state
+                self.fail(f"Unexpected request: {url}")
+
+            def recover(_args, recovery_root, owner):
+                runner.save(recovery_root / "recovery.json", {"restored": True, "owner": owner})
+
+            with patch.object(runner, "ensure_fresh_episode_context", return_value={"status": "ready"}), \
+                 patch.object(runner, "snapshot", side_effect=lambda *_args, **_kwargs: next(snapshots)), \
+                 patch.object(runner, "safety"), patch.object(runner, "baseline_config"), \
+                 patch.object(runner, "configuration", return_value=config()), \
+                 patch.object(runner, "firing", side_effect=[[], [], [{"labels": {"alertname": "LabOrdersDependencyTransportFailures"}}]]), \
+                 patch.object(runner, "request", side_effect=api), \
+                 patch.object(runner, "recover_owned", side_effect=recover), \
+                 patch.object(runner, "await_assessment") as assess, patch.object(runner.time, "sleep"), \
+                 patch.object(runner, "now", return_value="2026-09-24T00:00:00.000000Z"), \
+                 self.assertRaisesRegex(RuntimeError, "not fresh"):
+                runner.run_workload(args, "dependency-route", root, config())
+
+            run = runner.read(root / "run.json")
+            self.assertEqual(run["outcome"], "contaminated_episode")
+            self.assertTrue(run["recovery_confirmed"])
+            self.assertEqual(run["episode_isolation"]["capture_verification"]["status"], "contaminated")
+            self.assertFalse((root / "diagnostic-score.json").exists())
+            assess.assert_not_called()
+
     def test_ambiguous_injection_is_not_retried_and_owned_recovery_runs(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -515,7 +648,9 @@ class DemoRunnerTests(unittest.TestCase):
             def api(url, payload=None):
                 if payload is None: return {"capabilities": {"owned_runs": True}}
                 raise OSError("POST response lost")
-            with patch.object(runner, "snapshot", return_value=sample()), patch.object(runner, "configuration"), \
+            with patch.object(runner, "snapshot", return_value=sample()), \
+                 patch.object(runner, "ensure_fresh_episode_context", return_value={"status": "ready"}), \
+                 patch.object(runner, "configuration"), \
                  patch.object(runner, "firing", return_value=[]), patch.object(runner, "request", side_effect=api) as calls, \
                  patch.object(runner, "recover_owned") as recover:
                 with self.assertRaises(OSError): runner.run_workload(args, "connection-pressure", root, config())
@@ -634,6 +769,7 @@ class DemoRunnerTests(unittest.TestCase):
                 return {"run": {"run_id": payload["request_id"]}}
 
             with patch.object(runner, "snapshot", side_effect=snapshots), \
+                 patch.object(runner, "ensure_fresh_episode_context", return_value={"status": "ready"}), \
                  patch.object(runner, "safety"), patch.object(runner, "baseline_config"), \
                  patch.object(runner, "configuration", return_value=config()), \
                  patch.object(runner, "firing", return_value=[]), patch.object(runner, "request", side_effect=api), \
