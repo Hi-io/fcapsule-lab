@@ -1,10 +1,11 @@
 # Scenario Operator Guide
 
-The control UI exposes 17 distinct incident scenarios, but only four have been
-qualified for the current live demonstration: `poison-job` (logs),
+The control UI exposes 17 distinct incident scenarios, but only five have been
+qualified for the current live demonstration: `poison-job` and
+`transaction-deadlock` (logs),
 `cpu-saturation` (performance), `response-schema-skew` (configuration), and
 `metrics-service-label-drift` (monitoring discovery). The UI keeps these in
-**Demo track** and collapses the other 13 under
+**Demo track** and collapses the other 12 under
 **Development backlog**. Use [scenario validation](SCENARIO_VALIDATION.md) before
 presenting any deferred case as a successful AI investigation. Fifteen workload
 cases retain the balanced diagnostic benchmark; two monitoring cases exercise

@@ -43,6 +43,7 @@ SCENARIOS = {
     },
     "transaction-deadlock": {
         "title": "Inventory transaction deadlock", "class": "FM", "evidence_group": "logs",
+        "track": "demo",
         "summary": "Two reconciliation paths acquire stock rows in opposite order.",
         "actions": [action("inventory", "deadlock")],
         "expected_alert": "LabInventoryDeadlockVictims",

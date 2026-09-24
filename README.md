@@ -125,8 +125,8 @@ Worker/inventory operations have their own leases; durable import jobs expire af
 five minutes even if the controller is unavailable. This is a single-node test harness,
 not a guarantee against unrelated workloads exhausting the host.
 
-The Lab control UI presents one catalog of 17 scenarios. Four qualified cases appear
-in **Demo track**; the remaining 13 are under **Development backlog**. Fifteen cases
+The Lab control UI presents one catalog of 17 scenarios. Five qualified cases appear
+in **Demo track**; the remaining 12 are under **Development backlog**. Fifteen cases
 form the balanced workload-diagnosis benchmark across logs, metrics and configuration;
 two more exercise Prometheus discovery and scrape-path failures. Being in the catalog
 means a mechanism and expected evidence are defined, not that FCAPSule has already

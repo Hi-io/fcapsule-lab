@@ -75,7 +75,7 @@ class DemoCatalogTests(unittest.TestCase):
         self.assertEqual(catalog["mysql-exporter-scrape-path"]["execution"], "guarded_runner")
         self.assertEqual(catalog["memory-leak"]["resource_profile"], "bounded_memory")
         self.assertEqual({key for key, item in catalog.items() if item["track"] == "demo"},
-                         {"poison-job", "cpu-saturation", "response-schema-skew",
+                         {"poison-job", "transaction-deadlock", "cpu-saturation", "response-schema-skew",
                           "metrics-service-label-drift"})
         self.assertEqual(catalog["timeout-budget"]["track"], "development")
         self.assertEqual(runner.scenario_rounds("mysql-connections"), 1)
