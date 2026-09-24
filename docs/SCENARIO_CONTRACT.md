@@ -12,9 +12,10 @@ the fifteen workload cases below, with two additional monitoring-discovery probe
 The benchmark contains fifteen independent workload mechanisms, balanced by the
 evidence that should carry the diagnosis. The grouping is not an FCAPS classification.
 It describes what an investigator must use to distinguish the root mechanism from
-similar symptoms. The two discovery probes are also first-class operator demos, but
-are kept separate from this legacy workload score because their target is monitoring
-coverage, not an application failure.
+similar symptoms. The two discovery probes are also important evaluation cases, but
+are kept separate from the workload score because their target is monitoring
+coverage, not an application failure. Neither is currently qualified for the
+recommended demo track; see [scenario validation](SCENARIO_VALIDATION.md).
 
 | Group | Scenario | Decisive mechanism | Expected symptom alert |
 |---|---|---|---|

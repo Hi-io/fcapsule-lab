@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Separated the three reviewed demo cases from the 14-case development backlog in
+  public guides; documented the runner-owned traffic requirement and remaining
+  investigation limitations.
+- Moved dated validation and product reviews into a history section, corrected
+  first-run deployment verification, and removed the premature contribution guide.
+
 ## 0.4.0 - 2026-09-21
 
 - Expanded the Kubernetes evaluation catalog to fifteen realistic incidents balanced

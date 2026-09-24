@@ -1,5 +1,7 @@
 # Product Review
 
+> Historical Lab product review. Its acceptance criteria describe design intent, not a pass for every current scenario.
+
 ## User Job
 
 An evaluator needs to deploy a stable production-like workload, trigger one credible

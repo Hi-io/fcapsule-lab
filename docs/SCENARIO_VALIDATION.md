@@ -58,6 +58,10 @@ or a manually supplied answer for a fresh result.
 - Episode correlation may choose a newer related alert as the primary incident,
   even when the operator opened an earlier, more diagnostic alert. Preserve
   incident-specific links and make the chosen assessment explicit in the UI.
+- `response-schema-skew` requires bounded request traffic. Its qualification used
+  the recorded runner, which starts and restores traffic it owns. The Lab UI can
+  inject the configuration skew, but with the default zero-replica generator its
+  Start button alone does not guarantee an alert or assessment.
 - The logs and metrics demo cases were qualified before the latest evidence and
   next-action synthesis changes. Their mechanisms are valid, but their final
   recommendations still need one read-only review of the retained revisions.

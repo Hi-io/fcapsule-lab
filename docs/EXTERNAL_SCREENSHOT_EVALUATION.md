@@ -9,8 +9,8 @@ still discovered but returns HTTP 404. MySQL, the exporter Pod and checkout rema
 running. This differs from `metrics-service-label-drift`, where discovery removes
 the target, and from database connection saturation.
 
-The external source is **Prometheus Targets**, normally
-`http://192.168.0.102:30090/targets`. Select scrape pool
+The external source is **Prometheus Targets** at your Prometheus URL plus
+`/targets`. Select scrape pool
 `serviceMonitor/fcapsule-lab/fcapsule-lab-mysql/0`. The PNG must visibly show that
 pool, exporter identity, endpoint path, DOWN state and HTTP 404. FCAPSule/Lab UI
 images, generated screenshots, and evaluator-rendered HTML are not evidence.
@@ -138,7 +138,11 @@ The reassessment can query live sources after recovery and uses changed evidence
 therefore it is a realistic before/after workflow, **not** a controlled screenshot-only
 ablation or a general accuracy estimate. Preserve this limitation even on success.
 
-## Observed Run: 23 September 2026
+## Historical Observed Run: 23 September 2026
+
+The observations below belong to one dated run and are not a qualification of the
+current exporter scenario. The current [scenario validation](SCENARIO_VALIDATION.md)
+records why it remains in the development backlog.
 
 Local artifacts: `artifacts/external-scrape-20260923T0215Z/` (ignored by Git).
 Episode reference: `EP-ED30FC92`; episode ID:

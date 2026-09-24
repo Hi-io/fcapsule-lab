@@ -1,5 +1,7 @@
 # Kubernetes Validation Record
 
+> Historical six-case run. For today's qualified demo cases and remaining gaps, use [scenario validation](../SCENARIO_VALIDATION.md).
+
 Historical six-case series complete. Follow-up checks are recorded separately below.
 The current Lab has since expanded to the fifteen-case paired suite documented in
 `SCENARIO_CONTRACT.md`; this file preserves the earlier run without rewriting it.

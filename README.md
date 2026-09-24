@@ -1,9 +1,20 @@
 # FCAPSule Lab
 
-FCAPSule Lab is a standalone observable workload for exercising FCAPSule against real
-Kubernetes failures. It starts healthy, produces sustained structured telemetry, and
-lets an operator trigger and recover realistic incidents after deployment. It is not a
-runtime dependency of FCAPSule.
+FCAPSule Lab is a separate Kubernetes workload and evaluation harness for testing
+FCAPSule's AI investigation against observable failures. It starts healthy, emits
+structured telemetry, and lets an operator trigger and recover bounded incidents
+after deployment. The scenario oracle stays in this repository; FCAPSule receives
+only the observability data it would see from an ordinary workload. The Lab is not
+a runtime dependency of FCAPSule.
+
+**Demo status:** three scenarios are currently qualified for presentation: an import
+retry loop (logs), a credential-migration CPU backlog (performance), and a response
+schema mismatch (configuration). The other 14 UI cases remain available for
+development but are not claimed as successful AI demos. See
+[scenario validation](docs/SCENARIO_VALIDATION.md) for the evidence and known issues.
+The configuration case was qualified through the recorded runner, which owns bounded
+checkout traffic. With the default generator at zero replicas, clicking its Lab UI
+start button alone does not guarantee a Prometheus alert.
 
 ## Kubernetes Stack
 
@@ -57,8 +68,16 @@ Requirements:
 python3 -m pip install '.[dev]'
 python3 tools/deploy_kubernetes.py --node-exporter http://<node-ip>:9100
 make k8s-status
-python3 tools/verify_stack.py
+curl http://<node-ip>:30766/api/status
 ```
+
+Check that the controller reports Worker, Inventory and Orders reachable and that
+the Deployments are ready. The traffic generator normally has zero replicas.
+`tools/verify_stack.py` is a separate load/telemetry check: it expects active
+traffic and approximately 10,000 structured events per minute by default. Do not
+use its default thresholds as a post-deploy health gate. When intentionally testing
+throughput, pass your own `--lab` and `--prometheus` URLs and record the actual
+rate rather than assuming the configured rate was reached.
 
 The deployment helper installs a full commit SHA (local `HEAD` by default), checks real
 host memory, pauses traffic during the upgrade and updates deployments sequentially
@@ -92,8 +111,8 @@ The control UI is exposed at:
 http://<node-ip>:30766
 ```
 
-The default cluster used during development is available at
-`http://192.168.0.102:30766`.
+Replace `<node-ip>` with a reachable node address in your own cluster. The
+repository does not assume a particular LAN or node name.
 
 ## Incident Scenarios
 
@@ -105,11 +124,12 @@ Worker/inventory operations have their own leases; durable import jobs expire af
 five minutes even if the controller is unavailable. This is a single-node test harness,
 not a guarantee against unrelated workloads exhausting the host.
 
-The Lab control UI presents one catalog of 17 operator scenarios. Fifteen are
-workload-diagnosis cases balanced across log-led, metrics-led and configuration-led
-evidence; two more exercise Prometheus discovery and scrape-path failures. Every case
-is a usable demo. The grouping exists only to keep model evaluation comparable, not to
-suggest that some scenarios are second-class. Cases cover poison-message redelivery,
+The Lab control UI presents one catalog of 17 scenarios. Three qualified cases appear
+in **Demo track**; the remaining 14 are under **Development backlog**. Fifteen cases
+form the balanced workload-diagnosis benchmark across logs, metrics and configuration;
+two more exercise Prometheus discovery and scrape-path failures. Being in the catalog
+means a mechanism and expected evidence are defined, not that FCAPSule has already
+diagnosed it well. Cases cover poison-message redelivery,
 dependency contract changes, unique-key collisions, real MySQL deadlocks, idempotency
 conflicts, bounded memory and CPU pressure, connection and lock saturation, downstream
 latency, schema rollout order, dependency routing, timeout budgets, signing-key skew,
@@ -123,12 +143,13 @@ exercise after the 17 distinct scenarios. It checks whether the second assessmen
 cites the earlier retained episode and requests one retained-capsule-only review.
 The 16-minute grouping wait is intentional and is not another fault mechanism.
 
-The two monitoring scenarios are first-class demos: **Metrics Service label drift**
+The two monitoring scenarios are designed to test observability failures:
+**Metrics Service label drift**
 removes an otherwise healthy application target from discovery; **MySQL exporter scrape
 path failure** keeps the target discovered but causes its scrape to return HTTP 404.
-Both distinguish loss of observability from an application outage. The exporter case
-is runner-only because it needs actual Prometheus Targets screenshots and its own
-guarded rollback procedure.
+Both should distinguish loss of observability from an application outage. Neither is
+qualified for the current demo track. The exporter case is runner-only because it
+needs actual Prometheus Targets screenshots and its own guarded rollback procedure.
 
 Alerts state symptoms, not injected causes. Application telemetry contains ordinary
 operation names, SQL codes and identities, not scenario labels or expected answers.
@@ -178,7 +199,7 @@ start a cluster pod or modify Prometheus data.
 
 The [paired evaluation guide](docs/EVALUATION.md) explains same-capsule model
 comparison, objective rubric components, token/latency capture and validity limits.
-The [live validation record](docs/LIVE_VALIDATION.md) separates original failures,
+The [historical live validation record](docs/history/LIVE_VALIDATION.md) separates original failures,
 product corrections and follow-up checks. To compare a changed expression against
 the same historical Prometheus samples without injecting another fault:
 
@@ -197,7 +218,9 @@ To stop ongoing traffic after testing:
 kubectl scale deployment/traffic-generator -n fcapsule-lab --replicas=0
 ```
 
-Scale back to one before a new evaluation. The lab UI and database can remain running.
+The supported runner takes ownership of request traffic for cases that need it; do
+not leave an ambient generator running just to prepare an evaluation. The lab UI and
+database can remain running.
 
 ## Prometheus Integration
 
@@ -260,3 +283,6 @@ legacy-only: they are not part of the supported 17 Kubernetes scenarios or the
 diagnostic benchmark. See [Compose compatibility status](docs/COMPOSE_COMPATIBILITY.md)
 before using those local controls; passing a Compose smoke test is not evidence that
 they meet the live FCAPSule scenario contract.
+
+The [documentation index](docs/README.md) separates current runbooks and scenario
+status from historical design and validation records.

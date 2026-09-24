@@ -1,10 +1,13 @@
 # Scenario Operator Guide
 
-The control UI exposes one catalog of 17 distinct incident scenarios. All are intended to work as
-operator demos and FCAPSule investigations. Fifteen workload cases retain the frozen
-balanced diagnostic benchmark; two monitoring cases exercise discovery and scrape
-failure. That scoring boundary is an evaluation detail, not a recommendation to omit
-either monitoring case from a demonstration.
+The control UI exposes 17 distinct incident scenarios, but only three have been
+qualified for the current live demonstration: `poison-job` (logs),
+`cpu-saturation` (performance), and `response-schema-skew` (configuration).
+The UI keeps these in **Demo track** and collapses the other 14 under
+**Development backlog**. Use [scenario validation](SCENARIO_VALIDATION.md) before
+presenting any deferred case as a successful AI investigation. Fifteen workload
+cases retain the balanced diagnostic benchmark; two monitoring cases exercise
+discovery and scrape failure. A defined oracle or an alert is not a diagnosis pass.
 
 The recorded `--case all` workflow additionally runs two separate occurrences of the
 schema-rollout case. This exercises retained memory; it is not an eighteenth fault
