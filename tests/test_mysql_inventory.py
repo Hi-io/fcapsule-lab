@@ -204,6 +204,38 @@ class MysqlInventoryAdmissionTests(unittest.TestCase):
         self.assertEqual(state.reservation_admission_rejections, 1)
         self.assertIn("inventory_database_failures_total{kind=\"connection\"} 0", state.metrics())
 
+    def test_slow_normal_reservation_logs_stage_durations(self):
+        state = InventoryState()
+        state.logger = Mock()
+        state.logger.count = 0
+        cursor = MagicMock()
+        cursor.rowcount = 1
+        connection = mysql_connection(cursor)
+        state.connect = Mock(return_value=connection)
+        clock = [0.0]
+
+        def advance_commit_clock():
+            clock[0] += 0.75
+
+        def fake_perf_counter():
+            return clock[0]
+
+        connection.commit.side_effect = advance_commit_clock
+        with patch("app.mysql_inventory.time.perf_counter", side_effect=fake_perf_counter):
+            status, body = state.reserve("order-slow-normal", "checkout-key-v1")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(body["status"], "reserved")
+        timing = next(call.kwargs for call in state.logger.write.call_args_list
+                      if call.args and call.args[1] == "Inventory reservation stage timing")
+        self.assertEqual(timing["failure_mode"], "normal")
+        self.assertEqual(timing["outcome"], "committed")
+        self.assertEqual(timing["commit_ms"], 750.0)
+        self.assertEqual(timing["connect_ms"], 0.0)
+        self.assertEqual(timing["insert_ms"], 0.0)
+        self.assertEqual(timing["update_ms"], 0.0)
+        self.assertGreaterEqual(timing["total_duration_ms"], 500.0)
+
     def test_stalled_commit_retries_are_http_errors_not_timeout_amplification(self):
         inventory = InventoryState()
         inventory.logger = Mock()

@@ -27,6 +27,16 @@ FAILURE_MODES = {
 }
 
 RESERVATION_ADMISSION_WAIT_SECONDS = 0.25
+SLOW_RESERVATION_LOG_THRESHOLD_MS = 500.0
+
+
+@contextmanager
+def _timed_stage(stage_durations_ms: dict[str, float], stage_name: str) -> Iterator[None]:
+    started = time.perf_counter()
+    try:
+        yield
+    finally:
+        stage_durations_ms[stage_name] = round((time.perf_counter() - started) * 1000, 2)
 
 
 class InventoryState:
@@ -455,6 +465,8 @@ class InventoryState:
         if latency:
             time.sleep(latency)
 
+        stage_durations_ms: dict[str, float] = {}
+        admission_wait_started = time.perf_counter()
         if not self._reservation_slots.acquire(timeout=RESERVATION_ADMISSION_WAIT_SECONDS):
             with self._lock:
                 self.reservation_admission_rejections += 1
@@ -467,40 +479,57 @@ class InventoryState:
             )
             return HTTPStatus.SERVICE_UNAVAILABLE, {"status": "inventory_busy", "order_id": order_id}
 
+        stage_durations_ms["admission_wait_ms"] = round(
+            (time.perf_counter() - admission_wait_started) * 1000, 2,
+        )
         with self._lock:
             self.reservation_admissions += 1
             self.reservation_admissions_inflight += 1
         token = self._reservation_token(order_id, mode)
         self._transaction_started()
         database_session_id: int | None = None
+        connection_stage_started_at: float | None = None
+        outcome = "pending"
         try:
+            connection_stage_started_at = time.perf_counter()
             with self._managed_connection() as connection:
+                stage_durations_ms["connect_ms"] = round(
+                    (time.perf_counter() - connection_stage_started_at) * 1000, 2,
+                )
+                connection_stage_started_at = None
                 database_session_id = connection.thread_id()
                 with connection.cursor() as cursor:
-                    cursor.execute("SET SESSION innodb_lock_wait_timeout = 1")
-                    cursor.execute("INSERT INTO reservation_events (token, order_id) VALUES (%s, %s)", (token, order_id))
+                    with _timed_stage(stage_durations_ms, "session_setup_ms"):
+                        cursor.execute("SET SESSION innodb_lock_wait_timeout = 1")
+                    with _timed_stage(stage_durations_ms, "insert_ms"):
+                        cursor.execute("INSERT INTO reservation_events (token, order_id) VALUES (%s, %s)", (token, order_id))
                     if query_revision == "v2":
-                        cursor.execute(
-                            "UPDATE inventory_items SET quantity=quantity-1 "
-                            "WHERE sku=%s AND quantity>reserved_quantity",
-                            ("sku-red-widget",),
-                        )
+                        with _timed_stage(stage_durations_ms, "update_ms"):
+                            cursor.execute(
+                                "UPDATE inventory_items SET quantity=quantity-1 "
+                                "WHERE sku=%s AND quantity>reserved_quantity",
+                                ("sku-red-widget",),
+                            )
                     else:
-                        cursor.execute(
-                            "UPDATE inventory_items SET quantity=quantity-1 WHERE sku=%s AND quantity>0",
-                            ("sku-red-widget",),
-                        )
+                        with _timed_stage(stage_durations_ms, "update_ms"):
+                            cursor.execute(
+                                "UPDATE inventory_items SET quantity=quantity-1 WHERE sku=%s AND quantity>0",
+                                ("sku-red-widget",),
+                            )
                     if cursor.rowcount == 0:
                         connection.rollback()
+                        outcome = "out_of_stock"
                         self._record_request("error")
                         self.logger.write("WARN", "Reservation rejected because no available stock remained",
                                           order_ref=order_ref, sku="sku-red-widget", consumer_decision="out_of_stock")
                         return HTTPStatus.CONFLICT, {"status": "out_of_stock", "order_id": order_id}
-                connection.commit()
+                with _timed_stage(stage_durations_ms, "commit_ms"):
+                    connection.commit()
             if mode == "token-collision":
                 with self._lock:
                     if self._collision_owner is None and self._collision_token == token:
                         self._collision_owner = order_id
+            outcome = "committed"
             self._record_request("success")
             self.logger.write("INFO", "Inventory reservation committed", order_ref=order_ref,
                               duration_ms=round((time.perf_counter() - started) * 1000, 2),
@@ -514,12 +543,14 @@ class InventoryState:
             except pymysql.MySQLError:
                 existing_order = None
             if existing_order == order_id:
+                outcome = "idempotent_replay"
                 with self._lock:
                     self.reservation_replays += 1
                 self._record_request("success")
                 self.logger.write("INFO", "Existing reservation returned without a second stock decrement",
                                   order_ref=order_ref, mysql_error_code=code, outcome="idempotent_replay")
                 return self._reservation_response(order_id, response_schema, mode)
+            outcome = "reservation_conflict"
             with self._lock:
                 self.transaction_failures["constraint"] += 1
             self._record_request("error")
@@ -534,6 +565,7 @@ class InventoryState:
         except pymysql.err.OperationalError as exc:
             code = int(exc.args[0]) if exc.args else 0
             kind = "lock_timeout" if code == 1205 else "deadlock" if code == 1213 else "query" if code == 1054 else "connection"
+            outcome = kind
             self._record_request("error")
             self._record_failure(kind)
             if kind == "deadlock":
@@ -545,6 +577,7 @@ class InventoryState:
                               db_session=database_session_id, error=str(exc)[:180])
             return HTTPStatus.SERVICE_UNAVAILABLE, {"status": kind, "order_id": order_id}
         except pymysql.MySQLError as exc:
+            outcome = "query_error"
             self._record_request("error")
             self._record_failure("query")
             self.logger.write("ERROR", "Inventory query failed", order_ref=order_ref,
@@ -553,10 +586,27 @@ class InventoryState:
                               db_session=database_session_id, error=str(exc)[:180])
             return HTTPStatus.SERVICE_UNAVAILABLE, {"status": "query_error", "order_id": order_id}
         finally:
+            if connection_stage_started_at is not None:
+                stage_durations_ms["connect_ms"] = round(
+                    (time.perf_counter() - connection_stage_started_at) * 1000, 2,
+                )
             self._transaction_finished()
             with self._lock:
                 self.reservation_admissions_inflight = max(0, self.reservation_admissions_inflight - 1)
             self._reservation_slots.release()
+            total_duration_ms = round((time.perf_counter() - started) * 1000, 2)
+            if mode == "normal" and total_duration_ms >= SLOW_RESERVATION_LOG_THRESHOLD_MS:
+                self.logger.write(
+                    "WARN", "Inventory reservation stage timing", order_ref=order_ref,
+                    db_session=database_session_id, operation="reserve_stock", failure_mode=mode,
+                    outcome=outcome, total_duration_ms=total_duration_ms,
+                    admission_wait_ms=stage_durations_ms.get("admission_wait_ms"),
+                    connect_ms=stage_durations_ms.get("connect_ms"),
+                    session_setup_ms=stage_durations_ms.get("session_setup_ms"),
+                    insert_ms=stage_durations_ms.get("insert_ms"),
+                    update_ms=stage_durations_ms.get("update_ms"),
+                    commit_ms=stage_durations_ms.get("commit_ms"),
+                )
 
     def _sample_database(self) -> None:
         while True:
