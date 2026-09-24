@@ -3,6 +3,7 @@ import unittest
 from unittest.mock import patch
 from types import SimpleNamespace
 
+from tools import run_scenarios as runner
 from tools.run_scenarios import (
     alert_identity,
     expected_alerts,
@@ -100,10 +101,11 @@ class ScenarioRunnerAlertTests(unittest.TestCase):
 
     def test_recovery_window_allows_kubernetes_restart_backoff(self):
         args = SimpleNamespace(lab="http://lab")
-        with patch("tools.run_scenarios.healthy", return_value=False), patch("tools.run_scenarios.time.monotonic", side_effect=[0, 0, 480]), patch("tools.run_scenarios.time.sleep"):
+        monotonic_values = iter([0, 0, 480])
+        clock = SimpleNamespace(monotonic=lambda: next(monotonic_values), sleep=lambda _seconds: None)
+        with patch.object(runner, "healthy", return_value=False), patch.object(runner, "time", clock):
             with self.assertRaisesRegex(RuntimeError, "Previous workload did not recover"):
-                from tools.run_scenarios import settle
-                settle(args)
+                runner.settle(args)
 
     def test_waits_until_all_lab_alerts_are_quiet_between_cases(self):
         args = SimpleNamespace(prometheus="http://prometheus", lab_quiet_timeout=10)

@@ -33,6 +33,19 @@ class KubernetesLabTests(unittest.TestCase):
         self.assertEqual(env["NODE_EXPORTER_URL"]["value"], "http://$(NODE_IP):9100/metrics")
         self.assertNotIn("192.168.0.", env["NODE_EXPORTER_URL"]["value"])
 
+    def test_orders_api_has_cpu_headroom_for_the_configured_synthetic_rate(self):
+        documents = [item for item in yaml.safe_load_all((ROOT / "deploy/kubernetes/applications.yaml").read_text()) if item]
+        orders = next(item for item in documents if item.get("kind") == "Deployment"
+                      and item.get("metadata", {}).get("name") == "orders-api")
+        container = orders["spec"]["template"]["spec"]["containers"][0]
+        resources = container["resources"]
+        runtime = next(item for item in yaml.safe_load_all((ROOT / "deploy/kubernetes/configuration.yaml").read_text()) if item
+                       and item.get("kind") == "ConfigMap" and item.get("metadata", {}).get("name") == "lab-runtime")
+
+        self.assertEqual(runtime["data"]["REQUESTS_PER_SECOND"], "25")
+        self.assertEqual(resources["requests"]["cpu"], "250m")
+        self.assertEqual(resources["limits"]["cpu"], "1")
+
     def test_fifteen_balanced_execution_contracts(self):
         self.assertEqual(len(SCENARIOS), 15)
         self.assertEqual(
