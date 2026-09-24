@@ -18,8 +18,33 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/promtool/prometheus-3.14.0.linux-amd64.tar.gz
+          key: promtool-3.14.0-linux-amd64
+      - name: Install Promtool 3.14.0
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=3.14.0
+          archive="prometheus-${version}.linux-amd64.tar.gz"
+          cache_dir="${HOME}/.cache/promtool"
+          install_dir="${RUNNER_TEMP}/prometheus-${version}.linux-amd64"
+          archive_path="${cache_dir}/${archive}"
+          mkdir -p "${cache_dir}"
+          if [[ ! -f "${archive_path}" ]]; then
+            curl --fail --location --silent --show-error \
+              "https://github.com/prometheus/prometheus/releases/download/v${version}/${archive}" \
+              --output "${archive_path}"
+          fi
+          echo "f665c6da19eb7ba399c915d30c7d9793c9b417bf8a749b504bc470678631478d  ${archive_path}" | sha256sum --check
+          tar -xzf "${archive_path}" -C "${RUNNER_TEMP}"
+          echo "${install_dir}" >> "${GITHUB_PATH}"
+          "${install_dir}/promtool" --version
       - run: python -m pip install -e '.[dev]'
       - run: python -m unittest discover -s tests -v
+      - name: Check Prometheus rules and fixtures
+        run: python tools/test_prometheus_rules.py --promtool promtool
       - run: node --check app/control.js
       - run: node --check tools/capture_demo.cjs
       - run: node --test tests/ui_*.test.cjs
