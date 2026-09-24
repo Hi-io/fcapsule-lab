@@ -9,6 +9,7 @@ import threading
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
+import yaml
 
 from app.control import CONTROL_OWNER, ControlState, handler, HTML
 from app.demo_catalog import DEMO_CASES, public_demos
@@ -72,6 +73,37 @@ class DemoCatalogTests(unittest.TestCase):
         self.assertEqual(catalog["memory-leak"]["resource_profile"], "bounded_memory")
         self.assertEqual(runner.scenario_rounds("mysql-connections"), 1)
         self.assertEqual(runner.capture_spec("mysql-connections")["view"], "graph")
+        self.assertEqual(runner.ALL_RUN_CASES[-1], "query-rollout-history")
+        self.assertEqual(len(runner.ALL_RUN_CASES), 18)
+
+    def test_all_case_selection_includes_history_without_relabeling_it_as_a_new_fault(self):
+        self.assertEqual(runner.ALL_RUN_CASES, [*SCENARIOS, *DISCOVERY_SCENARIOS, "query-rollout-history"])
+        self.assertEqual(DEMO_CASES["query-rollout-history"]["scenario"], "schema-drift")
+        self.assertEqual(runner.scenario_rounds("query-rollout-history"), 2)
+
+    def test_load_shedding_keeps_lock_test_below_mysql_connection_ceiling(self):
+        documents = list(yaml.safe_load_all((runner.ROOT / "deploy/kubernetes/configuration.yaml").read_text()))
+        runtime = next(item["data"] for item in documents if item and item.get("kind") == "ConfigMap"
+                       and item["metadata"]["name"] == "lab-runtime")
+        mysql = next(item["data"] for item in documents if item and item.get("kind") == "ConfigMap"
+                     and item["metadata"]["name"] == "lab-mysql-config")
+        self.assertEqual(int(runtime["MAX_INFLIGHT"]), 12)
+        self.assertLessEqual(int(runtime["MAX_INFLIGHT"]), int(mysql["MYSQL_MAX_CONNECTIONS"]) // 3)
+        self.assertGreaterEqual(int(runtime["REQUESTS_PER_SECOND"]), int(runtime["MAX_INFLIGHT"]))
+
+    def test_history_use_requires_retrieving_and_citing_the_exact_prior_episode(self):
+        previous = {"episode_id": "episode-prior"}
+        current = {"episode_id": "episode-current"}
+        valid = {"assessment": {"historical_comparison": {
+            "episode_id": "episode-prior", "status": "similar_mechanism", "evidence_ids": ["Q003"]}},
+            "checks": [{"id": "Q003", "tool": "historical_episode", "status": "completed",
+                        "arguments": {"episode_id": "episode-prior"}}]}
+        self.assertEqual(runner.score_history_reuse(previous, current, valid)["score"], 100)
+        valid["assessment"]["historical_comparison"]["episode_id"] = "invented"
+        self.assertEqual(runner.score_history_reuse(previous, current, valid)["score"], 60)
+        valid["assessment"]["historical_comparison"]["episode_id"] = "episode-prior"
+        valid["assessment"]["historical_comparison"]["evidence_ids"] = []
+        self.assertEqual(runner.score_history_reuse(previous, current, valid)["score"], 80)
 
     def test_public_catalog_does_not_expose_oracle(self):
         text = json.dumps(public_demos())
@@ -335,6 +367,69 @@ class DemoRunnerTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             runner.safety(data, "worker-1", "ours")
 
+    def test_recovery_records_restoration_without_waiting_for_transient_pod_readiness(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            degraded = sample()
+            degraded["lab"]["inventory"] = {"reachable": False, "error": "readiness probe is restarting"}
+            degraded["pods"][0]["containers"][0]["ready"] = False
+            statuses = iter([{"active": {"run_id": "ours"}}, {"active": None, "recovery_error": None}])
+
+            def api(url, payload=None):
+                if url == "http://lab/api/status":
+                    return next(statuses)
+                if url == "http://lab/api/recover":
+                    self.assertEqual(payload, {"expected_run_id": "ours"})
+                    return {"ok": True}
+                self.fail("Unexpected recovery endpoint: " + url)
+
+            def immediate_wait(read, accept, _seconds, description):
+                value = read()
+                if not accept(value):
+                    raise TimeoutError(description)
+                return value
+
+            args = SimpleNamespace(lab="http://lab", lab_node="worker-1", prometheus="http://prom")
+            with patch.object(runner, "request", side_effect=api), \
+                 patch.object(runner.media, "wait_for", side_effect=immediate_wait), \
+                 patch.object(runner, "snapshot", return_value=degraded):
+                runner.recover_owned(args, root, "ours")
+
+            recovery = runner.read(root / "recovery.json")
+            self.assertTrue(recovery["restored"])
+            self.assertTrue(recovery["controller_lease_released"])
+            self.assertTrue(recovery["baseline_config_restored"])
+            self.assertEqual(recovery["runtime_readiness"], {"services_reachable": False, "pods_ready": False})
+            self.assertTrue((root / "recovery-request.json").exists())
+
+    def test_next_fault_waits_for_ready_pods_and_stops_on_another_owner(self):
+        args = SimpleNamespace(lab="http://lab", prometheus="http://prom", lab_node="worker-1")
+        with tempfile.TemporaryDirectory() as directory, patch.object(runner, "snapshot", return_value=sample()) as snapshots, \
+             patch.object(runner, "firing", return_value=[]):
+            degraded = sample()
+            degraded["pods"][0]["containers"][0]["ready"] = False
+            snapshots.side_effect = [degraded, sample()]
+            with patch.object(runner.time, "sleep"):
+                runner.wait_for_lab_ready(args, Path(directory), "memory-leak", 1, timeout=2)
+            self.assertEqual(snapshots.call_count, 2)
+
+        active = sample()
+        active["lab"]["active"] = {"run_id": "someone-else"}
+        with patch.object(runner, "snapshot", return_value=active), tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(RuntimeError, "Another Lab run"):
+                runner.wait_for_lab_ready(args, Path(directory), "memory-leak", 1, timeout=2)
+
+    def test_cpu_saturation_retains_pod_cpu_quota_throttling_and_batch_progress(self):
+        expressions = runner.promql("cpu-saturation")
+        self.assertIn("worker_cpu_cores", expressions)
+        self.assertIn("worker_cpu_limit", expressions)
+        self.assertIn("worker_cpu_throttled_ratio", expressions)
+        self.assertIn("migration_backlog", expressions)
+        self.assertIn("migration_progress", expressions)
+        for key in ("worker_cpu_cores", "worker_cpu_limit", "worker_cpu_throttled_ratio"):
+            self.assertIn("namespace=\"fcapsule-lab\"", expressions[key])
+            self.assertIn("pod", expressions[key])
+
     def test_delayed_old_signal_is_not_fresh_and_missing_reports_are_not_ready(self):
         signal = {"incident_id": "incident-LabInventoryQueryFailures-x", "created_at": "2026-09-23T12:00:30Z",
                   "started_at": "2026-09-23T11:59:00Z", "app_id": "go15:fcapsule-lab:inventory-api", "report_ready": 1}
@@ -438,6 +533,19 @@ class DemoRunnerTests(unittest.TestCase):
                 runner.run_suite(args)
             self.assertEqual(calls, ["quiet", "preflight"])
             self.assertEqual(runner.read(args.out / "suite.json")["outcome"], "incomplete")
+
+    def test_missing_optional_browser_capture_is_recorded_not_raised(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            args = SimpleNamespace(node="missing-node", prometheus="http://prometheus")
+            with patch.object(runner.subprocess, "run", side_effect=FileNotFoundError("browser unavailable")):
+                result = runner.capture(args, root, "mysql-connections")
+            self.assertEqual(result["status"], "unavailable")
+            self.assertEqual(runner.read(root / "media-capture.json"), result)
+            with patch.object(runner.media.subprocess, "run", side_effect=FileNotFoundError("browser unavailable")):
+                external = runner.media.capture(args, root, "fault")
+            self.assertEqual(external["status"], "unavailable")
+            self.assertEqual(runner.read(root / "capture-fault.json"), external)
 
     def test_history_wait_uses_latest_membership_start_not_old_episode_start(self):
         now = datetime(2026, 9, 23, 12, tzinfo=timezone.utc).timestamp()
@@ -586,7 +694,8 @@ class AttachmentWorkflowTests(unittest.TestCase):
         runner.save(self.root / "investigation-before.json", self.original)
         self.original_bytes = (self.root / "investigation-before.json").read_bytes()
         self.before = {"revision_id": "r2", "status": "ready", "model": config()["model"],
-                       "policy_version": "current-policy", "context": {"alerts": [{"incident_id": "new-incident"}]}}
+                       "primary_incident_id": "new-incident", "policy_version": "current-policy",
+                       "context": {"alerts": [{"incident_id": "new-incident"}]}}
         self.existing = [{"attachment_id": "prior-image", "kind": "image", "sha256": "prior-hash", "status": "ready"},
                          {"attachment_id": "prior-note", "kind": "text", "sha256": "note-hash", "status": "ready"}]
         self.metadata = {"sha256": "capture-hash", "observed_at": "2026-09-23T13:13:00Z", "source_url": "http://prom/query"}
@@ -705,7 +814,7 @@ class AttachmentWorkflowTests(unittest.TestCase):
 
     def test_changed_context_after_extraction_stops_before_reassessment(self):
         self.changed_assessment = {**self.before, "context": {"alerts": [{"incident_id": "other-incident"}]}}
-        with self.assertRaisesRegex(RuntimeError, "lacks this incident"): runner.attach(self.args)
+        with self.assertRaisesRegex(RuntimeError, "no longer makes this incident primary"): runner.attach(self.args)
         self.assertTrue(self.uploaded)
         self.assertFalse(self.updated)
         self.assertTrue((self.root / "media-review" / "investigation-pre-update.json").exists())
@@ -730,11 +839,13 @@ class AssessmentProvenanceTests(unittest.TestCase):
                 self.assertFalse(runner.assessment_contains_incident(value, "new-incident"))
         self.assertFalse(runner.assessment_contains_incident({}, "new-incident"))
         self.assertTrue(runner.assessment_contains_incident(self.assessment(), "new-incident"))
+        self.assertFalse(runner.assessment_matches_primary(self.assessment(), "new-incident"))
 
     def test_run_waits_past_stale_terminal_and_current_running_revision(self):
         stale = {**self.assessment(incident_id="old-incident"), "revision_id": "r1"}
         running = {**self.assessment("running"), "revision_id": "r2"}
         current = {**self.assessment(), "revision_id": "r2"}
+        current["primary_incident_id"] = "new-incident"
         current["context"]["alerts"].insert(0, {"incident_id": "old-incident"})
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -746,7 +857,7 @@ class AssessmentProvenanceTests(unittest.TestCase):
             self.assertEqual(len(list((root / "raw-assessments").iterdir())), 3)
             saved = runner.read(root / "run.json")
             self.assertTrue(saved["assessment_context_contains_incident"])
-            self.assertFalse(saved["assessment_matches_incident"])
+            self.assertTrue(saved["assessment_matches_incident"])
             self.assertEqual(saved["assessment_context_policy"], "current_incident_required")
             self.assertEqual(api.call_count, 4)
             self.assertTrue(all(len(call.args) == 1 and not call.kwargs for call in api.call_args_list))
@@ -759,7 +870,7 @@ class AssessmentProvenanceTests(unittest.TestCase):
             root = Path(directory)
             with patch.object(runner, "request", return_value=stale) as api, \
                  patch.object(runner.media, "time", media_clock([0, 0, 1])), \
-                 self.assertRaisesRegex(TimeoutError, "context.alerts; no retry started"):
+                 self.assertRaisesRegex(TimeoutError, "makes the run incident primary; no retry started"):
                 runner.await_assessment(self.record(), root, seconds=1)
             api.assert_called_once_with("http://product/api/episodes/reused-episode/investigation")
             self.assertEqual([runner.read(p) for p in (root / "raw-assessments").iterdir()], [stale])
@@ -771,6 +882,7 @@ class AssessmentProvenanceTests(unittest.TestCase):
             with self.subTest(status=status), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 value = self.assessment(status)
+                value["primary_incident_id"] = "new-incident"
                 record = self.record()
                 with patch.object(runner, "request", side_effect=[value, {}]) as api:
                     self.assertEqual(runner.await_assessment(record, root), value)

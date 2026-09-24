@@ -128,7 +128,7 @@ def snapshot(args, root, phase):
     addresses = {node["metadata"]["name"]: [item["address"] for item in node["status"].get("addresses", [])]
                  for node in nodes if node["metadata"]["name"] in scheduled}
     memory = request(args.prometheus + "/api/v1/query?" + urlencode({"query": "node_memory_MemAvailable_bytes"}))
-    data = {"at": now(), "lab": {key: status.get(key) for key in ("active", "worker", "inventory", "orders", "memory", "memory_error")},
+    data = {"at": now(), "lab": {key: status.get(key) for key in ("active", "worker", "inventory", "orders", "memory", "memory_error", "recovery_error")},
             "monitor": get("servicemonitor", MONITOR), "targets": targets(args.prometheus),
             "memory": memory, "node_addresses": addresses,
             "pods": [{"name": pod["metadata"]["name"], "node": pod["spec"].get("nodeName"),
@@ -163,8 +163,17 @@ def require_node_headroom(data, minimum=1024**3):
 
 
 def capture(args, root, phase):
-    subprocess.run([args.node, str(ROOT / "tools/capture_prometheus.cjs"), args.prometheus,
-                    str(root / (phase + ".png")), POOL], check=True, timeout=55)
+    try:
+        subprocess.run([args.node, str(ROOT / "tools/capture_prometheus.cjs"), args.prometheus,
+                        str(root / (phase + ".png")), POOL], check=True, timeout=55)
+        result = {"phase": phase, "status": "captured", "source": args.prometheus}
+    except (OSError, subprocess.SubprocessError, ValueError) as error:
+        # Preserve the telemetry experiment even if the optional browser capture
+        # cannot start; image attachment remains unavailable for this run.
+        result = {"phase": phase, "status": "unavailable", "error_type": type(error).__name__,
+                  "error": str(error)[:300]}
+    save(root / ("capture-" + phase + ".json"), result)
+    return result
 
 
 def restore(root):
@@ -242,7 +251,7 @@ def run(args):
         kubectl("create", "-f", "-", body=rule_document(record["owner"]))
         patch_monitor(monitor, FAULT_PATH, record["owner"])
         deadline = time.monotonic() + 180
-        captured = False
+        fault_observed = False
         while time.monotonic() < deadline:
             sample = snapshot(args, root, "fault-latest")
             require_safe(sample, 768 * 1024**2)
@@ -251,12 +260,13 @@ def run(args):
             matching = [a for a in alerts if a["labels"].get("alertname") == ALERT and a["state"] == "firing"]
             record["samples"].append({"at": sample["at"], "health": target["health"], "error": target["lastError"], "alert_firing": bool(matching)})
             save(root / "run.json", record)
-            if not captured and target["health"] == "down" and "404" in target["lastError"]:
+            if not fault_observed and target["health"] == "down" and "404" in target["lastError"]:
                 save(root / "fault.json", sample)
-                capture(args, root, "fault")
-                captured = True
-                print("External 404 screenshot captured", flush=True)
-            if captured and matching:
+                record["fault_screenshot"] = capture(args, root, "fault")
+                fault_observed = True
+                if record["fault_screenshot"]["status"] == "captured":
+                    print("External 404 screenshot captured", flush=True)
+            if fault_observed and matching:
                 save(root / "alert.json", matching)
                 overview = request(args.fcapsule + "/api/state")["overview"]
                 matches = [(e, s) for e in overview["episodes"] for s in e["signals"]

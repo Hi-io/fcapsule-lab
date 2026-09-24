@@ -85,6 +85,10 @@ response-version skew, and monitoring coverage failures.
 The complete matrix and independently observable outcomes are frozen in the
 [scenario contract](docs/SCENARIO_CONTRACT.md). Configuration scenarios update a
 dedicated ConfigMap through narrow namespace RBAC, then restore its baseline values.
+The recorded `--case all` run also includes a two-occurrence schema-rollout history
+exercise after the 17 distinct scenarios. It checks whether the second assessment
+cites the earlier retained episode and requests one retained-capsule-only review.
+The 16-minute grouping wait is intentional and is not another fault mechanism.
 
 The two monitoring scenarios are first-class demos: **Metrics Service label drift**
 removes an otherwise healthy application target from discovery; **MySQL exporter scrape
@@ -100,8 +104,8 @@ must verify and what cannot be claimed from these cases. It is not sent to FCAPS
 
 ## Run a Recorded Evaluation
 
-For the full 17-scenario operator guide, including both monitoring discovery cases,
-external screenshot evidence and safe recorded execution, see
+For the full guide, including the 17 distinct scenarios, recurrence exercise, both
+monitoring discovery cases, external screenshot evidence and safe recorded execution, see
 [Operator demos](docs/OPERATOR_DEMOS.md). Preview the full catalog without network
 access:
 

@@ -1,10 +1,18 @@
 # Scenario Operator Guide
 
-The control UI exposes one catalog of 17 scenarios. All are intended to work as
+The control UI exposes one catalog of 17 distinct incident scenarios. All are intended to work as
 operator demos and FCAPSule investigations. Fifteen workload cases retain the frozen
 balanced diagnostic benchmark; two monitoring cases exercise discovery and scrape
 failure. That scoring boundary is an evaluation detail, not a recommendation to omit
 either monitoring case from a demonstration.
+
+The recorded `--case all` workflow additionally runs two separate occurrences of the
+schema-rollout case. This exercises retained memory; it is not an eighteenth fault
+mechanism. The runner checks distinct episode IDs, assesses whether the second
+investigation retrieved and cited the exact earlier episode, then requests one
+retained-capsule-only review. Expect the configured episode quiet window (960 seconds
+by default) and one additional paid review call. Weak results remain visible without
+an automatic retry.
 
 ## Complete Scenario Catalog
 
@@ -178,7 +186,9 @@ assessment is not a fresh diagnostic comparison for that incident.
 `assessment_matches_incident` continues to describe primary-incident equality,
 which is distinct from actual context membership.
 
-After two genuinely separate captured episodes:
+The full `--case all` run performs the retained review automatically after both
+genuinely separate episodes are captured. These standalone commands remain useful
+when those two rounds were run separately:
 
 ```powershell
 & $python tools/run_operator_demos.py history --case-dir local_reports/demo-UNIQUE/query-rollout-history --execute
@@ -311,7 +321,7 @@ paid action, with ceilings 3600 completion, 12000 total, 3200 prompt tokens and 
 check. The runner never increases them. The product can independently initiate
 more than one automatic member revision; this harness cannot enforce a global
 provider spend cap. Review raw revision histories and stop manually if spending
-limits require it. A completed run of all 17 scenarios still needs human review of
+limits require it. A completed run of all 17 unique scenarios and the history exercise still needs human review of
 the unedited assessments and raw evidence; rubric scores are an auditable triage aid,
 not proof of correctness or source-outage resilience.
 

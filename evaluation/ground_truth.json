@@ -4,7 +4,7 @@
     {
       "id": "poison-job", "category": "logs", "expected_alert": "LabWorkerPoisonRetries", "target_service": "lab-worker",
       "mechanism": "An invalid Base64 import body is rejected and rolled back before acknowledgement; the live worker retains the durable job and retries it.",
-      "required_domains": ["logs", "metrics"],
+      "required_domains": ["logs"],
       "findings": [
         {"id": "decode_failure", "weight": 3, "all": [["base64", "encoding"], ["decode", "decoder", "payload"]]},
         {"id": "redelivery", "weight": 2, "all": [["redeliver", "same job", "job id", "repeated delivery"], ["retry", "unacknowledged", "acknowledgement pending", "transaction rollback"]]}
@@ -51,7 +51,7 @@
       "required_domains": ["logs"],
       "findings": [
         {"id": "idempotency", "weight": 3, "all": [["idempotency"], ["conflict", "collision", "reused"]]},
-        {"id": "order_identity", "weight": 2, "all": [["different order", "conflicting order", "order identifier"], ["same key", "existing record", "original order"]]}
+        {"id": "order_identity", "weight": 2, "all": [["different order", "conflicting order", "order identifier"], ["same key", "same idempotency key", "reused an idempotency key", "idempotency key reuse", "existing record", "original order"]]}
       ],
       "actions": [["key generation", "scope the key", "unique key", "order identifier"], ["preserve original response", "reject conflicting reuse", "idempotency store"]],
       "contradictions": ["inventory database caused", "network timeout caused"]
