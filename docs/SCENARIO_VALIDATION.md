@@ -13,7 +13,7 @@ citations. Private run artifacts stay under ignored `local_reports/`.
 | --- | --- | --- | --- | --- |
 | Logs | `poison-job` | Qualified | FCAPSule links decoder rejection of non-base64 import data to repeated job retries, with cited retained logs. The fault and recovery were isolated. | A newer evidence-selection change preserves redelivery fields; re-assess once to confirm the final explanation and next action explicitly cover the unacknowledged job. |
 | Performance metrics | `cpu-saturation` | Qualified | FCAPSule links the CPU alert to a credential-migration batch using PBKDF2 with 600,000 rounds, supported by progress logs and CPU samples. The fault and recovery were isolated. | The current next action asks to read logs already checked. Verify the improved synthesis before presenting it as the final recommendation. |
-| Configuration | `response-schema-skew` | Pending live validation | The intended demonstration compares the caller's expected v2 response with the dependency's actual v1 document, using the caller's contract logs and fault-time ConfigMap. | Run with low, bounded request traffic in a fresh Orders window; require the assessment to state both versions and a concrete compatibility action. |
+| Configuration | `response-schema-skew` | Qualified | An isolated run alerted and recovered. The retained Orders logs showed Inventory returning schema v1 while Orders expected v2, with 502 contract rejection. A completed, incident-pinned reassessment identified both versions, the affected Orders pod, and the missing `reservation.status` field; it recommended checking the Inventory deployment/configuration for rollback or absent v2 fields. | The first assessment gave a redundant next check. A later related latency alert shifted the episode's default primary incident, so the useful reassessment explicitly selected the schema incident. Verify primary-incident stability before relying on automatic episode presentation. |
 
 "Qualified" means the mechanism is useful for a demo; it does not mean every
 sentence or suggested action is already ideal. Do not substitute an old episode
@@ -52,6 +52,18 @@ or a manually supplied answer for a fresh result.
 5. Record source revision, deployment revision, run artifacts, and any
    unavailable source. Keep evaluator answers outside FCAPSule input and do not
    alter a scenario merely to match a scoring phrase.
+
+## Known issues and follow-up
+
+- Episode correlation may choose a newer related alert as the primary incident,
+  even when the operator opened an earlier, more diagnostic alert. Preserve
+  incident-specific links and make the chosen assessment explicit in the UI.
+- The logs and metrics demo cases were qualified before the latest evidence and
+  next-action synthesis changes. Their mechanisms are valid, but their final
+  recommendations still need one read-only review of the retained revisions.
+- No backlog case is a claimed pass. Some need isolated traffic, dependency
+  evidence, or a clearer incident-time configuration snapshot. The table above
+  identifies the specific next step for each one.
 
 The first pass is intentionally limited to one strong case each for logs,
 performance metrics, and configuration. The remaining cases are retained as

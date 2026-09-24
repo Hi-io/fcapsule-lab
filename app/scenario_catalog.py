@@ -119,6 +119,7 @@ SCENARIOS = {
     },
     "response-schema-skew": {
         "title": "Response schema configuration skew", "class": "CM", "evidence_group": "configuration",
+        "track": "demo",
         "summary": "Checkout expects a response schema version the inventory service does not emit.",
         "config": {"ORDER_EXPECTED_SCHEMA": "v2"},
         "actions": [action("inventory", "configured"), action("orders", "configured")],
