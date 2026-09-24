@@ -26,6 +26,8 @@ FAILURE_MODES = {
     "fixed-latency",
 }
 
+RESERVATION_ADMISSION_WAIT_SECONDS = 0.25
+
 
 class InventoryState:
     def __init__(self) -> None:
@@ -34,6 +36,7 @@ class InventoryState:
         self.password = os.environ.get("MYSQL_PASSWORD", "inventory-lab")
         self.database = os.environ.get("MYSQL_DATABASE", "inventory")
         self.configured_max_connections = int(os.environ.get("MYSQL_MAX_CONNECTIONS", "40"))
+        self.reservation_admission_limit = self._reservation_admission_limit(self.configured_max_connections)
         self.failure_mode = "normal"
         self.logger = JsonLogger("inventory-api")
         self.requests = {"success": 0, "error": 0}
@@ -45,7 +48,14 @@ class InventoryState:
         self.server_max_connections = 0
         self.database_sample_timestamp = 0.0
         self.database_sample_failures = 0
+        self.inventory_item_columns: tuple[str, ...] | None = None
+        self.inventory_schema_sample_timestamp = 0.0
+        self.inventory_schema_sample_failures = 0
         self.client_sessions_active = 0
+        self.reservation_admissions = 0
+        self.reservation_admissions_inflight = 0
+        self.reservation_admission_rejections = 0
+        self._reservation_slots = threading.BoundedSemaphore(self.reservation_admission_limit)
         self._held_connections: list[pymysql.Connection] = []
         self._collision_token: str | None = None
         self._collision_owner: str | None = None
@@ -100,6 +110,13 @@ class InventoryState:
     def _transaction_finished(self) -> None:
         with self._lock:
             self.active_transactions = max(0, self.active_transactions - 1)
+
+    @staticmethod
+    def _reservation_admission_limit(max_connections: int) -> int:
+        if isinstance(max_connections, bool) or not isinstance(max_connections, int) or max_connections <= 0:
+            raise ValueError("MySQL max_connections must be a positive integer")
+        # Every reservation updates the same stock row, so concurrent local transactions only queue on that row.
+        return 1
 
     def initialize_database(self) -> None:
         for attempt in range(1, 61):
@@ -220,6 +237,15 @@ class InventoryState:
     def _reconcile_stock(self, stop: threading.Event, hold_for_contention: bool = False) -> None:
         while not stop.is_set():
             pair_id = uuid.uuid4().hex[:16]
+            admission_acquired = False
+            if not hold_for_contention:
+                admission_acquired = self._reservation_slots.acquire(timeout=RESERVATION_ADMISSION_WAIT_SECONDS)
+                if not admission_acquired:
+                    self.logger.write("INFO", "Inventory reconciliation deferred while reservations are active",
+                                      pair_id=pair_id, operation="stock_reconciliation",
+                                      admission_limit=self.reservation_admission_limit)
+                    stop.wait(2.0)
+                    continue
             try:
                 self._transaction_started()
                 with self._managed_connection() as connection:
@@ -256,6 +282,8 @@ class InventoryState:
                                   mysql_error_code=code, error=str(exc)[:180])
             finally:
                 self._transaction_finished()
+                if admission_acquired:
+                    self._reservation_slots.release()
             stop.wait(2.0 if hold_for_contention else 12.0)
 
     def _connection_storm(self, stop: threading.Event) -> None:
@@ -342,19 +370,23 @@ class InventoryState:
         pair_id = pair_id or uuid.uuid4().hex[:16]
         transaction_id = uuid.uuid4().hex[:16]
         self._transaction_started()
+        database_session_id: int | None = None
         try:
             with self._managed_connection() as connection:
+                database_session_id = connection.thread_id()
                 with connection.cursor() as cursor:
                     cursor.execute("SET SESSION innodb_lock_wait_timeout = 1")
                     cursor.execute("SELECT quantity FROM inventory_items WHERE sku=%s FOR UPDATE", (first,))
                     first_quantity = int(cursor.fetchone()[0])
                     self.logger.write("INFO", "Reconciliation acquired first stock row lock",
-                                      transaction_id=transaction_id, pair_id=pair_id, sku=first, lock_order=1)
+                                      transaction_id=transaction_id, pair_id=pair_id, sku=first, lock_order=1,
+                                      db_session=database_session_id)
                     barrier.wait(timeout=2)
                     cursor.execute("SELECT quantity FROM inventory_items WHERE sku=%s FOR UPDATE", (second,))
                     second_quantity = int(cursor.fetchone()[0])
                     self.logger.write("INFO", "Reconciliation acquired second stock row lock",
-                                      transaction_id=transaction_id, pair_id=pair_id, sku=second, lock_order=2)
+                                      transaction_id=transaction_id, pair_id=pair_id, sku=second, lock_order=2,
+                                      db_session=database_session_id)
                     cursor.executemany(
                         "INSERT INTO inventory_reconciliation_audit (pair_id, sku, observed_quantity) VALUES (%s, %s, %s)",
                         ((pair_id, first, first_quantity), (pair_id, second, second_quantity)),
@@ -362,7 +394,8 @@ class InventoryState:
                 connection.commit()
                 self.logger.write("INFO", "Stock reconciliation transaction committed",
                                   transaction_id=transaction_id, pair_id=pair_id, first_sku=first,
-                                  second_sku=second, rows_written=2, operation="stock_reconciliation")
+                                  second_sku=second, rows_written=2, operation="stock_reconciliation",
+                                  db_session=database_session_id)
         except (pymysql.MySQLError, threading.BrokenBarrierError) as exc:
             code = int(exc.args[0]) if isinstance(exc, pymysql.MySQLError) and exc.args else 0
             if code == 1213:
@@ -372,11 +405,12 @@ class InventoryState:
                 self.logger.write("ERROR", "Inventory reconciliation transaction selected as deadlock victim",
                                   mysql_error_code=code, transaction_id=transaction_id, pair_id=pair_id,
                                   first_sku=first, second_sku=second, outcome="rolled_back",
-                                  operation="stock_reconciliation")
+                                  operation="stock_reconciliation", db_session=database_session_id)
             else:
                 self.logger.write("WARN", "Inventory reconciliation transaction interrupted",
                                   transaction_id=transaction_id, pair_id=pair_id,
-                                  mysql_error_code=code, error_type=type(exc).__name__)
+                                  mysql_error_code=code, error_type=type(exc).__name__,
+                                  db_session=database_session_id)
         finally:
             self._transaction_finished()
 
@@ -421,10 +455,27 @@ class InventoryState:
         if latency:
             time.sleep(latency)
 
+        if not self._reservation_slots.acquire(timeout=RESERVATION_ADMISSION_WAIT_SECONDS):
+            with self._lock:
+                self.reservation_admission_rejections += 1
+            self._record_request("error")
+            self.logger.write(
+                "WARN", "Inventory reservation rejected before opening a MySQL session",
+                order_ref=order_ref, failure_kind="admission", mysql_attempted=False,
+                admission_limit=self.reservation_admission_limit,
+                wait_seconds=RESERVATION_ADMISSION_WAIT_SECONDS,
+            )
+            return HTTPStatus.SERVICE_UNAVAILABLE, {"status": "inventory_busy", "order_id": order_id}
+
+        with self._lock:
+            self.reservation_admissions += 1
+            self.reservation_admissions_inflight += 1
         token = self._reservation_token(order_id, mode)
         self._transaction_started()
+        database_session_id: int | None = None
         try:
             with self._managed_connection() as connection:
+                database_session_id = connection.thread_id()
                 with connection.cursor() as cursor:
                     cursor.execute("SET SESSION innodb_lock_wait_timeout = 1")
                     cursor.execute("INSERT INTO reservation_events (token, order_id) VALUES (%s, %s)", (token, order_id))
@@ -453,7 +504,8 @@ class InventoryState:
             self._record_request("success")
             self.logger.write("INFO", "Inventory reservation committed", order_ref=order_ref,
                               duration_ms=round((time.perf_counter() - started) * 1000, 2),
-                              upstream_status=int(HTTPStatus.OK), query_revision=query_revision)
+                              upstream_status=int(HTTPStatus.OK), query_revision=query_revision,
+                              db_session=database_session_id)
             return self._reservation_response(order_id, response_schema, mode)
         except pymysql.err.IntegrityError as exc:
             code = int(exc.args[0]) if exc.args else 0
@@ -474,7 +526,10 @@ class InventoryState:
             self.logger.write("ERROR", "Reservation token belongs to a different request",
                               order_ref=order_ref, existing_order_ref=_safe_ref(existing_order) if existing_order else "unavailable",
                               mysql_error_code=code, constraint="reservation_events.PRIMARY",
-                              ownership_match=False, operation="reserve_stock")
+                              duplicate_key="reservation_events.token", token_ref=_safe_ref(token),
+                              ownership_match=False, run_id=self._control_run_id,
+                              db_session=database_session_id,
+                              operation="reserve_stock")
             return HTTPStatus.CONFLICT, {"status": "reservation_conflict", "order_id": order_id}
         except pymysql.err.OperationalError as exc:
             code = int(exc.args[0]) if exc.args else 0
@@ -486,27 +541,39 @@ class InventoryState:
                     self.transaction_failures["deadlock"] += 1
             self.logger.write("ERROR", "Inventory MySQL operation failed", order_ref=order_ref,
                               mysql_error_code=code, failure_kind=kind, query_revision=query_revision,
-                              error=str(exc)[:180])
+                              operation="reserve_stock", table="inventory_items", sku="sku-red-widget",
+                              db_session=database_session_id, error=str(exc)[:180])
             return HTTPStatus.SERVICE_UNAVAILABLE, {"status": kind, "order_id": order_id}
         except pymysql.MySQLError as exc:
             self._record_request("error")
             self._record_failure("query")
             self.logger.write("ERROR", "Inventory query failed", order_ref=order_ref,
                               mysql_error_code=exc.args[0] if exc.args else None,
-                              query_revision=query_revision, error=str(exc)[:180])
+                              query_revision=query_revision, operation="reserve_stock",
+                              db_session=database_session_id, error=str(exc)[:180])
             return HTTPStatus.SERVICE_UNAVAILABLE, {"status": "query_error", "order_id": order_id}
         finally:
             self._transaction_finished()
+            with self._lock:
+                self.reservation_admissions_inflight = max(0, self.reservation_admissions_inflight - 1)
+            self._reservation_slots.release()
 
     def _sample_database(self) -> None:
         while True:
             try:
+                columns: tuple[str, ...] | None = None
+                schema_error: pymysql.MySQLError | None = None
                 with self._managed_connection() as connection:
                     with connection.cursor() as cursor:
                         cursor.execute("SHOW STATUS LIKE 'Threads_connected'")
                         connected = int(cursor.fetchone()[1])
                         cursor.execute("SELECT @@max_connections")
                         maximum = int(cursor.fetchone()[0])
+                        try:
+                            cursor.execute("SHOW COLUMNS FROM inventory_items")
+                            columns = tuple(sorted(str(row[0]) for row in cursor.fetchall()))
+                        except pymysql.MySQLError as exc:
+                            schema_error = exc
                 if connected < 0 or maximum <= 0:
                     raise ValueError("MySQL returned an invalid connection capacity sample")
                 sampled_at = time.time()
@@ -515,6 +582,19 @@ class InventoryState:
                     self.server_max_connections = maximum
                     self.database_sample_timestamp = sampled_at
                     held = len(self._held_connections)
+                    previous_columns = self.inventory_item_columns
+                    if columns is not None:
+                        self.inventory_item_columns = columns
+                        self.inventory_schema_sample_timestamp = sampled_at
+                    else:
+                        self.inventory_schema_sample_failures += 1
+                if columns is not None and columns != previous_columns:
+                    self.logger.write("INFO", "Inventory table columns sampled",
+                                      table="inventory_items", columns=columns,
+                                      column_count=len(columns), sample_timestamp_seconds=sampled_at)
+                if schema_error is not None:
+                    self.logger.write("WARN", "Unable to sample inventory schema; last sample retained with its timestamp",
+                                      table="inventory_items", error=str(schema_error)[:180])
                 utilization = round(connected / maximum, 3)
                 self.logger.write("INFO", "MySQL capacity sample", threads_connected=connected,
                                   max_connections=maximum, pool_checked_out=held, utilization=utilization,
@@ -545,6 +625,12 @@ class InventoryState:
                 "threads_connected": self.threads_connected,
                 "max_connections": self.server_max_connections,
                 "database_sample_timestamp_seconds": self.database_sample_timestamp,
+                "inventory_item_columns": list(self.inventory_item_columns) if self.inventory_item_columns is not None else None,
+                "inventory_schema_sample_timestamp_seconds": self.inventory_schema_sample_timestamp,
+                "inventory_schema_sample_failures": self.inventory_schema_sample_failures,
+                "reservation_admission_limit": self.reservation_admission_limit,
+                "reservation_admissions_inflight": self.reservation_admissions_inflight,
+                "reservation_admission_rejections": self.reservation_admission_rejections,
                 "configuration_revision": self.configuration_revision,
                 "query_revision": self.query_revision,
                 "response_schema": self.response_schema,
@@ -564,7 +650,14 @@ class InventoryState:
             client_sessions = self.client_sessions_active
             sample_timestamp = self.database_sample_timestamp
             sample_failures = self.database_sample_failures
+            schema_sample_timestamp = self.inventory_schema_sample_timestamp
+            schema_sample_failures = self.inventory_schema_sample_failures
             reservation_replays = self.reservation_replays
+            reservation_admissions = self.reservation_admissions
+            reservation_admissions_inflight = self.reservation_admissions_inflight
+            admission_rejections = self.reservation_admission_rejections
+            admission_limit = self.reservation_admission_limit
+            schema_column_count = len(self.inventory_item_columns) if self.inventory_item_columns is not None else 0
         return "".join(
             [
                 *(counter_line("inventory_reservation_requests_total", "Inventory reservation requests", value, outcome=outcome) for outcome, value in requests.items()),
@@ -576,7 +669,14 @@ class InventoryState:
                 gauge_line("inventory_mysql_server_max_connections", "Server max_connections from the last successful sample", maximum),
                 gauge_line("inventory_mysql_sample_timestamp_seconds", "Unix timestamp of the last successful MySQL capacity sample", sample_timestamp),
                 counter_line("inventory_mysql_sample_failures_total", "Failed MySQL capacity sampling attempts", sample_failures),
+                gauge_line("inventory_mysql_inventory_items_schema_sample_timestamp_seconds", "Unix timestamp of the last successful inventory_items schema sample", schema_sample_timestamp),
+                counter_line("inventory_mysql_schema_sample_failures_total", "Failed inventory_items schema sampling attempts", schema_sample_failures),
                 counter_line("inventory_reservation_replays_total", "Reservation retries served without decrementing stock again", reservation_replays),
+                counter_line("inventory_reservation_admissions_total", "Reservation transactions admitted to a MySQL session", reservation_admissions),
+                gauge_line("inventory_reservation_admission_inflight", "Reservation transactions currently admitted to execute MySQL work", reservation_admissions_inflight),
+                counter_line("inventory_reservation_admission_rejections_total", "Reservations rejected before opening a MySQL session when the local database concurrency limit was reached", admission_rejections),
+                gauge_line("inventory_reservation_admission_limit", "Maximum concurrent reservation transactions admitted by this inventory process", admission_limit),
+                gauge_line("inventory_mysql_inventory_items_column_count", "Number of inventory_items columns in the latest successful schema sample", schema_column_count),
                 gauge_line("lab_mysql_threads_connected", "MySQL sessions observed by inventory", connected),
                 gauge_line("lab_mysql_max_connections", "MySQL server connection ceiling from the last successful sample", maximum),
                 gauge_line("lab_mysql_held_connections", "Inventory sessions checked out", held),
