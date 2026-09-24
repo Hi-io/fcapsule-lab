@@ -40,6 +40,29 @@ metadata:
   name: lab-mysql-init
   namespace: fcapsule-lab
 data:
+  00-inventory.sql: |
+    CREATE TABLE IF NOT EXISTS inventory_items (
+      sku VARCHAR(64) PRIMARY KEY,
+      quantity INT NOT NULL
+    ) ENGINE=InnoDB;
+    CREATE TABLE IF NOT EXISTS reservation_events (
+      token VARCHAR(64) PRIMARY KEY,
+      order_id VARCHAR(64) NOT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      KEY idx_reservation_events_created_at (created_at)
+    ) ENGINE=InnoDB;
+    CREATE TABLE IF NOT EXISTS inventory_reconciliation_audit (
+      id BIGINT AUTO_INCREMENT PRIMARY KEY,
+      pair_id VARCHAR(36) NOT NULL,
+      sku VARCHAR(64) NOT NULL,
+      observed_quantity INT NOT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      KEY idx_reconciliation_created_at (created_at)
+    ) ENGINE=InnoDB;
+    INSERT INTO inventory_items (sku, quantity) VALUES ('sku-red-widget', 1000000)
+      ON DUPLICATE KEY UPDATE quantity=quantity;
+    INSERT INTO inventory_items (sku, quantity) VALUES ('sku-blue-widget', 1000000)
+      ON DUPLICATE KEY UPDATE quantity=quantity;
   01-exporter.sql: |
     CREATE USER IF NOT EXISTS 'exporter'@'%' IDENTIFIED BY 'exporter-lab' WITH MAX_USER_CONNECTIONS 3;
     GRANT PROCESS, REPLICATION CLIENT, SELECT ON *.* TO 'exporter'@'%';
