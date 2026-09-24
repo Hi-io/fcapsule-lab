@@ -24,6 +24,7 @@ from app.scenario_catalog import DEFAULT_SCENARIO_CONFIG, DISCOVERY_SCENARIOS, p
 from app.mysql_inventory import InventoryState
 from app.orders import OrdersState
 from app.safety import lease_seconds, memory_snapshot
+from app.traffic import MAX_SAFE_INFLIGHT, TrafficState, load_loop
 from app.worker import CPU_MIGRATION_BATCH_SIZE, CPU_MIGRATION_ROUNDS, MAX_BUFFERED_EXPORT_BYTES, WorkerState, decode_job
 
 
@@ -52,6 +53,150 @@ class KubernetesLabTests(unittest.TestCase):
         self.assertEqual(runtime["data"]["REQUESTS_PER_SECOND"], "25")
         self.assertEqual(resources["requests"]["cpu"], "250m")
         self.assertEqual(resources["limits"]["cpu"], "1")
+
+    def test_traffic_generator_capacity_matches_the_mysql_and_container_budgets(self):
+        documents = [item for item in yaml.safe_load_all((ROOT / "deploy/kubernetes/applications.yaml").read_text()) if item]
+        mysql_workloads = [item for item in yaml.safe_load_all((ROOT / "deploy/kubernetes/mysql.yaml").read_text()) if item]
+        mysql = next(item for item in yaml.safe_load_all((ROOT / "deploy/kubernetes/configuration.yaml").read_text()) if item
+                     and item.get("kind") == "ConfigMap" and item.get("metadata", {}).get("name") == "lab-mysql-config")
+        runtime = next(item for item in yaml.safe_load_all((ROOT / "deploy/kubernetes/configuration.yaml").read_text()) if item
+                       and item.get("kind") == "ConfigMap" and item.get("metadata", {}).get("name") == "lab-runtime")
+        traffic = next(item for item in documents if item.get("kind") == "Deployment"
+                       and item.get("metadata", {}).get("name") == "traffic-generator")
+        inventory = next(item for item in documents if item.get("kind") == "Deployment"
+                         and item.get("metadata", {}).get("name") == "inventory-api")
+        mysql_deployment = next(item for item in mysql_workloads if item.get("kind") == "Deployment"
+                                and item.get("metadata", {}).get("name") == "mysql")
+        container = traffic["spec"]["template"]["spec"]["containers"][0]
+        inventory_container = inventory["spec"]["template"]["spec"]["containers"][0]
+        mysql_container = mysql_deployment["spec"]["template"]["spec"]["containers"][0]
+
+        self.assertEqual(runtime["data"]["REQUESTS_PER_SECOND"], "25")
+        self.assertEqual(runtime["data"]["MAX_INFLIGHT"], "12")
+        mysql_budget = int(mysql["data"]["MYSQL_MAX_CONNECTIONS"])
+        configured_limit = int(runtime["data"]["MAX_INFLIGHT"])
+        self.assertLessEqual(configured_limit, mysql_budget // 3)
+        self.assertEqual(MAX_SAFE_INFLIGHT, configured_limit)
+        self.assertLessEqual(MAX_SAFE_INFLIGHT, mysql_budget // 3)
+        self.assertGreaterEqual(int(runtime["data"]["REQUESTS_PER_SECOND"]), int(runtime["data"]["MAX_INFLIGHT"]))
+        self.assertEqual(container["resources"]["limits"]["cpu"], "300m")
+        self.assertEqual(container["resources"]["limits"]["memory"], "128Mi")
+        self.assertEqual(inventory_container["resources"]["limits"]["cpu"], "400m")
+        self.assertEqual(inventory_container["resources"]["limits"]["memory"], "256Mi")
+        self.assertEqual(mysql_container["resources"]["limits"]["cpu"], "600m")
+        self.assertEqual(mysql_container["resources"]["limits"]["memory"], "1Gi")
+
+    def test_traffic_generator_standalone_defaults_use_the_bounded_lab_profile(self):
+        with patch.dict("os.environ", {"ORDERS_URL": "http://orders-api:8080"}, clear=True):
+            state = TrafficState()
+
+        self.assertEqual((state.rate, state.configured_max_inflight, state.max_inflight), (25, 12, 12))
+
+    def test_stale_runtime_concurrency_is_capped_and_reported(self):
+        logger = Mock()
+        with patch.dict("os.environ", {
+            "ORDERS_URL": "http://orders-api:8080",
+            "REQUESTS_PER_SECOND": "25",
+            "MAX_INFLIGHT": "48",
+        }), patch("app.traffic.JsonLogger", return_value=logger):
+            state = TrafficState()
+
+        self.assertEqual(state.configured_max_inflight, 48)
+        self.assertEqual(state.max_inflight, MAX_SAFE_INFLIGHT)
+        logger.write.assert_called_once_with(
+            "WARN",
+            "Configured traffic concurrency exceeds the Lab baseline safety limit",
+            configured_max_inflight=48,
+            effective_max_inflight=12,
+            safety_limit=12,
+        )
+        accepted = [state.claim_slot() for _ in range(48)]
+        self.assertEqual(sum(accepted), MAX_SAFE_INFLIGHT)
+        self.assertEqual(state.inflight, MAX_SAFE_INFLIGHT)
+        metrics = state.metrics()
+        self.assertIn("traffic_generator_configured_max_inflight 48", metrics)
+        self.assertIn("traffic_generator_effective_max_inflight 12", metrics)
+
+    def test_traffic_slot_claim_is_atomic_at_the_configured_inflight_ceiling(self):
+        with patch.dict("os.environ", {
+            "ORDERS_URL": "http://orders-api:8080",
+            "REQUESTS_PER_SECOND": "25",
+            "MAX_INFLIGHT": "12",
+        }):
+            state = TrafficState()
+        count = 48
+        barrier = threading.Barrier(count)
+        accepted = []
+        accepted_lock = threading.Lock()
+
+        def claim_after_barrier():
+            barrier.wait()
+            result = state.claim_slot()
+            with accepted_lock:
+                accepted.append(result)
+
+        threads = [threading.Thread(target=claim_after_barrier) for _ in range(count)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(sum(accepted), 12)
+        self.assertEqual(state.inflight, 12)
+        self.assertEqual(state.shed, 36)
+
+    def test_load_loop_sheds_over_capacity_attempts_without_queueing(self):
+        class StopLoad(Exception):
+            pass
+
+        class RecordingExecutor:
+            def __init__(self, max_workers):
+                self.max_workers = max_workers
+                self.submitted_at = []
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def submit(self, _function):
+                self.submitted_at.append(clock[0])
+
+        with patch.dict("os.environ", {
+            "ORDERS_URL": "http://orders-api:8080",
+            "REQUESTS_PER_SECOND": "25",
+            "MAX_INFLIGHT": "3",
+        }):
+            state = TrafficState()
+        executor = RecordingExecutor(max_workers=3)
+        clock = [0.0]
+        attempts = [0]
+        claim_slot = state.claim_slot
+
+        def count_attempt():
+            attempts[0] += 1
+            return claim_slot()
+
+        state.claim_slot = count_attempt
+
+        def sleep(seconds):
+            clock[0] += seconds
+            if attempts[0] >= 10:
+                raise StopLoad
+
+        with patch("app.traffic.ThreadPoolExecutor", return_value=executor) as create_executor, \
+                patch("app.traffic.time.monotonic", side_effect=lambda: clock[0]), \
+                patch("app.traffic.time.sleep", side_effect=sleep), self.assertRaises(StopLoad):
+            load_loop(state)
+
+        create_executor.assert_called_once_with(max_workers=3)
+        self.assertEqual(executor.max_workers, 3)
+        self.assertEqual(attempts[0], 10)
+        self.assertEqual(len(executor.submitted_at), 3)
+        self.assertEqual([round(value, 2) for value in executor.submitted_at], [0.00, 0.04, 0.08])
+        self.assertEqual(state.inflight, 3)
+        self.assertEqual(state.shed, 7)
 
     def test_fifteen_balanced_execution_contracts(self):
         self.assertEqual(len(SCENARIOS), 15)

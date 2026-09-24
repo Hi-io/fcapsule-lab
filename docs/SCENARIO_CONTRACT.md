@@ -80,9 +80,14 @@ alert hold before judging the result.
    fingerprints differ.
 8. Restore the original FCAPSule model setting even after interruption.
 
-Healthy traffic targets thousands of structured records per minute. The evaluator
-records bounded retained lines and Prometheus counters; it never claims that a local
-log tail equals total indexed volume.
+The healthy baseline schedules 25 checkouts per second and caps concurrency at 12.
+The generator drops attempts when all slots are occupied instead of queueing them. A
+successful checkout typically emits six structured events across the traffic, orders
+and inventory services, or about 9,000 checkout-path events per minute at the configured
+rate. Twelve is the runtime safety ceiling even if the ConfigMap requests a larger
+limit; startup logs and metrics preserve the configured/effective difference. The
+evaluator records observed counts and bounded retained lines rather than assuming that
+configured throughput was achieved or that a local log tail equals total indexed volume.
 
 ## Scoring Contract
 

@@ -12,18 +12,27 @@ workloads:
 
 | Workload | Role | Default limit |
 |---|---|---:|
-| `mysql` | Inventory database with an explicit `max_connections=40` | 600m CPU / 640 MiB |
+| `mysql` | Inventory database with an explicit `max_connections=40` | 600m CPU / 1 GiB |
 | `mysql-exporter` | Official Prometheus MySQL exporter | 100m CPU / 96 MiB |
 | `inventory-api` | MySQL-backed reservation service | 400m CPU / 256 MiB |
 | `orders-api` | Checkout orchestration and retry behavior | 400m CPU / 192 MiB |
-| `traffic-generator` | Continuous 25 request/second workload | 300m CPU / 128 MiB |
+| `traffic-generator` | Continuous workload configured at 25 requests/second, capped at 12 in flight | 300m CPU / 128 MiB |
 | `lab-worker` | Background jobs and resource incidents | 500m CPU / 192 MiB (effective `-k` limit) |
 | `lab-control` | Scenario UI and recovery controller | 150m CPU / 128 MiB |
 
-Requests are intentionally modest. Healthy traffic targets several thousand structured
-events per minute; the evaluation runner records observed counts rather than assuming
-that configured throughput was achieved. Filebeat remains the log owner and sends these container logs to the cluster's
-OpenSearch installation.
+The baseline schedules 25 checkout requests per second and admits no more than 12
+concurrently; when all slots are busy, the generator sheds new attempts instead of
+building a request queue. That concurrency cap is 30% of MySQL's configured 40-session
+ceiling even if every active checkout owns a database session. Twelve is also an
+explicit runtime safety ceiling: if a stale or edited ConfigMap requests a higher
+`MAX_INFLIGHT`, the generator uses 12, emits a startup warning, and exposes both
+configured and effective limits in its health response and metrics. A healthy completed
+checkout typically emits six structured events across the traffic generator, orders API
+and inventory API, so the configured rate can produce about 9,000 checkout-path events
+per minute before background service logs.
+The evaluation runner records observed counts rather than assuming that configured
+throughput was achieved. Filebeat remains the log owner and sends these container logs
+to the cluster's OpenSearch installation.
 
 MySQL uses an ephemeral `emptyDir` because this is a disposable test environment. The
 database is recreated when its pod is replaced. No FCAPSule code or credentials are

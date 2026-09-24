@@ -13,13 +13,27 @@ from urllib.request import urlopen
 
 from app.common import JsonLogger, QuietHandler, counter_line, gauge_line, serve
 
+# Baseline MySQL has 40 sessions; keep checkout-owned work at or below one third.
+MAX_SAFE_INFLIGHT = 12
+
 
 class TrafficState:
     def __init__(self) -> None:
         self.orders_url = os.environ["ORDERS_URL"].rstrip("/")
-        self.rate = int(os.environ.get("REQUESTS_PER_SECOND", "120"))
-        self.max_inflight = int(os.environ.get("MAX_INFLIGHT", "32"))
+        self.rate = int(os.environ.get("REQUESTS_PER_SECOND", "25"))
+        self.configured_max_inflight = int(os.environ.get("MAX_INFLIGHT", str(MAX_SAFE_INFLIGHT)))
+        if self.configured_max_inflight < 1:
+            raise ValueError("MAX_INFLIGHT must be a positive integer")
+        self.max_inflight = min(self.configured_max_inflight, MAX_SAFE_INFLIGHT)
         self.logger = JsonLogger("traffic-generator")
+        if self.configured_max_inflight > self.max_inflight:
+            self.logger.write(
+                "WARN",
+                "Configured traffic concurrency exceeds the Lab baseline safety limit",
+                configured_max_inflight=self.configured_max_inflight,
+                effective_max_inflight=self.max_inflight,
+                safety_limit=MAX_SAFE_INFLIGHT,
+            )
         self.requests = {"200": 0, "503": 0, "transport_error": 0}
         self.inflight = 0
         self.shed = 0
@@ -71,6 +85,8 @@ class TrafficState:
                 gauge_line("traffic_generator_inflight", "Synthetic checkout requests currently in flight", inflight),
                 counter_line("traffic_generator_shed_requests_total", "Synthetic requests not started because the concurrency limit was reached", shed),
                 gauge_line("traffic_generator_configured_rps", "Configured synthetic request rate per second", self.rate),
+                gauge_line("traffic_generator_configured_max_inflight", "Configured maximum synthetic requests in flight", self.configured_max_inflight),
+                gauge_line("traffic_generator_effective_max_inflight", "Effective maximum synthetic requests in flight after the Lab baseline safety limit", self.max_inflight),
                 counter_line("traffic_generator_log_events_total", "Structured traffic generator log events emitted", logs),
             ]
         )
@@ -80,7 +96,12 @@ def handler(state: TrafficState) -> type[QuietHandler]:
     class TrafficHandler(QuietHandler):
         def do_GET(self) -> None:  # noqa: N802
             if self.path == "/health":
-                self.send_json(HTTPStatus.OK, {"status": "ok", "configured_rps": state.rate})
+                self.send_json(HTTPStatus.OK, {
+                    "status": "ok",
+                    "configured_rps": state.rate,
+                    "configured_max_inflight": state.configured_max_inflight,
+                    "effective_max_inflight": state.max_inflight,
+                })
                 return
             if self.path == "/metrics":
                 self.send_text(HTTPStatus.OK, state.metrics())
@@ -109,7 +130,13 @@ def load_loop(state: TrafficState) -> None:
 
 def main() -> None:
     state = TrafficState()
-    state.logger.write("INFO", "Traffic generator started", requests_per_second=state.rate, max_inflight=state.max_inflight)
+    state.logger.write(
+        "INFO",
+        "Traffic generator started",
+        requests_per_second=state.rate,
+        configured_max_inflight=state.configured_max_inflight,
+        effective_max_inflight=state.max_inflight,
+    )
     threading.Thread(target=load_loop, args=(state,), daemon=True).start()
     serve(handler(state), int(os.environ.get("PORT", "8082")))
 
