@@ -55,8 +55,27 @@ make k8s-status
 python3 tools/verify_stack.py
 ```
 
-The deployment helper pins the published local commit, checks real host memory, pauses
-traffic during the upgrade and updates deployments sequentially without surge replicas.
+The deployment helper installs a full commit SHA (local `HEAD` by default), checks real
+host memory, pauses traffic during the upgrade and updates deployments sequentially
+without surge replicas. Since pods fetch the source archive from GitHub, pass a published
+commit SHA for a reproducible deployment. `kubectl` can be selected with `--kubectl` or
+`KUBECTL`; otherwise the helper searches `PATH` and then `~/.local/bin/kubectl`.
+For a source-only update to an existing lab, use `--apps-only` with the published full
+commit SHA. This updates the source-installed API, worker, controller and generator
+Deployments while leaving MySQL, credentials, runtime configuration, Services and
+monitoring objects untouched. The helper preserves the traffic generator's live replica
+count; it remains stopped if it was already scaled to zero. Update monitoring resources
+separately when needed with `kubectl apply -f deploy/kubernetes/observability.yaml`, which
+updates the named ServiceMonitors and PrometheusRule in place without pruning other rules.
+
+```bash
+REVISION='your-reviewed-published-full-commit-sha'
+python3 tools/deploy_kubernetes.py \
+  --node-exporter http://YOUR_LAB_NODE_IP:9100 \
+  --revision "$REVISION" \
+  --apps-only
+```
+
 For an ordinary cluster with sufficient capacity, `kubectl apply -k deploy/kubernetes`
 also works; that path installs the current published `main` branch. Publish local code
 before using either path. No container registry or Docker build is required for this
