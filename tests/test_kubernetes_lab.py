@@ -389,7 +389,9 @@ class KubernetesLabTests(unittest.TestCase):
         self.assertEqual(len(state._memory), 1)
         self.assertEqual(state.allocated_bytes, len(state._memory[0]))
         self.assertIn(b'"sku"', state._memory[0])
-        state.set_mode("normal")
+        with patch.object(state, "_start_mode_work") as start_work:
+            state.set_mode("normal")
+        start_work.assert_called_once_with(state._mode_stop, "normal")
         self.assertEqual(state.allocated_bytes, 0)
         self.assertEqual(state._memory, [])
 
@@ -429,6 +431,8 @@ class KubernetesLabTests(unittest.TestCase):
                 patch.object(state, "_export_loop", side_effect=lambda event: event.set()) as normal_work:
             state._credential_migration_loop(stop)
 
+        self.assertEqual(migrate.call_count, 1,
+                         f"Unexpected migration invocations: {migrate.call_args_list!r}")
         migrate.assert_called_once_with("batch-1", CPU_MIGRATION_BATCH_SIZE, CPU_MIGRATION_ROUNDS)
         normal_work.assert_called_once_with(stop)
         self.assertEqual(state.mode, "normal")

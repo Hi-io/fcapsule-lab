@@ -58,6 +58,9 @@ class InventoryState:
         self.accepted_key_id = os.environ.get("INVENTORY_ACCEPTED_KEY_ID", "checkout-key-v1")
         self.response_schema = os.environ.get("INVENTORY_RESPONSE_SCHEMA", "v1")
         self.query_revision = os.environ.get("INVENTORY_QUERY_REVISION", "v1")
+        self.configuration_revision = _configuration_revision(
+            self.accepted_key_id, self.response_schema, self.query_revision,
+        )
         self.fixed_latency = 0.0
 
     def connect(self, timeout: float = 2) -> pymysql.Connection:
@@ -160,12 +163,19 @@ class InventoryState:
                 self._cleanup_collision_record(previous_token, previous_owner)
             self._task_stop = threading.Event()
             self._storm_stop = self._task_stop
+            accepted_key_id = str(values.get("INVENTORY_ACCEPTED_KEY_ID", "checkout-key-v1"))
+            response_schema = str(values.get("INVENTORY_RESPONSE_SCHEMA", "v1"))
+            query_revision = str(values.get("INVENTORY_QUERY_REVISION", "v1"))
+            configuration_revision = _configuration_revision(
+                accepted_key_id, response_schema, query_revision,
+            )
             with self._lock:
                 self.failure_mode = mode
                 self._expires_at = time.monotonic() + duration if mode != "normal" else 0
-                self.accepted_key_id = str(values.get("INVENTORY_ACCEPTED_KEY_ID", "checkout-key-v1"))
-                self.response_schema = str(values.get("INVENTORY_RESPONSE_SCHEMA", "v1"))
-                self.query_revision = str(values.get("INVENTORY_QUERY_REVISION", "v1"))
+                self.accepted_key_id = accepted_key_id
+                self.response_schema = response_schema
+                self.query_revision = query_revision
+                self.configuration_revision = configuration_revision
                 self.fixed_latency = 0.25 if mode == "fixed-latency" else 0.35 if mode == "downstream-latency" else 0.0
                 self._collision_token = f"reservation-collision-{uuid.uuid4().hex}" if mode == "token-collision" else None
                 self._control_run_id = run_id
@@ -178,7 +188,7 @@ class InventoryState:
             else:
                 threading.Thread(target=self._reconcile_stock, args=(self._task_stop, False), daemon=True).start()
         self.logger.write("INFO", "Inventory runtime configuration reloaded",
-                          configuration_revision=self.query_revision, run_id=run_id)
+                          configuration_revision=configuration_revision, run_id=run_id)
 
     def _cleanup_collision_record(self, token: str, owner: str) -> None:
         try:
@@ -249,11 +259,12 @@ class InventoryState:
             stop.wait(2.0 if hold_for_contention else 12.0)
 
     def _connection_storm(self, stop: threading.Event) -> None:
-        target = self._connection_saturation_target(self.server_max_connections or self.configured_max_connections)
+        capacity = self.server_max_connections or self.configured_max_connections
+        target = self._connection_saturation_target(capacity)
         self.logger.write("INFO", "Inventory session pressure bounded with server headroom",
                           checked_out_target=target,
-                          observed_capacity=self.configured_max_connections,
-                          reserved_connections=self.configured_max_connections - target)
+                          observed_capacity=capacity,
+                          reserved_connections=capacity - target)
         while not stop.is_set():
             with self._lock:
                 at_target = len(self._held_connections) >= target
@@ -534,6 +545,7 @@ class InventoryState:
                 "threads_connected": self.threads_connected,
                 "max_connections": self.server_max_connections,
                 "database_sample_timestamp_seconds": self.database_sample_timestamp,
+                "configuration_revision": self.configuration_revision,
                 "query_revision": self.query_revision,
                 "response_schema": self.response_schema,
             }
@@ -575,6 +587,11 @@ class InventoryState:
 
 def _safe_ref(value: str | None) -> str:
     return hashlib.sha256((value or "").encode("utf-8")).hexdigest()[:12]
+
+
+def _configuration_revision(accepted_key_id: str, response_schema: str, query_revision: str) -> str:
+    settings = json.dumps([accepted_key_id, response_schema, query_revision], separators=(",", ":"))
+    return hashlib.sha256(settings.encode("utf-8")).hexdigest()[:12]
 
 
 def _validate_run_id(value: Any) -> str | None:

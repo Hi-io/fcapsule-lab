@@ -3,7 +3,7 @@ import json
 import threading
 import unittest
 from io import BytesIO
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from unittest.mock import MagicMock, Mock, patch
 
 import psycopg
@@ -31,6 +31,14 @@ class FakeResponse:
 
     def read(self, limit: int = -1) -> bytes:
         return self.body if limit < 0 else self.body[:limit]
+
+
+class NeverStop:
+    def is_set(self) -> bool:
+        return False
+
+    def wait(self, _timeout: float | None = None) -> bool:
+        return False
 
 
 def mysql_connection(cursor):
@@ -440,6 +448,220 @@ class ApplicationMechanicsTests(unittest.TestCase):
             state.set_failure_mode("normal", run_id=RUN_ID)
         self.assertEqual(state.status()["failure_mode"], "normal")
         self.assertEqual(state.status()["run_id"], RUN_ID)
+
+    def test_mysql_configuration_revision_tracks_key_response_and_query_settings(self):
+        state = MysqlInventoryState()
+        state.logger = Mock()
+        revisions = {state.status()["configuration_revision"]}
+
+        with patch("app.mysql_inventory.threading.Thread"):
+            for key, value in (
+                    ("INVENTORY_ACCEPTED_KEY_ID", "checkout-key-v2"),
+                    ("INVENTORY_RESPONSE_SCHEMA", "v2"),
+                    ("INVENTORY_QUERY_REVISION", "v2")):
+                settings = {
+                    "INVENTORY_ACCEPTED_KEY_ID": "checkout-key-v1",
+                    "INVENTORY_RESPONSE_SCHEMA": "v1",
+                    "INVENTORY_QUERY_REVISION": "v1",
+                    key: value,
+                }
+                if key == "INVENTORY_QUERY_REVISION":
+                    state._require_reserved_quantity_column_absent = Mock()
+                state.set_failure_mode("configured", settings=settings, run_id=RUN_ID)
+                revisions.add(state.status()["configuration_revision"])
+
+        self.assertEqual(len(revisions), 4)
+        event = state.logger.write.call_args.kwargs
+        self.assertEqual(event["configuration_revision"], state.status()["configuration_revision"])
+        self.assertEqual(event["run_id"], RUN_ID)
+        self.assertNotIn("accepted_key_id", event)
+
+    def test_mysql_response_contract_scenario_reaches_checkout_as_a_contract_failure(self):
+        inventory = MysqlInventoryState()
+        inventory.logger = Mock()
+        inventory.failure_mode = "response-contract"
+        cursor = MagicMock()
+        cursor.rowcount = 1
+        inventory.connect = Mock(return_value=mysql_connection(cursor))
+        upstream_status, upstream_body = inventory.reserve("order-17", "checkout-key-v1")
+        self.assertEqual(upstream_status, 200)
+
+        with patch.dict("os.environ", {"INVENTORY_URL": "http://inventory-api:8081"}):
+            orders = OrdersState()
+        orders.logger = Mock()
+        response = FakeResponse(json.dumps(upstream_body).encode("utf-8"), status=upstream_status)
+        with patch("app.orders.urlopen", return_value=response) as urlopen:
+            status, body = orders.checkout("order-17")
+
+        self.assertEqual(status, 502)
+        self.assertEqual(body["status"], "dependency_contract_rejected")
+        self.assertEqual(urlopen.call_count, 1)
+        attempt = [call.kwargs for call in orders.logger.write.call_args_list
+                   if call.args and call.args[1] == "Inventory dependency attempt completed"][0]
+        self.assertEqual(attempt["upstream_status"], 200)
+        self.assertEqual(attempt["outcome"], "contract_shape")
+        self.assertEqual(attempt["missing_fields"], ["status"])
+
+    def test_mysql_token_collision_is_observable_and_does_not_decrement_for_second_owner(self):
+        state = MysqlInventoryState()
+        state.logger = Mock()
+        state.logger.count = 0
+        with patch("app.mysql_inventory.threading.Thread"):
+            state.set_failure_mode("token-collision", run_id=RUN_ID)
+        first_cursor = MagicMock()
+        first_cursor.rowcount = 1
+        state.connect = Mock(return_value=mysql_connection(first_cursor))
+        self.assertEqual(state.reserve("order-17", "checkout-key-v1")[0], 200)
+
+        duplicate_cursor = MagicMock()
+        duplicate_cursor.execute.side_effect = [None, pymysql.err.IntegrityError(1062, "duplicate key")]
+        owner_cursor = MagicMock()
+        owner_cursor.fetchone.return_value = ("order-17",)
+        state.connect = Mock(side_effect=[mysql_connection(duplicate_cursor), mysql_connection(owner_cursor)])
+        status, response = state.reserve("order-18", "checkout-key-v1")
+
+        self.assertEqual(status, 409)
+        self.assertEqual(response["status"], "reservation_conflict")
+        self.assertFalse(any("UPDATE inventory_items" in call.args[0]
+                             for call in duplicate_cursor.execute.call_args_list))
+        self.assertIn('inventory_transaction_failures_total{kind="constraint"} 1', state.metrics())
+        event = [call.kwargs for call in state.logger.write.call_args_list
+                 if call.args and call.args[1] == "Reservation token belongs to a different request"][0]
+        self.assertEqual(event["ownership_match"], False)
+        self.assertEqual(event["mysql_error_code"], 1062)
+
+    def test_mysql_deadlock_victim_has_pair_and_lock_order_evidence(self):
+        state = MysqlInventoryState()
+        state.logger = Mock()
+        state.logger.count = 0
+        cursor = MagicMock()
+        cursor.fetchone.return_value = (100,)
+        cursor.execute.side_effect = [None, None, pymysql.err.OperationalError(1213, "deadlock")]
+        state.connect = Mock(return_value=mysql_connection(cursor))
+        barrier = Mock()
+
+        state._deadlock_transaction("sku-red-widget", "sku-blue-widget", barrier, "pair-1")
+
+        barrier.wait.assert_called_once_with(timeout=2)
+        self.assertIn('inventory_transaction_failures_total{kind="deadlock"} 1', state.metrics())
+        event = state.logger.write.call_args.kwargs
+        self.assertEqual(event["pair_id"], "pair-1")
+        self.assertEqual(event["mysql_error_code"], 1213)
+        self.assertEqual(event["first_sku"], "sku-red-widget")
+        self.assertEqual(event["second_sku"], "sku-blue-widget")
+
+    def test_mysql_capacity_storm_reports_bounded_headroom_from_sampled_capacity(self):
+        state = MysqlInventoryState()
+        state.logger = Mock()
+        state.logger.count = 0
+        state.configured_max_connections = 28
+        state.server_max_connections = 40
+
+        def connect_with_counter():
+            state.client_sessions_active += 1
+            return mysql_connection(MagicMock())
+
+        state.connect = Mock(side_effect=connect_with_counter)
+        with patch("app.mysql_inventory.time.sleep"):
+            state._connection_storm(NeverStop())
+
+        self.assertEqual(len(state._held_connections), 34)
+        self.assertEqual(state.client_sessions_active, 34)
+        pressure = [call.kwargs for call in state.logger.write.call_args_list
+                    if call.args and call.args[1] == "Inventory session pressure bounded with server headroom"][0]
+        self.assertEqual(pressure["observed_capacity"], 40)
+        self.assertEqual(pressure["checked_out_target"], 34)
+        self.assertEqual(pressure["reserved_connections"], 6)
+        self.assertIn("inventory_mysql_client_sessions_active 34", state.metrics())
+        state._release_connections()
+        self.assertEqual(state.client_sessions_active, 0)
+
+    def test_mysql_downstream_latency_is_applied_before_database_success(self):
+        state = MysqlInventoryState()
+        state.logger = Mock()
+        with patch("app.mysql_inventory.threading.Thread"):
+            state.set_failure_mode("downstream-latency")
+        cursor = MagicMock()
+        cursor.rowcount = 1
+        state.connect = Mock(return_value=mysql_connection(cursor))
+
+        status, _response = state.reserve("order-17", "checkout-key-v1")
+
+        self.assertEqual(status, 200)
+        self.assertGreaterEqual(state.logger.write.call_args.kwargs["duration_ms"], 300)
+
+    def test_mysql_query_revision_skew_counts_missing_column_failure(self):
+        state = MysqlInventoryState()
+        state.logger = Mock()
+        state.logger.count = 0
+        with patch.object(state, "_require_reserved_quantity_column_absent"), \
+                patch("app.mysql_inventory.threading.Thread"):
+            state.set_failure_mode("configured", settings={
+                "INVENTORY_QUERY_REVISION": "v2",
+            })
+        cursor = MagicMock()
+        cursor.execute.side_effect = [None, None, pymysql.err.OperationalError(1054, "unknown column")]
+        state.connect = Mock(return_value=mysql_connection(cursor))
+
+        status, _response = state.reserve("order-17", "checkout-key-v1")
+
+        self.assertEqual(status, 503)
+        self.assertIn('inventory_database_failures_total{kind="query"} 1', state.metrics())
+        failure = [call.kwargs for call in state.logger.write.call_args_list
+                   if call.args and call.args[1] == "Inventory MySQL operation failed"][0]
+        self.assertEqual(failure["query_revision"], "v2")
+        self.assertEqual(failure["mysql_error_code"], 1054)
+
+    def test_mysql_key_and_response_schema_skew_have_distinct_consumer_outcomes(self):
+        state = MysqlInventoryState()
+        state.logger = Mock()
+        with patch("app.mysql_inventory.threading.Thread"):
+            state.set_failure_mode("configured", settings={
+                "INVENTORY_ACCEPTED_KEY_ID": "checkout-key-v2",
+                "INVENTORY_RESPONSE_SCHEMA": "v2",
+            })
+
+        state.connect = Mock()
+        status, _response = state.reserve("order-17", "checkout-key-v1")
+        self.assertEqual(status, 401)
+        state.connect.assert_not_called()
+        key_rejection = [call.kwargs for call in state.logger.write.call_args_list
+                         if call.args and call.args[1] == "Reservation request key ID was not accepted"][0]
+        self.assertEqual(key_rejection["presented_key_id"], "checkout-key-v1")
+        self.assertEqual(key_rejection["accepted_key_id"], "checkout-key-v2")
+
+        cursor = MagicMock()
+        cursor.rowcount = 1
+        state.connect = Mock(return_value=mysql_connection(cursor))
+        upstream_status, upstream_body = state.reserve("order-18", "checkout-key-v2")
+        self.assertEqual(upstream_status, 200)
+        with patch.dict("os.environ", {"INVENTORY_URL": "http://inventory-api:8081"}):
+            orders = OrdersState()
+        orders.logger = Mock()
+        with patch("app.orders.urlopen", return_value=FakeResponse(
+                json.dumps(upstream_body).encode("utf-8"), status=upstream_status)):
+            checkout_status, _body = orders.checkout("order-18")
+
+        self.assertEqual(checkout_status, 502)
+        mismatch = [call.kwargs for call in orders.logger.write.call_args_list
+                    if call.args and call.args[1] == "Inventory dependency attempt completed"][0]
+        self.assertEqual(mismatch["outcome"], "contract_version")
+        self.assertEqual(mismatch["expected_schema"], "v1")
+        self.assertEqual(mismatch["observed_schema"], "v2")
+
+    def test_orders_misrouted_dependency_is_transport_failure_with_effective_route(self):
+        with patch.dict("os.environ", {"INVENTORY_URL": "http://inventory-api:8081"}):
+            state = OrdersState()
+        state.logger = Mock()
+        state.set_mode("configured", settings={"INVENTORY_URL": "http://inventory-api:8099"})
+
+        with patch("app.orders.urlopen", side_effect=URLError(ConnectionRefusedError("refused"))):
+            result = state._attempt_inventory_result("order-17")
+
+        self.assertEqual((result["status"], result["kind"]), (503, "transport"))
+        event = state.logger.write.call_args.kwargs
+        self.assertEqual(event["dependency_host"], "inventory-api")
+        self.assertEqual(event["dependency_port"], 8099)
 
     def test_mysql_successful_reservation_writes_idempotency_and_decrements_stock(self):
         state = MysqlInventoryState()
