@@ -1,0 +1,121 @@
+[
+  {
+    "id": "lib-07-001",
+    "title": "Quote aggregation stalls during provider fan-out",
+    "category": "gateway",
+    "service": "quote-edge",
+    "mechanism": "http_timeout",
+    "summary": "Quote requests intermittently return incomplete results during the afternoon traffic peak, while direct provider checks remain responsive.",
+    "precursor": "Two regional quote providers were added to the aggregation route shortly before a scheduled marketplace campaign.",
+    "impact": "Customers see delayed or partial quote comparisons, reducing successful quote-to-order conversions.",
+    "parameters": {
+      "route": "/v2/quotes/compare",
+      "upstream": "rates-eu",
+      "gateway_timeout_ms": 500,
+      "upstream_p95_ms": 870,
+      "sample_window_seconds": 300,
+      "affected_request_fraction": 0.18
+    },
+    "context": {
+      "cluster": "prod-eu-central-1",
+      "namespace": "marketplace",
+      "route_id": "quote-compare-v2",
+      "trace_id": "trc-91c4a72e"
+    }
+  },
+  {
+    "id": "lib-07-002",
+    "title": "Profile reads fail on newly scheduled gateway replicas",
+    "category": "gateway",
+    "service": "profile-gateway",
+    "mechanism": "dns_lookup",
+    "summary": "A subset of profile lookups fails before receiving an upstream response, while requests handled by older gateway pods continue to succeed.",
+    "precursor": "The profile API was rolled out and the gateway deployment was scaled from four replicas to nine during the same release window.",
+    "impact": "Account pages intermittently lack current contact and preference data, causing avoidable support contacts and retries.",
+    "parameters": {
+      "upstream_host": "profiles-api.customer.svc.cluster.local",
+      "lookup_attempts": 3,
+      "lookup_timeout_ms": 1200,
+      "failing_pod_fraction": 0.44,
+      "sample_window_seconds": 180
+    },
+    "context": {
+      "cluster": "prod-us-west-2",
+      "namespace": "customer-platform",
+      "deployment": "profile-gateway-v31",
+      "route_id": "account-profile-read"
+    }
+  },
+  {
+    "id": "lib-07-003",
+    "title": "Checkout dispatches reach an unavailable inventory listener",
+    "category": "gateway",
+    "service": "checkout-edge",
+    "mechanism": "tcp_refused",
+    "summary": "Checkout requests that need a stock reservation fail quickly, although the inventory service remains marked ready in the cluster.",
+    "precursor": "A rolling inventory API update replaced the backing pods after a container image change and a service-port adjustment.",
+    "impact": "Customers cannot complete purchases for items requiring a fresh reservation, leaving carts open and increasing abandonment.",
+    "parameters": {
+      "route": "/api/v1/checkout/reserve",
+      "upstream_service": "inventory-api",
+      "upstream_port": 8090,
+      "connect_timeout_ms": 250,
+      "connection_refusals_per_minute": 96,
+      "affected_replica_count": 3
+    },
+    "context": {
+      "cluster": "prod-us-east-1",
+      "namespace": "commerce",
+      "service_account": "checkout-edge",
+      "release": "inventory-api-2026.09.26-2"
+    }
+  },
+  {
+    "id": "lib-07-004",
+    "title": "Partner callbacks receive authorization failures in one region",
+    "category": "gateway",
+    "service": "partner-gateway",
+    "mechanism": "auth_expired",
+    "summary": "Partner callback deliveries are rejected in the west region while the same partners continue to receive events from the central region.",
+    "precursor": "The partner integration credentials were rotated during a maintenance window, followed by a staggered rollout of gateway pods.",
+    "impact": "Shipment status updates arrive late or not at all for affected partners, weakening tracking visibility for customers.",
+    "parameters": {
+      "route": "/hooks/v1/shipment-events",
+      "token_ttl_seconds": 600,
+      "refresh_interval_seconds": 900,
+      "rejected_callbacks_per_minute": 73,
+      "affected_region": "us-west-2",
+      "retry_backoff_seconds": 30
+    },
+    "context": {
+      "cluster": "prod-us-west-2",
+      "namespace": "integrations",
+      "partner_id": "shipco-047",
+      "gateway_release": "partner-gateway-v18"
+    }
+  },
+  {
+    "id": "lib-07-005",
+    "title": "Checkout confirmation traffic is throttled after campaign launch",
+    "category": "gateway",
+    "service": "checkout-gateway",
+    "mechanism": "rate_limit",
+    "summary": "Some customers receive temporary failures when confirming orders, despite healthy payment and inventory dependencies.",
+    "precursor": "A promotional campaign drove a sharp increase in checkout submissions, and the storefront began retrying transient failures more aggressively.",
+    "impact": "Order confirmations are delayed or abandoned during the campaign, lowering completed sales and creating duplicate-submission risk.",
+    "parameters": {
+      "route": "/api/v1/checkout/confirm",
+      "limit_per_minute": 1200,
+      "observed_requests_per_minute": 1548,
+      "retry_multiplier": 2.1,
+      "cooldown_seconds": 60,
+      "rejected_request_fraction": 0.14
+    },
+    "context": {
+      "cluster": "prod-ap-southeast-1",
+      "namespace": "commerce",
+      "route_id": "checkout-confirm-v1",
+      "campaign_id": "autumn-home-2026"
+    }
+  }
+]
