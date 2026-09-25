@@ -1,0 +1,117 @@
+[
+  {
+    "id": "lib-08-fulfillment-redelivery-storm",
+    "title": "Fulfillment events stop advancing",
+    "category": "messaging",
+    "service": "fulfillment-worker",
+    "mechanism": "queue_poison",
+    "summary": "A small group of order events remains at the head of the fulfillment stream while delivery attempts climb and shipment updates stall.",
+    "precursor": "A fulfillment worker rollout finished during a routine order-event version transition.",
+    "impact": "Newly paid orders remain unallocated, and customers do not receive shipment confirmations within the usual service window.",
+    "parameters": {
+      "queue": "orders.fulfillment.v2",
+      "consumer_group": "fulfillment-workers-v3",
+      "max_delivery_attempts": 12,
+      "redelivery_delay_seconds": 30,
+      "affected_message_share_percent": 2.4
+    },
+    "context": {
+      "cluster": "prod-eu1",
+      "namespace": "commerce",
+      "deployment": "fulfillment-worker"
+    }
+  },
+  {
+    "id": "lib-08-risk-review-capacity-lag",
+    "title": "Payment review queue falls behind",
+    "category": "messaging",
+    "service": "risk-review-worker",
+    "mechanism": "queue_backlog",
+    "summary": "Review decisions are arriving beyond the normal service window, and the oldest pending item keeps getting older despite healthy broker connectivity.",
+    "precursor": "A weekend promotion increased transaction intake while the review pipeline replica count remained unchanged.",
+    "impact": "Legitimate payments stay pending longer, increasing checkout abandonment and delaying fraud holds on suspect transactions.",
+    "parameters": {
+      "queue": "payments.risk.review",
+      "arrival_rate_per_second": 420,
+      "processing_rate_per_second": 275,
+      "consumer_replicas": 4,
+      "backlog_warning_messages": 18000,
+      "oldest_message_age_seconds": 1260
+    },
+    "context": {
+      "cluster": "prod-us2",
+      "namespace": "payments",
+      "deployment": "risk-review-worker"
+    }
+  },
+  {
+    "id": "lib-08-ledger-posting-latency",
+    "title": "Invoice posting retries increase",
+    "category": "messaging",
+    "service": "invoice-posting-worker",
+    "mechanism": "http_timeout",
+    "summary": "Invoice events are retrying and posting completion is falling behind while worker pods remain available.",
+    "precursor": "The accounting integration's response times lengthened after its nightly maintenance window.",
+    "impact": "Ledger postings lag by more than twenty minutes, leaving reconciliation reports incomplete during the morning close.",
+    "parameters": {
+      "queue": "billing.invoice.post",
+      "downstream_service": "ledger-adapter",
+      "request_timeout_ms": 1800,
+      "observed_p95_latency_ms": 5100,
+      "max_delivery_attempts": 5,
+      "ack_deadline_seconds": 60
+    },
+    "context": {
+      "cluster": "prod-eu1",
+      "namespace": "billing",
+      "deployment": "invoice-posting-worker"
+    }
+  },
+  {
+    "id": "lib-08-inventory-sync-staleness",
+    "title": "Inventory updates arrive intermittently",
+    "category": "messaging",
+    "service": "inventory-sync-worker",
+    "mechanism": "auth_expired",
+    "summary": "Inventory sync consumption pauses intermittently, and the oldest unprocessed update rises across several regions.",
+    "precursor": "A credentials rotation took place shortly before the overnight inventory sync window.",
+    "impact": "Storefront stock counts lag warehouse changes, causing some unavailable items to remain purchasable and some available items to appear out of stock.",
+    "parameters": {
+      "queue": "inventory.delta",
+      "credential_audience": "inventory-writer",
+      "token_age_minutes_at_failure": 61,
+      "refresh_margin_seconds": 0,
+      "retry_backoff_seconds": 120,
+      "consumer_replicas": 3
+    },
+    "context": {
+      "cluster": "prod-ap1",
+      "namespace": "catalog",
+      "deployment": "inventory-sync-worker"
+    }
+  },
+  {
+    "id": "lib-08-partner-webhook-throttle",
+    "title": "Partner event delivery degrades",
+    "category": "messaging",
+    "service": "webhook-delivery-worker",
+    "mechanism": "rate_limit",
+    "summary": "Partner delivery success falls sharply and retry depth grows for one tenant's event stream.",
+    "precursor": "The tenant enabled a new event subscription and delivery volume rose over a short period.",
+    "impact": "The partner's shipment status view misses recent changes, and repeated delivery attempts consume worker capacity needed by other tenants.",
+    "parameters": {
+      "queue": "partner.webhooks.standard",
+      "partner_service": "northstar-logistics-api",
+      "observed_http_status": 429,
+      "partner_request_limit_per_minute": 600,
+      "attempted_requests_per_minute": 840,
+      "max_delivery_attempts": 10
+    },
+    "context": {
+      "cluster": "prod-us1",
+      "namespace": "integrations",
+      "deployment": "webhook-delivery-worker",
+      "tenant_id": "tenant-northstar-042"
+    }
+  }
+]
