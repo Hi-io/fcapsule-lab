@@ -1,0 +1,114 @@
+[
+  {
+    "id": "lib-15-001",
+    "title": "Checkout retries collide during elevated latency",
+    "category": "database",
+    "service": "checkout-api",
+    "mechanism": "db_unique",
+    "summary": "Checkout confirmations lag and a small share of requests return duplicate-operation errors.",
+    "precursor": "Payment confirmation latency rose during a promotion, causing clients and workers to retry submissions inside the same idempotency window.",
+    "impact": "Some customers see an uncertain checkout result and retry again, increasing support contacts and duplicate payment investigations.",
+    "parameters": {
+      "table": "payment_attempts",
+      "constraint": "uq_payment_attempts_merchant_idempotency",
+      "key_columns": ["merchant_id", "idempotency_key"],
+      "retry_window_seconds": 45,
+      "conflict_rate_percent": 3.7
+    },
+    "context": {
+      "namespace": "commerce-prod",
+      "database_cluster": "orders-mysql-primary",
+      "release": "checkout-api-2.18.4"
+    }
+  },
+  {
+    "id": "lib-15-002",
+    "title": "Supplier catalog batches partially apply",
+    "category": "database",
+    "service": "catalog-sync",
+    "mechanism": "db_foreign_key",
+    "summary": "Catalog synchronization reports rejected item groups while storefront availability remains stale.",
+    "precursor": "A supplier feed began including variant records before all referenced product records were present in the same import window.",
+    "impact": "New or changed variants are missing from storefront listings until the affected groups are replayed.",
+    "parameters": {
+      "parent_table": "products",
+      "child_table": "product_variants",
+      "constraint": "fk_product_variants_product_id",
+      "rejected_rows": 186,
+      "batch_size": 500,
+      "max_replay_attempts": 3
+    },
+    "context": {
+      "namespace": "catalog-prod",
+      "supplier_feed": "northstar-nightly-v4",
+      "job_run": "sync-2026-09-25-0215"
+    }
+  },
+  {
+    "id": "lib-15-003",
+    "title": "Ledger writes queue behind a long transaction",
+    "category": "database",
+    "service": "billing-ledger",
+    "mechanism": "db_locked",
+    "summary": "Ledger write latency climbs and API workers accumulate while waiting for transactions to finish.",
+    "precursor": "A month-end aging report began scanning a large tenant partition as invoice posting traffic returned to its usual peak.",
+    "impact": "Invoice issuance and balance updates miss their service targets, with a growing queue of pending billing events.",
+    "parameters": {
+      "lock_wait_timeout_seconds": 8,
+      "observed_lock_wait_seconds_p95": 19.4,
+      "connection_pool_size": 32,
+      "waiting_transactions": 74,
+      "affected_table": "account_entries"
+    },
+    "context": {
+      "namespace": "billing-prod",
+      "database_cluster": "ledger-mysql-02",
+      "tenant_partition": "tenant_7f31"
+    }
+  },
+  {
+    "id": "lib-15-004",
+    "title": "Analytics exports fail after a worker rollout",
+    "category": "database",
+    "service": "analytics-exporter",
+    "mechanism": "db_schema",
+    "summary": "Scheduled exports stop completing after deployment, leaving several operational dashboards behind.",
+    "precursor": "The exporter deployment progressed while the database change for the next reporting revision was still pending in the release sequence.",
+    "impact": "Finance and operations teams continue to see yesterday's totals until export jobs recover and catch up.",
+    "parameters": {
+      "worker_expected_schema_revision": 42,
+      "database_schema_revision": 41,
+      "failed_jobs": 12,
+      "retry_interval_seconds": 300,
+      "affected_relation": "daily_settlement_rollups"
+    },
+    "context": {
+      "namespace": "analytics-prod",
+      "release": "analytics-exporter-5.6.0",
+      "migration_job": "reporting-schema-20260925"
+    }
+  },
+  {
+    "id": "lib-15-005",
+    "title": "Order connection pool cannot re-establish sessions",
+    "category": "database",
+    "service": "order-writer",
+    "mechanism": "tcp_refused",
+    "summary": "Order writes begin returning transient service errors as new database sessions fail immediately.",
+    "precursor": "A database node failover occurred while writer pods were scaling up to drain a delayed order-event backlog.",
+    "impact": "New orders are delayed and the event backlog continues to grow until database connectivity is restored.",
+    "parameters": {
+      "database_service": "orders-primary",
+      "database_port": 3306,
+      "connection_pool_size": 48,
+      "connect_timeout_ms": 1200,
+      "connection_errors_per_minute": 920,
+      "retry_backoff_max_ms": 5000
+    },
+    "context": {
+      "namespace": "commerce-prod",
+      "database_cluster": "orders-mysql-primary",
+      "pod_group": "order-writer-v3"
+    }
+  }
+]
