@@ -103,9 +103,13 @@ spec:
       rules:
         - alert: LabLibraryOperationFailures
           expr: |
-            increase(lab_library_failures_total{namespace="fcapsule-lab",service="lab-incident-library"}[1m]) > 3
+            max by (namespace, pod, service, scenario_id) (
+              increase(lab_library_failures_total{namespace="fcapsule-lab",service="lab-incident-library"}[1m])
+            ) > 3
             and on (namespace, pod, scenario_id)
-              lab_library_active{namespace="fcapsule-lab",service="lab-incident-library"} == 1
+              max by (namespace, pod, service, scenario_id) (
+                lab_library_active{namespace="fcapsule-lab",service="lab-incident-library"}
+              ) == 1
           for: 10s
           labels:
             severity: warning

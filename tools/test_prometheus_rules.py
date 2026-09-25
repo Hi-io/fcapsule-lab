@@ -436,6 +436,19 @@ def build_rule_test(spec: dict[str, Any]) -> dict[str, Any]:
         absent_at=("0s", "10s", "20s"), firing_at=("15s",),
     ))
     tests.append(_rule_case(
+        {"LabLibraryOperationFailures": library_rule}, "LabLibraryOperationFailures", [
+            _series("lab_library_failures_total", "library-duplicate", "lab-incident-library",
+                    "0 5 5 5 5", {**library_id, "job": "first"}),
+            _series("lab_library_failures_total", "library-duplicate", "lab-incident-library",
+                    "0 5 5 5 5", {**library_id, "job": "second"}),
+            _series("lab_library_active", "library-duplicate", "lab-incident-library",
+                    "1 1 1 1 1", {**library_id, "job": "first"}),
+            _series("lab_library_active", "library-duplicate", "lab-incident-library",
+                    "1 1 1 1 1", {**library_id, "job": "second"}),
+        ], pod="library-duplicate", service="lab-incident-library", extra_labels=library_id,
+        absent_at=("0s", "10s"), firing_at=("15s",),
+    ))
+    tests.append(_rule_case(
         {"LabLibraryOperationFailures": library_rule}, "LabLibraryOperationFailures", [],
         pod=None, service="lab-incident-library", absent_at=("20s",),
     ))
