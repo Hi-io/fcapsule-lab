@@ -1,0 +1,122 @@
+[
+  {
+    "id": "lib-14-001",
+    "title": "Checkout authorization latency surge",
+    "category": "observability",
+    "service": "checkout-api",
+    "mechanism": "http_timeout",
+    "summary": "The order-submit p99 latency has crossed its SLO and client retries are increasing, while ingress volume and pod availability remain near their usual levels.",
+    "precursor": "Release checkout-api v2.31 enabled a second-stage payment authorization call for orders containing split tenders; the rollout completed without changing the replica count.",
+    "impact": "More shoppers abandon checkout or submit duplicate attempts, and the payment operations team sees a growing count of orders awaiting confirmation.",
+    "parameters": {
+      "route": "POST /v2/orders",
+      "dependency": "payment-authorizer",
+      "request_timeout_ms": 1800,
+      "observed_p99_ms": 4210,
+      "retry_rate_percent": 17.6,
+      "window_minutes": 10
+    },
+    "context": {
+      "cluster": "prod-eu2",
+      "namespace": "commerce",
+      "deployment": "checkout-api",
+      "release": "v2.31"
+    }
+  },
+  {
+    "id": "lib-14-002",
+    "title": "Partner identity refresh stall",
+    "category": "observability",
+    "service": "identity-sync",
+    "mechanism": "dns_lookup",
+    "summary": "Partner identity refresh jobs are falling behind their hourly freshness target; worker utilization is low and the job error count is concentrated on one partner feed.",
+    "precursor": "The platform team moved identity-sync pods onto a newly provisioned node pool during the overnight maintenance window; the deployment image and feed schedule were unchanged.",
+    "impact": "Recently changed partner roles are not reflected promptly in access decisions, increasing support escalations for users whose permissions appear out of date.",
+    "parameters": {
+      "feed": "northstar-directory",
+      "hostname": "directory.northstar.example",
+      "lookup_result": "SERVFAIL",
+      "lookup_attempts": 4,
+      "lookup_timeout_ms": 1200,
+      "oldest_job_age_minutes": 94
+    },
+    "context": {
+      "cluster": "prod-us1",
+      "namespace": "identity",
+      "deployment": "identity-sync",
+      "partner_id": "northstar-directory"
+    }
+  },
+  {
+    "id": "lib-14-003",
+    "title": "Invoice event freshness regression",
+    "category": "observability",
+    "service": "invoice-consumer",
+    "mechanism": "queue_poison",
+    "summary": "Invoice status freshness is outside its target and the oldest-message age has stopped improving, despite normal consumer health checks and spare worker capacity.",
+    "precursor": "A billing schema release introduced an optional tax adjustment field, after which one invoice event began recurring in consumer delivery telemetry during the regional peak.",
+    "impact": "Customer portals continue to show stale invoice states and downstream reconciliation reports are delayed for the affected billing window.",
+    "parameters": {
+      "queue": "billing.invoice-events.v3",
+      "message_id": "evt-7d92c4a1",
+      "delivery_count": 12,
+      "max_deliveries": 12,
+      "oldest_message_age_minutes": 38,
+      "consumer_group": "invoice-status-writers"
+    },
+    "context": {
+      "cluster": "prod-eu1",
+      "namespace": "billing",
+      "deployment": "invoice-consumer",
+      "consumer_group": "invoice-status-writers"
+    }
+  },
+  {
+    "id": "lib-14-004",
+    "title": "Media rendition worker instability",
+    "category": "observability",
+    "service": "media-transcoder",
+    "mechanism": "resource_memory",
+    "summary": "Rendition completion time is rising for high-resolution uploads, with intermittent worker losses and a widening gap between accepted and completed jobs.",
+    "precursor": "A creator campaign increased the proportion of 4K source uploads, and the transcoder rollout added a new color-conversion stage to the standard rendition pipeline.",
+    "impact": "New video previews become available late, reducing creator engagement and increasing the number of customer tickets about missing renditions.",
+    "parameters": {
+      "job_profile": "4k-hdr-to-h264",
+      "container_memory_limit_mib": 2048,
+      "peak_working_set_mib": 2016,
+      "oom_kills_15m": 7,
+      "p95_job_duration_seconds": 684,
+      "pending_jobs": 286
+    },
+    "context": {
+      "cluster": "prod-us2",
+      "namespace": "media",
+      "deployment": "media-transcoder",
+      "node_pool": "gpu-general-b"
+    }
+  },
+  {
+    "id": "lib-14-005",
+    "title": "Policy evaluation canary errors",
+    "category": "observability",
+    "service": "policy-evaluator",
+    "mechanism": "config_missing",
+    "summary": "Authorization evaluation failures are elevated on the canary while the stable fleet remains healthy; requests using recently changed policies are most affected.",
+    "precursor": "Policy-evaluator v5.8.0 was promoted to a small canary after the policy bundle naming convention changed in the release pipeline.",
+    "impact": "Some administrative actions are temporarily denied or retried, and operators have paused further rollout while access decisions are reviewed.",
+    "parameters": {
+      "config_key": "POLICY_BUNDLE_URI",
+      "expected_mount_path": "/etc/policy/bundles/current.tar.zst",
+      "canary_error_rate_percent": 23.4,
+      "stable_error_rate_percent": 0.3,
+      "affected_replicas": 2,
+      "total_canary_replicas": 4
+    },
+    "context": {
+      "cluster": "prod-ap1",
+      "namespace": "access-control",
+      "deployment": "policy-evaluator",
+      "release": "v5.8.0"
+    }
+  }
+]
