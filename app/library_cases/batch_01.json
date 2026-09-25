@@ -1,0 +1,107 @@
+[
+  {
+    "id": "lib-01-001",
+    "title": "Checkout attempt collision during replay",
+    "category": "checkout",
+    "service": "checkout-orchestrator",
+    "mechanism": "db_unique",
+    "summary": "Order submission retries are rejected during persistence, and affected carts remain in a pending state.",
+    "precursor": "A delayed client retry overlapped with an asynchronous reconciliation of the same checkout session.",
+    "impact": "Customers cannot complete checkout for affected sessions; support staff must reconcile the pending attempts before retrying.",
+    "parameters": {
+      "table": "checkout_attempts",
+      "constraint": "uq_checkout_attempt_external_ref",
+      "retry_window_seconds": 30,
+      "overlapping_writes": 2
+    },
+    "context": {
+      "namespace": "commerce-prod",
+      "deployment": "checkout-orchestrator-v2",
+      "region": "eu-west-1"
+    }
+  },
+  {
+    "id": "lib-01-002",
+    "title": "Stock allocation misses checkout deadline",
+    "category": "checkout",
+    "service": "checkout-orchestrator",
+    "mechanism": "http_timeout",
+    "summary": "Cart submissions stop at stock allocation and return dependency deadline errors despite the reservation API remaining available.",
+    "precursor": "A promotion increased multi-warehouse reservation fanout shortly after a new checkout path was enabled.",
+    "impact": "A portion of customers cannot place orders before their carts expire, while retries add more load to the reservation path.",
+    "parameters": {
+      "dependency": "reservation-api",
+      "deadline_ms": 800,
+      "observed_p99_ms": 1840,
+      "retry_budget": 1
+    },
+    "context": {
+      "namespace": "commerce-prod",
+      "deployment": "checkout-orchestrator-v2",
+      "route": "POST /v2/orders"
+    }
+  },
+  {
+    "id": "lib-01-003",
+    "title": "Order confirmation events stop advancing",
+    "category": "checkout",
+    "service": "order-event-consumer",
+    "mechanism": "queue_poison",
+    "summary": "Order confirmation processing repeatedly stalls at the same delivery, leaving later events unprocessed.",
+    "precursor": "A producer rollout began emitting an optional fulfillment field while a consumer deployment was being rolled back.",
+    "impact": "Customers see delayed order confirmations and downstream fulfillment creation falls behind for the affected partition.",
+    "parameters": {
+      "queue": "order-confirmed-v3",
+      "partition": 6,
+      "max_delivery_attempts": 8,
+      "oldest_delivery_age_seconds": 1420
+    },
+    "context": {
+      "namespace": "commerce-prod",
+      "consumer_group": "fulfillment-order-writer",
+      "topic": "order-events"
+    }
+  },
+  {
+    "id": "lib-01-004",
+    "title": "Payment authorization unavailable after renewal",
+    "category": "checkout",
+    "service": "payment-adapter",
+    "mechanism": "auth_expired",
+    "summary": "New checkout attempts fail at payment authorization with a sudden rise in credential-related responses.",
+    "precursor": "The overnight payment credential renewal completed while checkout replicas were still rolling between releases.",
+    "impact": "Customers cannot submit paid orders, although carts and inventory reservations continue to be created.",
+    "parameters": {
+      "provider": "northstar-payments",
+      "credential_ttl_seconds": 3600,
+      "renewal_grace_seconds": 120,
+      "authorization_error_rate_percent": 37
+    },
+    "context": {
+      "namespace": "commerce-prod",
+      "deployment": "payment-adapter-v4",
+      "provider_account": "merchant-eu-02"
+    }
+  },
+  {
+    "id": "lib-01-005",
+    "title": "Address verification endpoint lookup failures",
+    "category": "checkout",
+    "service": "order-intake",
+    "mechanism": "dns_lookup",
+    "summary": "Order creation fails during address verification even though the intake service and other dependencies are healthy.",
+    "precursor": "A namespace migration moved the verifier workload during a release that also changed its service registration.",
+    "impact": "New orders for regions requiring address verification are rejected, while existing orders continue through fulfillment.",
+    "parameters": {
+      "hostname": "address-verifier.fulfillment.svc.cluster.local",
+      "lookup_timeout_ms": 250,
+      "attempts_per_request": 3,
+      "affected_regions": 2
+    },
+    "context": {
+      "namespace": "commerce-prod",
+      "deployment": "order-intake-v3",
+      "dependency_namespace": "fulfillment"
+    }
+  }
+]
