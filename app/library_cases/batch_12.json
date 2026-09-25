@@ -1,0 +1,115 @@
+[
+  {
+    "id": "lib-12-001",
+    "title": "Latest revenue partition cannot complete its daily refresh",
+    "category": "analytics",
+    "service": "billing-mart-builder",
+    "mechanism": "db_schema",
+    "summary": "The daily revenue model refresh fails on its newest partition while dashboards for prior periods remain available.",
+    "precursor": "Billing event volume and field coverage expanded during the quarter-close reporting window, while other marts continued refreshing.",
+    "impact": "Finance dashboards remain stale for the latest reporting interval and four downstream reports miss their morning delivery target.",
+    "parameters": {
+      "failed_partition": "dt=2026-09-25/hour=22",
+      "last_successful_partition": "dt=2026-09-25/hour=21",
+      "rows_in_failed_partition": 184230,
+      "refresh_duration_seconds": 312,
+      "downstream_models_blocked": 4
+    },
+    "context": {
+      "namespace": "analytics-prod",
+      "cluster": "data-west-1",
+      "deployment": "billing-mart-builder"
+    }
+  },
+  {
+    "id": "lib-12-002",
+    "title": "Engagement aggregates trail recent product activity",
+    "category": "analytics",
+    "service": "event-curation-worker",
+    "mechanism": "queue_backlog",
+    "summary": "Fresh product-usage events arrive well after ingestion, and hourly engagement aggregates are falling behind their normal refresh cadence.",
+    "precursor": "A mobile release drove a morning peak in late-arriving session events across several high-volume customer partitions.",
+    "impact": "Growth dashboards and churn-risk alerts use outdated activity counts until the delayed event batches are processed.",
+    "parameters": {
+      "consumer_lag_messages": 286400,
+      "oldest_event_age_minutes": 94,
+      "normal_peak_lag_messages": 12500,
+      "affected_partitions": 7,
+      "aggregate_refresh_interval_minutes": 60
+    },
+    "context": {
+      "namespace": "analytics-prod",
+      "cluster": "data-central-2",
+      "topic": "product-session-events",
+      "consumer_group": "engagement-curation-v4"
+    }
+  },
+  {
+    "id": "lib-12-003",
+    "title": "Campaign reports lose partner-attributed rows",
+    "category": "analytics",
+    "service": "partner-metrics-enricher",
+    "mechanism": "http_contract",
+    "summary": "Completed campaign reports contain missing or unclassified partner-attributed rows even though first-party totals remain within their usual range.",
+    "precursor": "The campaign ingestion feed resumed after its scheduled maintenance window, and the next enrichment run processed a larger-than-usual batch.",
+    "impact": "Partner return-on-spend reports undercount attributed conversions, delaying budget reconciliation and campaign adjustments.",
+    "parameters": {
+      "rows_missing_partner_attribution": 3912,
+      "rows_processed": 126840,
+      "affected_campaigns": 18,
+      "first_party_total_delta_percent": 0.6,
+      "enrichment_run_id": "enrich-20260926-0410"
+    },
+    "context": {
+      "namespace": "analytics-prod",
+      "cluster": "data-east-1",
+      "dependency": "campaign-registry-api",
+      "job": "partner-campaign-attribution"
+    }
+  },
+  {
+    "id": "lib-12-004",
+    "title": "Large segment snapshots stop before publication",
+    "category": "analytics",
+    "service": "segment-snapshotter",
+    "mechanism": "resource_memory",
+    "summary": "Large customer-segment snapshots terminate before publishing, while smaller segment runs complete and remain current.",
+    "precursor": "End-of-month activity increased the number of qualifying events included in the scheduled customer snapshot window.",
+    "impact": "Marketing exports continue using yesterday's membership, leaving newly eligible customers out of scheduled campaigns.",
+    "parameters": {
+      "memory_limit_mib": 4096,
+      "peak_working_set_mib": 4238,
+      "eligible_accounts": 2486000,
+      "terminated_runs_last_24h": 3,
+      "oldest_unpublished_snapshot_age_hours": 9
+    },
+    "context": {
+      "namespace": "customer-data-prod",
+      "cluster": "data-central-2",
+      "deployment": "segment-snapshotter"
+    }
+  },
+  {
+    "id": "lib-12-005",
+    "title": "Nightly finance extracts are missing from the warehouse",
+    "category": "analytics",
+    "service": "finance-warehouse-exporter",
+    "mechanism": "auth_expired",
+    "summary": "Scheduled finance extracts complete in the source system but do not appear in the reporting warehouse; source-side queries remain available.",
+    "precursor": "A routine access-maintenance window completed shortly before the first missed scheduled delivery.",
+    "impact": "The finance close model cannot reconcile the latest ledger snapshot, delaying morning variance review for accounting teams.",
+    "parameters": {
+      "extract_name": "ledger_daily_snapshot",
+      "last_delivered_date": "2026-09-24",
+      "first_missed_delivery": "2026-09-25T02:30:00Z",
+      "consecutive_failed_deliveries": 2,
+      "source_query_duration_seconds": 41
+    },
+    "context": {
+      "namespace": "finance-data-prod",
+      "cluster": "data-east-1",
+      "destination": "reporting-warehouse",
+      "job": "finance-ledger-export"
+    }
+  }
+]
