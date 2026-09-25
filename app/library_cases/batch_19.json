@@ -1,0 +1,120 @@
+[
+  {
+    "id": "lib-19-001",
+    "title": "Search replicas lose access to catalog endpoints",
+    "category": "network",
+    "service": "merchant-search",
+    "mechanism": "dns_lookup",
+    "summary": "Search requests from one replica pool fail before a catalog response, while neighboring pools continue to return results.",
+    "precursor": "The search deployment was expanded into a second availability zone during the latest catalog index release.",
+    "impact": "Shoppers in the affected region cannot reliably find listed products, reducing discovery and increasing repeated searches.",
+    "parameters": {
+      "upstream_host": "catalog-query.commerce.svc.cluster.local",
+      "lookup_timeout_ms": 900,
+      "lookup_attempts": 3,
+      "failing_pod_fraction": 0.38,
+      "sample_window_seconds": 240
+    },
+    "context": {
+      "cluster": "prod-eu-west-1",
+      "namespace": "commerce",
+      "deployment": "merchant-search-v27",
+      "route_id": "product-search-v3"
+    }
+  },
+  {
+    "id": "lib-19-002",
+    "title": "Login requests cannot reach directory listeners",
+    "category": "network",
+    "service": "identity-session",
+    "mechanism": "tcp_refused",
+    "summary": "Login attempts routed from a subset of API pods fail immediately, while existing session refreshes continue to complete.",
+    "precursor": "The identity directory service endpoints and the session API client were updated in separate steps during a scheduled rollout.",
+    "impact": "New sign-ins fail for affected users, preventing access to account and checkout workflows and driving authentication retries.",
+    "parameters": {
+      "upstream_service": "identity-directory",
+      "upstream_port": 8443,
+      "connect_timeout_ms": 300,
+      "connection_refusals_per_minute": 112,
+      "affected_replica_count": 3
+    },
+    "context": {
+      "cluster": "prod-us-central-1",
+      "namespace": "identity",
+      "caller_deployment": "identity-session-v14",
+      "release": "directory-rollout-2026.09.26-1"
+    }
+  },
+  {
+    "id": "lib-19-003",
+    "title": "Tracking detail calls exceed the dependency budget",
+    "category": "network",
+    "service": "shipment-tracker",
+    "mechanism": "http_timeout",
+    "summary": "Tracking detail requests intermittently return an unavailable response after waiting on a dependency, while cached shipment summaries remain responsive.",
+    "precursor": "Carrier tracking traffic increased after a marketplace integration began polling more frequently for in-transit orders.",
+    "impact": "Customers see delayed delivery updates, and support teams receive more requests to confirm shipment status manually.",
+    "parameters": {
+      "route": "/v2/shipments/{shipment_id}/tracking",
+      "upstream_service": "carrier-router",
+      "caller_timeout_ms": 700,
+      "upstream_p95_ms": 1180,
+      "max_attempts": 2,
+      "timed_out_requests_per_minute": 86
+    },
+    "context": {
+      "cluster": "prod-ap-southeast-1",
+      "namespace": "fulfillment",
+      "deployment": "shipment-tracker-v9",
+      "integration_id": "parcel-network-asia"
+    }
+  },
+  {
+    "id": "lib-19-004",
+    "title": "Live pricing previews return dependency errors",
+    "category": "network",
+    "service": "pricing-preview",
+    "mechanism": "http_status",
+    "summary": "Live price preview requests receive intermittent upstream errors, although saved price lists and product pages remain available.",
+    "precursor": "A catalog publication increased live evaluation traffic shortly after a new pricing ruleset became active.",
+    "impact": "Merchants cannot verify some price changes before publication, delaying catalog updates and creating inconsistent promotion timing.",
+    "parameters": {
+      "route": "/internal/v3/prices/preview",
+      "upstream_service": "price-evaluator",
+      "observed_status_code": 503,
+      "error_rate_fraction": 0.21,
+      "requests_per_minute": 640,
+      "retry_backoff_ms": 250
+    },
+    "context": {
+      "cluster": "prod-eu-central-1",
+      "namespace": "catalog",
+      "deployment": "pricing-preview-v12",
+      "ruleset": "autumn-home-2026-r4"
+    }
+  },
+  {
+    "id": "lib-19-005",
+    "title": "Reservation calls return responses the caller cannot use",
+    "category": "network",
+    "service": "checkout-reservation",
+    "mechanism": "http_contract",
+    "summary": "Reservation requests complete at the transport level but a portion of responses are rejected by the caller, while stock reads continue to succeed.",
+    "precursor": "The inventory API and checkout client were rolled out in the same release window, with their replicas replaced over several minutes.",
+    "impact": "Some checkouts cannot secure stock and must be retried, increasing cart abandonment and the risk of duplicate reservation attempts.",
+    "parameters": {
+      "route": "/api/v2/reservations",
+      "upstream_service": "inventory-api",
+      "expected_field": "reservation_id",
+      "response_rejection_fraction": 0.16,
+      "requests_per_minute": 920,
+      "client_release": "checkout-reservation-v22"
+    },
+    "context": {
+      "cluster": "prod-us-east-2",
+      "namespace": "commerce",
+      "deployment": "checkout-reservation-v22",
+      "api_revision": "inventory-v2"
+    }
+  }
+]
