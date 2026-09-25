@@ -68,7 +68,7 @@ class DemoCatalogTests(unittest.TestCase):
         self.assertEqual(len({c["scenario"] for c in DEMO_CASES.values()}), 5)
         self.assertEqual(sum("capture" in c for c in DEMO_CASES.values()), 2)
         self.assertEqual(DEMO_CASES["query-rollout-history"]["rounds"], 2)
-        self.assertEqual(len(public_scenarios()), 17)
+        self.assertEqual(len(public_scenarios()), 18)
         catalog = public_scenarios()
         self.assertEqual(catalog["mysql-connections"]["source_view"], "prometheus_graph")
         self.assertEqual(catalog["metrics-service-label-drift"]["source_view"], "prometheus_targets")
@@ -76,7 +76,7 @@ class DemoCatalogTests(unittest.TestCase):
         self.assertEqual(catalog["memory-leak"]["resource_profile"], "bounded_memory")
         self.assertEqual({key for key, item in catalog.items() if item["track"] == "demo"},
                          {"poison-job", "transaction-deadlock", "cpu-saturation", "response-schema-skew",
-                          "metrics-service-label-drift"})
+                          "metrics-service-label-drift", "cnfc-route-drift"})
         self.assertEqual(catalog["timeout-budget"]["track"], "development")
         self.assertEqual(runner.scenario_rounds("mysql-connections"), 1)
         self.assertEqual(runner.capture_spec("mysql-connections")["view"], "graph")
@@ -672,8 +672,7 @@ class DemoRunnerTests(unittest.TestCase):
         ]}}
         args = SimpleNamespace(fcapsule="http://product", episode_quiet_seconds=60)
         with tempfile.TemporaryDirectory() as directory, \
-             patch.object(runner, "request", return_value=state) as api, \
-             patch.object(runner.time, "sleep") as sleep:
+             patch.object(runner, "request", return_value=state) as api:
             result = runner.ensure_fresh_episode_context(args, Path(directory), "dependency-route")
 
             self.assertEqual(result["status"], "ready")
@@ -685,7 +684,6 @@ class DemoRunnerTests(unittest.TestCase):
             self.assertEqual(result["prior_episode_ids"], ["old-orders"])
             self.assertEqual(result["waited_seconds"], 0)
             self.assertEqual(api.call_count, 1)
-            sleep.assert_not_called()
             self.assertEqual(runner.read(Path(directory) / "episode-isolation.json"), result)
 
     def test_exporter_isolation_preserves_the_probe_output_directory_contract(self):

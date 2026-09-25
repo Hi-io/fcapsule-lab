@@ -1,0 +1,133 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cnfc-edge-a
+  namespace: fcapsule-lab
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: cnfc-edge, app.kubernetes.io/instance: a}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cnfc-edge
+        app.kubernetes.io/instance: a
+        app.kubernetes.io/part-of: fcapsule-lab
+        fcapsule.io/metrics: "true"
+        cnfc_id: checkout-edge-east
+    spec:
+      nodeSelector: {kubernetes.io/hostname: worker-1}
+      initContainers:
+        - name: install-source
+          image: python:3.12-slim
+          command: ["python", "-m", "pip", "install", "--quiet", "--disable-pip-version-check", "--root-user-action=ignore", "--no-cache-dir", "--target", "/opt/lab", "https://github.com/Hi-io/fcapsule-lab/archive/refs/heads/main.zip"]
+          volumeMounts:
+            - {name: source, mountPath: /opt/lab}
+      containers:
+        - name: cnfc-edge
+          image: python:3.12-slim
+          command: ["python", "-m", "app.cnfc_edge"]
+          env:
+            - {name: PYTHONPATH, value: /opt/lab}
+            - {name: SERVICE_NAME, value: cnfc-edge}
+            - {name: PORT, value: "8085"}
+            - {name: CNFC_ID, value: checkout-edge-east}
+          envFrom:
+            - configMapRef: {name: lab-runtime}
+          ports:
+            - {name: metrics, containerPort: 8085}
+          readinessProbe:
+            httpGet: {path: /health, port: metrics}
+            periodSeconds: 5
+          resources:
+            requests: {cpu: 20m, memory: 32Mi}
+            limits: {cpu: 150m, memory: 96Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: source, mountPath: /opt/lab}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - {name: source, emptyDir: {}}
+        - {name: tmp, emptyDir: {}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cnfc-edge-b
+  namespace: fcapsule-lab
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: cnfc-edge, app.kubernetes.io/instance: b}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cnfc-edge
+        app.kubernetes.io/instance: b
+        app.kubernetes.io/part-of: fcapsule-lab
+        fcapsule.io/metrics: "true"
+        cnfc_id: checkout-edge-east
+    spec:
+      nodeSelector: {kubernetes.io/hostname: worker-1}
+      initContainers:
+        - name: install-source
+          image: python:3.12-slim
+          command: ["python", "-m", "pip", "install", "--quiet", "--disable-pip-version-check", "--root-user-action=ignore", "--no-cache-dir", "--target", "/opt/lab", "https://github.com/Hi-io/fcapsule-lab/archive/refs/heads/main.zip"]
+          volumeMounts:
+            - {name: source, mountPath: /opt/lab}
+      containers:
+        - name: cnfc-edge
+          image: python:3.12-slim
+          command: ["python", "-m", "app.cnfc_edge"]
+          env:
+            - {name: PYTHONPATH, value: /opt/lab}
+            - {name: SERVICE_NAME, value: cnfc-edge}
+            - {name: PORT, value: "8085"}
+            - {name: CNFC_ID, value: checkout-edge-east}
+          envFrom:
+            - configMapRef: {name: lab-runtime}
+          ports:
+            - {name: metrics, containerPort: 8085}
+          readinessProbe:
+            httpGet: {path: /health, port: metrics}
+            periodSeconds: 5
+          resources:
+            requests: {cpu: 20m, memory: 32Mi}
+            limits: {cpu: 150m, memory: 96Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: source, mountPath: /opt/lab}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - {name: source, emptyDir: {}}
+        - {name: tmp, emptyDir: {}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cnfc-edge-a
+  namespace: fcapsule-lab
+spec:
+  selector: {app.kubernetes.io/name: cnfc-edge, app.kubernetes.io/instance: a}
+  ports:
+    - {name: metrics, port: 8085, targetPort: metrics}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cnfc-edge-b
+  namespace: fcapsule-lab
+spec:
+  selector: {app.kubernetes.io/name: cnfc-edge, app.kubernetes.io/instance: b}
+  ports:
+    - {name: metrics, port: 8085, targetPort: metrics}

@@ -21,7 +21,7 @@ import pymysql
 
 from app.common import JsonLogger, QuietHandler, serve
 from app.demo_catalog import public_demos
-from app.scenario_catalog import DEFAULT_SCENARIO_CONFIG, DISCOVERY_SCENARIOS, SCENARIOS, public_scenarios
+from app.scenario_catalog import DEFAULT_SCENARIO_CONFIG, DISCOVERY_SCENARIOS, OPERATOR_SCENARIOS, SCENARIOS, public_scenarios
 from app.safety import lease_seconds, memory_snapshot
 
 
@@ -40,6 +40,7 @@ class ControlState:
         self.worker_url = os.environ.get("WORKER_URL", "http://lab-worker:8083")
         self.inventory_url = os.environ.get("INVENTORY_URL", "http://inventory-api:8081")
         self.orders_url = os.environ.get("ORDERS_URL", "http://orders-api:8080")
+        self.cnfc_edge_url = os.environ.get("CNFC_EDGE_URL", "http://cnfc-edge-a:8085")
         self.logger = JsonLogger("lab-control")
         self.lock = threading.RLock()
         self.active = None
@@ -266,11 +267,11 @@ class ControlState:
 
     def start(self, scenario_id: str, duration: int = 180, request_id: str | None = None) -> dict[str, Any]:
         duration = lease_seconds(duration)
-        if scenario_id not in {**SCENARIOS, **DISCOVERY_SCENARIOS}:
+        if scenario_id not in {**SCENARIOS, **DISCOVERY_SCENARIOS, **OPERATOR_SCENARIOS}:
             raise ValueError(f"Unknown scenario: {scenario_id}")
-        if ({**SCENARIOS, **DISCOVERY_SCENARIOS}[scenario_id].get("runner_only")
-                or not {**SCENARIOS, **DISCOVERY_SCENARIOS}[scenario_id].get("actions")
-                and not {**SCENARIOS, **DISCOVERY_SCENARIOS}[scenario_id].get("service_metrics_label")):
+        if ({**SCENARIOS, **DISCOVERY_SCENARIOS, **OPERATOR_SCENARIOS}[scenario_id].get("runner_only")
+                or not {**SCENARIOS, **DISCOVERY_SCENARIOS, **OPERATOR_SCENARIOS}[scenario_id].get("actions")
+                and not {**SCENARIOS, **DISCOVERY_SCENARIOS, **OPERATOR_SCENARIOS}[scenario_id].get("service_metrics_label")):
             raise ValueError("This scenario requires its guarded external runner")
         if request_id is not None and (not isinstance(request_id, str) or len(request_id) != 32
                                        or any(c not in "0123456789abcdef" for c in request_id)):
@@ -287,7 +288,7 @@ class ControlState:
                 raise ValueError("Start blocked: wait until worker, inventory and orders are healthy")
             if self._persisted_run():
                 raise ValueError("A persisted Lab intervention needs recovery before another run")
-            scenario = {**SCENARIOS, **DISCOVERY_SCENARIOS}[scenario_id]
+            scenario = {**SCENARIOS, **DISCOVERY_SCENARIOS, **OPERATOR_SCENARIOS}[scenario_id]
             targets = [action["target"] for action in scenario.get("actions", [])]
             if scenario.get("service_metrics_label"):
                 targets.append("metrics-service")
@@ -322,7 +323,7 @@ class ControlState:
                                       if key not in {"baseline_settings", "claim_acquired"}}}
 
     def _start(self, scenario_id: str, duration: int) -> dict[str, Any]:
-        scenario = {**SCENARIOS, **DISCOVERY_SCENARIOS}.get(scenario_id)
+        scenario = {**SCENARIOS, **DISCOVERY_SCENARIOS, **OPERATOR_SCENARIOS}.get(scenario_id)
         if not scenario:
             raise ValueError(f"Unknown scenario: {scenario_id}")
         if scenario.get("runner_only"):
@@ -364,6 +365,7 @@ class ControlState:
                 "worker": (self.worker_url, "/control/scenario"),
                 "inventory": (self.inventory_url, "/control/failure"),
                 "orders": (self.orders_url, "/control/scenario"),
+                "cnfc-edge": (self.cnfc_edge_url, "/control/scenario"),
             }[target]
             results.append(self._post_for_run(url + endpoint, {
                 "mode": mode, "duration_seconds": duration, "settings": config,
@@ -453,6 +455,11 @@ class ControlState:
                 errors.append(f"orders: {exc}")
             except ValueError as exc:
                 errors.append(f"orders: {exc}")
+        if "cnfc-edge" in targets:
+            try:
+                self._post_for_run(self.cnfc_edge_url + "/control/scenario", {"mode": "normal"}, owner)
+            except (HTTPError, URLError, TimeoutError, OSError, ValueError) as exc:
+                errors.append(f"cnfc-edge: {exc}")
         if not errors:
             try:
                 self._clear_run_claim(owner)

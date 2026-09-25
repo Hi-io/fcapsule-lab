@@ -150,10 +150,22 @@ DISCOVERY_SCENARIOS = {
 }
 
 
+# An operator demo outside the frozen fifteen-case model-evaluation benchmark.
+OPERATOR_SCENARIOS = {
+    "cnfc-route-drift": {
+        "title": "One CNFC replica loses its dependency route", "class": "CM",
+        "evidence_group": "configuration", "track": "demo",
+        "summary": "A shared CNFC alert must be traced to the replica with a divergent Inventory endpoint.",
+        "actions": [action("cnfc-edge", "route-drift")],
+        "expected_alert": "LabCNFCInventoryRouteFailures",
+    },
+}
+
+
 def public_scenarios() -> dict[str, dict[str, Any]]:
     """Safe operator-facing catalog metadata without mutation settings or oracle labels."""
     scenarios = {}
-    for key, item in {**SCENARIOS, **DISCOVERY_SCENARIOS}.items():
+    for key, item in {**SCENARIOS, **DISCOVERY_SCENARIOS, **OPERATOR_SCENARIOS}.items():
         evidence_group = item["evidence_group"]
         domains = {
             "logs": ["logs", "metrics"],
