@@ -435,6 +435,19 @@ def build_rule_test(spec: dict[str, Any]) -> dict[str, Any]:
         ], pod="library-positive", service="lab-incident-library", extra_labels=library_id,
         absent_at=("0s", "10s", "20s"), firing_at=("15s",),
     ))
+    tests.append(_rule_case(
+        {"LabLibraryOperationFailures": library_rule}, "LabLibraryOperationFailures", [],
+        pod=None, service="lab-incident-library", absent_at=("20s",),
+    ))
+    tests.append(_rule_case(
+        {"LabLibraryOperationFailures": library_rule}, "LabLibraryOperationFailures", [
+            _series("lab_library_failures_total", "library-stale", "lab-incident-library",
+                    "0 5 stale", library_id),
+            _series("lab_library_active", "library-stale", "lab-incident-library",
+                    "1 1 stale", library_id),
+        ], pod="library-stale", service="lab-incident-library", extra_labels=library_id,
+        absent_at=("80s",),
+    ))
 
     cnfc_rule = rules["LabCNFCInventoryRouteFailures"]
     cnfc_labels = {"cnfc": "checkout-edge-east"}

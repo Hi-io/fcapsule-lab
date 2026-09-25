@@ -181,6 +181,7 @@ class PrometheusRuleContractTests(unittest.TestCase):
 
         expected = {name for item in (*SCENARIOS.values(), *DISCOVERY_SCENARIOS.values(), *OPERATOR_SCENARIOS.values())
                     for name in [item["expected_alert"], *item.get("acceptable_primary_alerts", [])]}
+        expected.add("LabLibraryOperationFailures")
         self.assertEqual(expected, set(by_alert))
         for alertname in sorted(expected):
             with self.subTest(alertname=alertname):
