@@ -1,0 +1,122 @@
+[
+  {
+    "id": "lib-18-001",
+    "title": "Catalog quote fields disappear during checkout",
+    "category": "api-contracts",
+    "service": "checkout-api",
+    "mechanism": "http_contract",
+    "summary": "Checkout retries catalog lookups and some line items lose their displayed price, although the catalog endpoint continues returning successful responses.",
+    "precursor": "The catalog provider began a staged response-format rollout after its mobile release, while checkout replicas were still running two client revisions.",
+    "impact": "Affected carts cannot produce reliable totals, increasing abandoned checkouts and support contacts about missing prices.",
+    "parameters": {
+      "endpoint": "/v2/items/{sku}",
+      "consumer_api_version": "v1",
+      "provider_api_version": "v2",
+      "required_field": "unit_price_cents",
+      "http_status": 200,
+      "affected_request_fraction": 0.18
+    },
+    "context": {
+      "namespace": "commerce-prod",
+      "provider_service": "catalog-api",
+      "consumer_release": "checkout-2026.09.24-3",
+      "rollout_id": "catalog-v2-wave-b"
+    }
+  },
+  {
+    "id": "lib-18-002",
+    "title": "Shipment route creation rejects the new endpoint",
+    "category": "api-contracts",
+    "service": "shipment-planner",
+    "mechanism": "http_status",
+    "summary": "New shipment plans fail consistently in one region, while previously computed delivery quotes remain available to operators.",
+    "precursor": "The fulfillment platform moved its generated clients to the next API release during a region-by-region deployment.",
+    "impact": "Warehouse dispatchers must defer route assignment and parcels miss their planned carrier handoff windows.",
+    "parameters": {
+      "endpoint": "/fulfillment/v3/routes",
+      "http_method": "POST",
+      "http_status": 404,
+      "client_api_version": "v3",
+      "region": "eu-central-1",
+      "requests_per_minute": 46
+    },
+    "context": {
+      "namespace": "logistics-prod",
+      "provider_service": "fulfillment-gateway",
+      "deployment": "planner-7f9b6d8d5c",
+      "release_wave": "eu-central-canary"
+    }
+  },
+  {
+    "id": "lib-18-003",
+    "title": "Ledger export calls exceed reconciliation deadlines",
+    "category": "api-contracts",
+    "service": "billing-reconciler",
+    "mechanism": "http_timeout",
+    "summary": "Reconciliation jobs spend most of their runtime waiting for export responses, and ledger updates arrive progressively later.",
+    "precursor": "The reporting provider enabled its next-generation export path for the billing tenant shortly before the monthly reconciliation window.",
+    "impact": "Finance dashboards show stale balances and close-of-month checks cannot complete within the scheduled processing window.",
+    "parameters": {
+      "endpoint": "/exports/v2/ledger-entries",
+      "request_timeout_seconds": 8,
+      "p95_response_seconds": 11.7,
+      "page_size": 5000,
+      "retry_attempts": 3,
+      "job_deadline_seconds": 90
+    },
+    "context": {
+      "namespace": "finance-prod",
+      "provider_service": "reporting-api",
+      "tenant_id": "tenant-northstar-04",
+      "job_name": "monthly-ledger-close"
+    }
+  },
+  {
+    "id": "lib-18-004",
+    "title": "Account linking fails around partner token renewal",
+    "category": "api-contracts",
+    "service": "identity-broker",
+    "mechanism": "auth_expired",
+    "summary": "Partner account-linking callbacks fail in short bursts near renewal intervals, with retries temporarily increasing sign-in latency.",
+    "precursor": "The identity provider rolled out a new issuer policy and shortened access-token validity while integration workers remained on a gradual restart schedule.",
+    "impact": "Some users cannot link external accounts on the first attempt, and repeated callbacks delay profile synchronization.",
+    "parameters": {
+      "issuer_api_version": "v3",
+      "access_token_ttl_seconds": 300,
+      "worker_refresh_interval_seconds": 600,
+      "callback_path": "/oauth/partner/callback",
+      "http_status": 401,
+      "retry_backoff_seconds": 20
+    },
+    "context": {
+      "namespace": "identity-prod",
+      "provider_service": "partner-identity",
+      "integration_id": "partner-accounts-eu",
+      "deployment": "identity-broker-2026.09.25"
+    }
+  },
+  {
+    "id": "lib-18-005",
+    "title": "Partner inventory sync throttles despite healthy connectivity",
+    "category": "api-contracts",
+    "service": "inventory-sync",
+    "mechanism": "rate_limit",
+    "summary": "Inventory refreshes complete more slowly across several tenants, and retry volume rises even though partner requests still reach the service.",
+    "precursor": "The partner migrated integrations to its current API tier and published revised traffic guidance during a connector rollout.",
+    "impact": "Storefront availability counts lag behind warehouse changes, causing oversell risk for fast-moving products.",
+    "parameters": {
+      "endpoint": "/api/v4/availability/bulk",
+      "provider_limit_per_minute": 60,
+      "client_burst_size": 24,
+      "observed_status": 429,
+      "retry_after_seconds": 30,
+      "affected_tenant_count": 7
+    },
+    "context": {
+      "namespace": "supply-prod",
+      "provider_service": "partner-stock-api",
+      "connector_release": "inventory-sync-4.12.0",
+      "partner_region": "ap-southeast-2"
+    }
+  }
+]
