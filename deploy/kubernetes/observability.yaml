@@ -63,7 +63,14 @@ spec:
     - name: fcapsule-lab.fault-management
       rules:
         - alert: LabCNFCInventoryRouteFailures
-          expr: sum by (namespace, cnfc) (increase(lab_cnfc_edge_dependency_failures_total{namespace="fcapsule-lab",cnfc!=""}[1m])) > 8
+          expr: |
+            sum by (namespace, cnfc) (
+              max by (namespace, cnfc, pod) (
+                increase(lab_cnfc_edge_dependency_failures_total{
+                  namespace="fcapsule-lab", cnfc!=""
+                }[1m])
+              )
+            ) > 8
           for: 15s
           labels:
             severity: warning

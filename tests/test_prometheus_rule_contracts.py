@@ -10,7 +10,7 @@ import yaml
 
 from app.mysql_inventory import InventoryState
 from app.orders import OrdersState
-from app.scenario_catalog import DISCOVERY_SCENARIOS, SCENARIOS
+from app.scenario_catalog import DISCOVERY_SCENARIOS, OPERATOR_SCENARIOS, SCENARIOS
 from app.worker import WorkerState
 from tools.evaluate_external_screenshot import ALERT as EXTERNAL_ALERT, rule_document
 from tools.test_prometheus_rules import build_rule_test, load_rule_spec
@@ -179,7 +179,7 @@ class PrometheusRuleContractTests(unittest.TestCase):
         for case in alert_tests:
             by_alert.setdefault(case["alertname"], []).append(case)
 
-        expected = {name for item in (*SCENARIOS.values(), *DISCOVERY_SCENARIOS.values())
+        expected = {name for item in (*SCENARIOS.values(), *DISCOVERY_SCENARIOS.values(), *OPERATOR_SCENARIOS.values())
                     for name in [item["expected_alert"], *item.get("acceptable_primary_alerts", [])]}
         self.assertEqual(expected, set(by_alert))
         for alertname in sorted(expected):
