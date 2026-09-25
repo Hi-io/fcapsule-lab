@@ -1,0 +1,113 @@
+[
+  {
+    "id": "lib-05-001",
+    "title": "Authenticated sessions end early",
+    "category": "identity",
+    "service": "login-gateway",
+    "mechanism": "auth_expired",
+    "summary": "Users are repeatedly returned to sign-in shortly after successfully opening protected pages, across both browser and mobile clients.",
+    "precursor": "A session-policy adjustment was applied during the weekly identity configuration rollout; the application deployment remained unchanged.",
+    "impact": "Staff must sign in multiple times during a shift, interrupting case handling and increasing help-desk reports of unexpected logouts.",
+    "parameters": {
+      "configured_session_ttl_seconds": 3600,
+      "observed_credential_ttl_seconds": 180,
+      "refresh_grace_seconds": 45,
+      "affected_principals": 126
+    },
+    "context": {
+      "namespace": "identity-prod",
+      "cluster": "eu-west-1-prod",
+      "deployment": "login-gateway-v3",
+      "change_id": "IDP-4821"
+    }
+  },
+  {
+    "id": "lib-05-002",
+    "title": "New federated sign-ins are rejected",
+    "category": "identity",
+    "service": "oidc-verifier",
+    "mechanism": "auth_signature",
+    "summary": "Users who signed in recently receive authorization errors when opening connected applications, while some established sessions continue to work.",
+    "precursor": "The identity provider completed scheduled federation maintenance shortly before the first reports from newly authenticated users.",
+    "impact": "Newly authenticated staff cannot reach dependent applications, delaying approvals and leaving a growing queue of unprocessed requests.",
+    "parameters": {
+      "token_algorithm": "RS256",
+      "verifier_keyset_age_seconds": 7200,
+      "provider_keyset_revision": "keys-2026-09-26-b",
+      "verifier_keyset_revision": "keys-2026-09-25-a",
+      "affected_apps": 4
+    },
+    "context": {
+      "namespace": "identity-prod",
+      "cluster": "eu-west-1-prod",
+      "deployment": "oidc-verifier-v7",
+      "provider": "workforce-sso"
+    }
+  },
+  {
+    "id": "lib-05-003",
+    "title": "Session renewal stalls at peak",
+    "category": "identity",
+    "service": "session-store",
+    "mechanism": "db_locked",
+    "summary": "Sign-in succeeds, but token renewals become slow and intermittently fail during the morning traffic peak.",
+    "precursor": "An inactive-account cleanup sweep overlapped with the start of the regional workday and a sharp rise in renewal traffic.",
+    "impact": "Users experience repeated authentication prompts, while dependent APIs see bursts of rejected requests and elevated support volume.",
+    "parameters": {
+      "row_lock_wait_timeout_seconds": 4,
+      "renewal_write_p95_ms": 5200,
+      "active_session_rows": 184000,
+      "database_pool_size": 24
+    },
+    "context": {
+      "namespace": "identity-prod",
+      "cluster": "us-central-1-prod",
+      "database": "identity-mysql-0",
+      "job": "session-prune-2026-09-26-08"
+    }
+  },
+  {
+    "id": "lib-05-004",
+    "title": "Role changes appear inconsistently",
+    "category": "identity",
+    "service": "policy-engine",
+    "mechanism": "cache_stale",
+    "summary": "Access results disagree between the administration console and protected APIs after user roles change; some removed members retain access temporarily.",
+    "precursor": "A directory synchronization completed a large role reconciliation, followed by a wave of access-policy updates.",
+    "impact": "Security administrators cannot rely on immediate role changes, and support teams must verify access manually before sensitive work proceeds.",
+    "parameters": {
+      "authorization_cache_ttl_seconds": 900,
+      "invalidation_queue_depth": 782,
+      "oldest_invalidation_age_seconds": 1240,
+      "affected_principals": 37
+    },
+    "context": {
+      "namespace": "access-prod",
+      "cluster": "ap-southeast-2-prod",
+      "deployment": "policy-engine-v12",
+      "directory_sync": "hr-directory-prod"
+    }
+  },
+  {
+    "id": "lib-05-005",
+    "title": "Federated login requests time out",
+    "category": "identity",
+    "service": "idp-proxy",
+    "mechanism": "http_timeout",
+    "summary": "Federated sign-ins and session refreshes intermittently time out, although local health checks and non-authentication routes remain responsive.",
+    "precursor": "The upstream identity provider reported a latency increase after regional maintenance, coinciding with the first rise in authentication failures.",
+    "impact": "New users cannot reliably access the application and existing sessions fail to renew, reducing staff capacity across several internal tools.",
+    "parameters": {
+      "upstream_timeout_ms": 750,
+      "upstream_latency_p95_ms": 1380,
+      "in_flight_auth_requests": 64,
+      "retry_attempts": 2
+    },
+    "context": {
+      "namespace": "identity-prod",
+      "cluster": "eu-west-1-prod",
+      "deployment": "idp-proxy-v5",
+      "upstream": "workforce-sso"
+    }
+  }
+]
