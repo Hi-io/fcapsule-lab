@@ -1,0 +1,113 @@
+[
+  {
+    "id": "lib-13-001",
+    "title": "Tax rules unavailable on new billing pods",
+    "category": "configuration",
+    "service": "billing-api",
+    "mechanism": "config_missing",
+    "summary": "Tax quote requests are failing on newly started billing pods while existing traffic remains mostly healthy.",
+    "precursor": "A canary release added tax jurisdiction support and began replacing the stable billing replica set.",
+    "impact": "Some checkout sessions cannot calculate a final total, increasing abandoned checkouts and support contacts.",
+    "parameters": {
+      "required_setting": "TAX_RULESET_URI",
+      "fallback_enabled": false,
+      "affected_pod_fraction": 0.4,
+      "quote_error_rate_percent": 31
+    },
+    "context": {
+      "cluster": "prod-eu2",
+      "namespace": "commerce",
+      "release": "billing-2026.09.4",
+      "workload": "billing-api-canary"
+    }
+  },
+  {
+    "id": "lib-13-002",
+    "title": "Catalog workers reject the new rollout settings",
+    "category": "configuration",
+    "service": "catalog-indexer",
+    "mechanism": "config_invalid",
+    "summary": "Catalog indexing throughput drops sharply after the rollout, with repeated restarts among the replacement workers.",
+    "precursor": "A deployment promoted an updated indexer image and configuration bundle to the first production shard.",
+    "impact": "New and changed products take hours to appear in search, causing stale inventory visibility for shoppers.",
+    "parameters": {
+      "setting": "BATCH_WINDOW_SECONDS",
+      "configured_value": "sixty",
+      "expected_type": "integer",
+      "restart_count_per_pod": 7,
+      "index_lag_minutes": 94
+    },
+    "context": {
+      "cluster": "prod-us1",
+      "namespace": "product-data",
+      "release": "catalog-idx-42",
+      "shard": "search-west-03"
+    }
+  },
+  {
+    "id": "lib-13-003",
+    "title": "Recommendation service cannot reach its feature store",
+    "category": "configuration",
+    "service": "reco-api",
+    "mechanism": "dns_lookup",
+    "summary": "Recommendation requests intermittently fall back to generic results immediately after a service update.",
+    "precursor": "A configuration rollout moved the recommendation deployment into a revised service-discovery layout.",
+    "impact": "Personalized product placement disappears for a portion of sessions, reducing engagement on category pages.",
+    "parameters": {
+      "dependency_host": "features-v2.ml-data.svc.cluster.local",
+      "lookup_failures_per_minute": 46,
+      "fallback_fraction": 0.65,
+      "lookup_timeout_ms": 800
+    },
+    "context": {
+      "cluster": "prod-us1",
+      "namespace": "personalization",
+      "release": "reco-2026.09.12",
+      "dependency_service": "feature-store-v2"
+    }
+  },
+  {
+    "id": "lib-13-004",
+    "title": "Payment authorization requests exceed their latency budget",
+    "category": "configuration",
+    "service": "payments-api",
+    "mechanism": "http_timeout",
+    "summary": "Authorization attempts are timing out more often during peak traffic following the payment gateway rollout.",
+    "precursor": "A staged release changed the payment integration profile while a large traffic cohort was being shifted to the new pods.",
+    "impact": "Customers see delayed or uncertain payment outcomes, and order confirmation rates fall during busy periods.",
+    "parameters": {
+      "dependency": "acquirer-adapter",
+      "client_timeout_ms": 350,
+      "p95_dependency_latency_ms": 910,
+      "authorization_timeout_rate_percent": 18
+    },
+    "context": {
+      "cluster": "prod-ap1",
+      "namespace": "payments",
+      "release": "paygw-18.6.2",
+      "traffic_cohort": "checkout-blue"
+    }
+  },
+  {
+    "id": "lib-13-005",
+    "title": "Session refresh calls fail after identity policy update",
+    "category": "configuration",
+    "service": "identity-gateway",
+    "mechanism": "auth_expired",
+    "summary": "Users are unexpectedly signed out across several applications shortly after the identity gateway rollout.",
+    "precursor": "An identity policy package was rolled out alongside a gateway image refresh during a routine credential rotation window.",
+    "impact": "Active sessions require reauthentication, increasing login traffic and interrupting customer workflows.",
+    "parameters": {
+      "token_ttl_seconds": 900,
+      "refresh_grace_seconds": 120,
+      "rejected_refreshes_per_minute": 83,
+      "affected_client_fraction": 0.27
+    },
+    "context": {
+      "cluster": "prod-eu2",
+      "namespace": "identity",
+      "release": "id-gw-7.14.0",
+      "policy_bundle": "session-policy-r31"
+    }
+  }
+]
