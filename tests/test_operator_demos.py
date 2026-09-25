@@ -68,7 +68,7 @@ class DemoCatalogTests(unittest.TestCase):
         self.assertEqual(len({c["scenario"] for c in DEMO_CASES.values()}), 5)
         self.assertEqual(sum("capture" in c for c in DEMO_CASES.values()), 2)
         self.assertEqual(DEMO_CASES["query-rollout-history"]["rounds"], 2)
-        self.assertEqual(len(public_scenarios()), 17)
+        self.assertEqual(len(public_scenarios()), 18)
         catalog = public_scenarios()
         self.assertEqual(catalog["mysql-connections"]["source_view"], "prometheus_graph")
         self.assertEqual(catalog["metrics-service-label-drift"]["source_view"], "prometheus_targets")
@@ -76,7 +76,7 @@ class DemoCatalogTests(unittest.TestCase):
         self.assertEqual(catalog["memory-leak"]["resource_profile"], "bounded_memory")
         self.assertEqual({key for key, item in catalog.items() if item["track"] == "demo"},
                          {"poison-job", "transaction-deadlock", "cpu-saturation", "response-schema-skew",
-                          "metrics-service-label-drift"})
+                          "metrics-service-label-drift", "cnfc-route-drift"})
         self.assertEqual(catalog["timeout-budget"]["track"], "development")
         self.assertEqual(runner.scenario_rounds("mysql-connections"), 1)
         self.assertEqual(runner.capture_spec("mysql-connections")["view"], "graph")

@@ -19,6 +19,8 @@ CODE_DEPLOYMENTS = {
     "traffic-generator",
     "lab-worker",
     "lab-control",
+    "cnfc-edge-a",
+    "cnfc-edge-b",
 }
 
 

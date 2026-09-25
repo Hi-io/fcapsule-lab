@@ -5,11 +5,12 @@ resources:
   - configuration.yaml
   - mysql.yaml
   - applications.yaml
+  - cnfc_edge.yaml
   - observability.yaml
 patches:
   - target:
       kind: Deployment
-      name: inventory-api|orders-api|traffic-generator|lab-worker|lab-control
+      name: inventory-api|orders-api|traffic-generator|lab-worker|lab-control|cnfc-edge-a|cnfc-edge-b
     patch: |-
       - op: add
         path: /spec/strategy

@@ -22,6 +22,8 @@ spec:
           targetLabel: pod
         - sourceLabels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
           targetLabel: service
+        - sourceLabels: [__meta_kubernetes_pod_label_cnfc_id]
+          targetLabel: cnfc
 ---
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
@@ -60,6 +62,16 @@ spec:
   groups:
     - name: fcapsule-lab.fault-management
       rules:
+        - alert: LabCNFCInventoryRouteFailures
+          expr: sum by (namespace, cnfc) (increase(lab_cnfc_edge_dependency_failures_total{namespace="fcapsule-lab",cnfc!=""}[1m])) > 8
+          for: 15s
+          labels:
+            severity: warning
+            signal_class: CM
+          annotations:
+            summary: Inventory dependency probes are failing within a checkout CNFC.
+            description: Failure counts rose across this CNFC. Compare its replicas and their dependency route evidence before attributing the cause.
+
         - alert: LabWorkerOOMKilled
           expr: |
             (

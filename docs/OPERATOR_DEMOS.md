@@ -1,12 +1,14 @@
 # Scenario Operator Guide
 
-The control UI exposes 17 distinct incident scenarios, but only five have been
+The control UI exposes 18 distinct incident scenarios. Five have been
 qualified for the current live demonstration: `poison-job` and
 `transaction-deadlock` (logs),
 `cpu-saturation` (performance), `response-schema-skew` (configuration), and
 `metrics-service-label-drift` (monitoring discovery). The UI keeps these in
 **Demo track** and collapses the other 12 under
-**Development backlog**. Use [scenario validation](SCENARIO_VALIDATION.md) before
+**Development backlog**. The `cnfc-route-drift` scenario is a separate CNFC-scope
+demo; its live diagnosis must be reviewed before calling it qualified. Use
+[scenario validation](SCENARIO_VALIDATION.md) before
 presenting any deferred case as a successful AI investigation. Fifteen workload
 cases retain the balanced diagnostic benchmark; two monitoring cases exercise
 discovery and scrape failure. A defined oracle or an alert is not a diagnosis pass.
@@ -40,6 +42,14 @@ an automatic retry.
 | `response-schema-skew` | Checkout expects response v2 while Inventory emits v1 | `LabOrdersDependencySchemaRejected` | Narrow ConfigMap update; runner starts the stopped, bounded traffic generator only after this run is acknowledged as owned, then restores its observed replica count during recovery. Inventory remains fast for this scenario. |
 | `metrics-service-label-drift` | ServiceMonitor selector no longer matches the Service label while application Pods remain healthy | `LabApplicationMetricsDiscoveryMissing` | Changes only the selected Service label and restores its captured baseline. |
 | `mysql-exporter-scrape-path` | Prometheus still discovers the MySQL exporter but `/metrics-v2` returns HTTP 404; distinguish scrape failure from target absence or a database outage | `LabExporterScrapeFailed` | Runner-only: captures real Prometheus Targets images and uses a saved baseline plus guarded rollback/watchdog. |
+| `cnfc-route-drift` | Two lightweight replicas share `cnfc_id=checkout-edge-east`; only replica A gets a wrong Inventory port. The CNFC-only alert must lead to a comparison of both pods and identification of the divergent route. | `LabCNFCInventoryRouteFailures` | Leased controller action, automatic recovery, and a low resource budget on `worker-1`. The frozen benchmark remains unchanged. |
+
+For the CNFC demo, configure FCAPSule's Targets identifier mapping as alert label
+`cnfc` to pod label `cnfc_id`. The Prometheus rule aggregates by `namespace, cnfc`
+and carries no pod label. Start `cnfc-route-drift` from the Lab UI, then inspect
+the CNFC-scoped incident in Operations. A useful report identifies both matched
+replicas, names the failing replica, and contrasts port 8099 with the healthy
+port 8081. A generic restatement of the alert is not a pass.
 
 The exporter screenshots must come from the external Prometheus Targets page during
 the fault. A graph is optional for workload cases; when attached, it must show the
