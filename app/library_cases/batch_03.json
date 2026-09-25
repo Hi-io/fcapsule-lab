@@ -1,0 +1,118 @@
+[
+  {
+    "id": "lib-03-001",
+    "title": "Settlement replay stalls ledger posting",
+    "category": "payments",
+    "service": "settlement-writer",
+    "mechanism": "db_unique",
+    "summary": "Accepted settlement batches intermittently fail to appear in the posted ledger, while retries return server errors.",
+    "precursor": "A rolling deployment overlapped a consumer rebalance, replaying a short range of recently acknowledged settlement events.",
+    "impact": "Finance operators see delayed merchant balances and must reconcile 31 settlement events before the next payout run.",
+    "parameters": {
+      "table": "ledger_entries",
+      "key_columns": ["merchant_id", "external_settlement_id"],
+      "duplicate_event_count": 31,
+      "consumer_group": "payments-settlement-v2",
+      "rebalance_window_seconds": 45
+    },
+    "context": {
+      "environment": "prod-eu1",
+      "namespace": "payments",
+      "deployment": "settlement-writer-7c9d6f8b4",
+      "provider_batch": "stl_2026_09_26_0042"
+    }
+  },
+  {
+    "id": "lib-03-002",
+    "title": "Issuer authorization calls exceed latency budget",
+    "category": "payments",
+    "service": "card-authorization-api",
+    "mechanism": "http_timeout",
+    "summary": "Checkout authorizations linger in pending state and resolve only after customers or clients submit them again.",
+    "precursor": "The card network began responding more slowly during its regional morning processing window, shortly after traffic shifted to the secondary route.",
+    "impact": "Checkout completion falls and support receives duplicate-charge concerns for orders whose final authorization state is delayed.",
+    "parameters": {
+      "upstream": "https://issuer-gateway.payments.internal/v1/authorize",
+      "request_timeout_ms": 1800,
+      "observed_p99_ms": 4620,
+      "retry_limit": 1,
+      "affected_requests_per_minute": 240
+    },
+    "context": {
+      "environment": "prod-us2",
+      "namespace": "payments",
+      "route": "issuer-secondary",
+      "merchant_tier": "marketplace-large"
+    }
+  },
+  {
+    "id": "lib-03-003",
+    "title": "Invoice capture queue stops advancing",
+    "category": "payments",
+    "service": "invoice-capture-worker",
+    "mechanism": "queue_poison",
+    "summary": "The scheduled invoice capture queue makes little progress even though worker pods remain healthy and available.",
+    "precursor": "A newly onboarded merchant sent a batch containing an invoice with a legacy currency representation not seen by the current worker release.",
+    "impact": "Recurring captures for 186 invoices miss their billing window and the next-day collections report is incomplete.",
+    "parameters": {
+      "queue": "invoice-capture-prod",
+      "max_attempts": 8,
+      "retry_backoff_seconds": 30,
+      "blocked_message_count": 1,
+      "pending_invoice_count": 186
+    },
+    "context": {
+      "environment": "prod-ap1",
+      "namespace": "billing",
+      "consumer_group": "invoice-capture-v4",
+      "merchant_id": "mrc_804271"
+    }
+  },
+  {
+    "id": "lib-03-004",
+    "title": "Refund status differs across payment surfaces",
+    "category": "payments",
+    "service": "refund-coordinator",
+    "mechanism": "cache_stale",
+    "summary": "Some completed refunds continue to display as processing in the customer API and operations console.",
+    "precursor": "A refund status read spike followed a merchant support campaign, while ledger updates continued at their usual rate.",
+    "impact": "Customers receive inconsistent refund timelines, and support agents cannot reliably distinguish in-flight refunds from completed ones.",
+    "parameters": {
+      "cache_name": "refund-state-v3",
+      "stale_ttl_seconds": 900,
+      "ledger_refresh_interval_seconds": 20,
+      "affected_refund_count": 73,
+      "read_requests_per_second": 1250
+    },
+    "context": {
+      "environment": "prod-eu1",
+      "namespace": "payments",
+      "merchant_id": "mrc_190044",
+      "support_campaign": "refund-followup-sep"
+    }
+  },
+  {
+    "id": "lib-03-005",
+    "title": "Checkout authorization latency rises at peak",
+    "category": "payments",
+    "service": "payment-orchestrator",
+    "mechanism": "resource_cpu",
+    "summary": "Authorization and payment-intent endpoints exceed their latency objective during the morning checkout peak.",
+    "precursor": "A promotional campaign increased concurrent cart confirmations above the weekday baseline without a corresponding change in replica count.",
+    "impact": "More checkout attempts expire before confirmation, increasing abandoned orders and delayed payment status updates.",
+    "parameters": {
+      "cpu_limit_millicores": 750,
+      "observed_cpu_millicores": 742,
+      "replica_count": 4,
+      "requests_per_second": 980,
+      "latency_objective_ms": 500,
+      "observed_p95_ms": 1840
+    },
+    "context": {
+      "environment": "prod-us1",
+      "namespace": "checkout",
+      "deployment": "payment-orchestrator-65fd998c6d",
+      "campaign_id": "fall-launch-26"
+    }
+  }
+]
