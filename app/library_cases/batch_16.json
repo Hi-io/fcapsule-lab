@@ -1,0 +1,107 @@
+[
+  {
+    "id": "lib-16-001",
+    "title": "Catalog availability lags reservations",
+    "category": "cache",
+    "service": "catalog-api",
+    "mechanism": "cache_stale",
+    "summary": "Browse clients continue to show available stock for items that recent reservations could not claim.",
+    "precursor": "The catalog service was rolled out in stages while product availability updates continued at their usual rate.",
+    "impact": "Customers encounter rejected reservations after selecting apparently available items, increasing checkout abandonment and support contacts.",
+    "parameters": {
+      "cache_ttl_seconds": 240,
+      "availability_update_rate_per_minute": 180,
+      "observed_stale_read_fraction": 0.14,
+      "replica_count": 6
+    },
+    "context": {
+      "namespace": "commerce-prod",
+      "deployment_revision": "catalog-2026.09.18-3",
+      "cache_cluster": "redis-catalog-primary"
+    }
+  },
+  {
+    "id": "lib-16-002",
+    "title": "Inventory snapshot updates fall behind write bursts",
+    "category": "cache",
+    "service": "inventory-cache-api",
+    "mechanism": "db_locked",
+    "summary": "Inventory reads intermittently disagree with completed reservations, most often during busy periods.",
+    "precursor": "A nightly stock reconciliation overlapped with a promotion that sharply increased reservation writes.",
+    "impact": "Fulfillment decisions use outdated quantities, requiring manual order review and delaying shipment allocation.",
+    "parameters": {
+      "database_lock_wait_seconds": 8,
+      "reservation_writes_per_second": 95,
+      "snapshot_refresh_interval_seconds": 20,
+      "affected_sku_count": 420
+    },
+    "context": {
+      "namespace": "fulfillment-prod",
+      "database_service": "inventory-mysql",
+      "workload": "stock-reconcile-v4"
+    }
+  },
+  {
+    "id": "lib-16-003",
+    "title": "Session lookups degrade during profile fetches",
+    "category": "cache",
+    "service": "session-cache-api",
+    "mechanism": "http_timeout",
+    "summary": "Sign-in and checkout requests intermittently pause or ask users to retry, while other account pages remain responsive.",
+    "precursor": "The account profile service shifted traffic to a secondary region during a maintenance window.",
+    "impact": "More authentication attempts expire at the client, increasing abandoned checkouts and repeated login requests.",
+    "parameters": {
+      "profile_request_timeout_ms": 350,
+      "profile_service_p95_ms": 610,
+      "session_cache_hit_rate": 0.78,
+      "fallback_window_seconds": 45
+    },
+    "context": {
+      "namespace": "identity-prod",
+      "upstream_service": "account-profile-api",
+      "region": "ap-northeast-1"
+    }
+  },
+  {
+    "id": "lib-16-004",
+    "title": "Price changes arrive late in browse listings",
+    "category": "cache",
+    "service": "pricing-view-api",
+    "mechanism": "queue_backlog",
+    "summary": "Administrators see updated prices before the same products show those prices in customer listings.",
+    "precursor": "A bulk catalog import emitted a much larger-than-normal set of product change events ahead of a weekend sale.",
+    "impact": "Customers receive inconsistent prices between browse and checkout flows, prompting manual adjustments and delaying order confirmation.",
+    "parameters": {
+      "invalidation_queue_depth": 18400,
+      "oldest_event_age_seconds": 510,
+      "consumer_replicas": 2,
+      "event_ingest_rate_per_second": 620
+    },
+    "context": {
+      "namespace": "commerce-prod",
+      "queue": "catalog-invalidation-v2",
+      "producer_job": "catalog-import-2026-09-25"
+    }
+  },
+  {
+    "id": "lib-16-005",
+    "title": "Browse latency climbs after cache settings rollout",
+    "category": "cache",
+    "service": "product-list-api",
+    "mechanism": "config_invalid",
+    "summary": "Product-list latency and backing-store traffic rise sharply after a routine rollout, although the service remains available.",
+    "precursor": "A configuration bundle for the new listing deployment was promoted shortly before the morning traffic peak.",
+    "impact": "Category pages load more slowly and database capacity headroom falls, increasing the risk of broader catalog degradation.",
+    "parameters": {
+      "configured_ttl_seconds": -1,
+      "expected_ttl_seconds": 180,
+      "origin_requests_per_second": 1320,
+      "baseline_origin_requests_per_second": 210
+    },
+    "context": {
+      "namespace": "storefront-prod",
+      "config_map": "product-list-cache-2026-09-25",
+      "deployment_revision": "product-list-2026.09.25-1"
+    }
+  }
+]
