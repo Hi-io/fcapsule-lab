@@ -7,6 +7,7 @@ resources:
   - applications.yaml
   - cnfc_edge.yaml
   - observability.yaml
+  - incident_library.yaml
 patches:
   - target:
       kind: Deployment

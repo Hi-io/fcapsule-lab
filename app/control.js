@@ -15,7 +15,8 @@ function selections(state) {
 function groupTracks(items) {
   return {
     demos: items.filter(item => item.track === 'demo'),
-    development: items.filter(item => item.track !== 'demo'),
+    development: items.filter(item => item.track !== 'demo' && item.track !== 'library'),
+    library: items.filter(item => item.track === 'library'),
   };
 }
 
@@ -38,6 +39,19 @@ if (typeof document !== 'undefined') {
   let state = null, busy = false, reading = false, shape = '', available = false;
   const notice = text => { $('#notice').textContent = text; };
 
+  function filterLibrary() {
+    const query = $('#library-search').value.trim().toLowerCase();
+    const category = $('#library-category').value;
+    let visible = 0;
+    for (const article of $('#library-scenarios').children) {
+      const match = (!category || article.dataset.category === category) &&
+        (!query || article.dataset.search.includes(query));
+      article.hidden = !match;
+      if (match) visible++;
+    }
+    $('#library-count').textContent = ` ${visible} of ${$('#library-scenarios').children.length}`;
+  }
+
   function render() {
     const items = selections(state);
     const nextShape = JSON.stringify(items) + state?.prometheus_url;
@@ -45,8 +59,13 @@ if (typeof document !== 'undefined') {
     if (shape !== nextShape) {
       const demos = document.createDocumentFragment();
       const development = document.createDocumentFragment();
+      const library = document.createDocumentFragment();
       for (const item of items) {
         const article = document.createElement('article'); article.className = 'scenario ' + item.class.toLowerCase();
+        if (item.track === 'library') {
+          article.dataset.category = item.category;
+          article.dataset.search = `${item.title} ${item.summary} ${item.service} ${item.category}`.toLowerCase();
+        }
         const title = document.createElement('h2'); title.textContent = item.title;
         const tag = document.createElement('span'); tag.className = 'tag'; tag.textContent = item.class; title.append(tag);
         const summary = document.createElement('p'); summary.textContent = item.summary;
@@ -70,10 +89,19 @@ if (typeof document !== 'undefined') {
           }
         }
         article.append(title, summary, evidence, actions);
-        (item.track === 'demo' ? demos : development).append(article);
+        (item.track === 'demo' ? demos : item.track === 'library' ? library : development).append(article);
       }
       $('#demo-scenarios').replaceChildren(demos);
       $('#development-scenarios').replaceChildren(development);
+      $('#library-scenarios').replaceChildren(library);
+      const category = $('#library-category');
+      const selected = category.value;
+      category.replaceChildren(new Option('All categories', ''));
+      for (const value of [...new Set(groupTracks(items).library.map(item => item.category))].sort()) {
+        category.add(new Option(value.replaceAll('-', ' '), value));
+      }
+      category.value = selected;
+      filterLibrary();
       shape = nextShape;
     }
     const developmentCount = groupTracks(items).development.length;
@@ -146,5 +174,7 @@ if (typeof document !== 'undefined') {
     } catch (_) { message = 'Recovery not confirmed; check active run'; }
     await status(); busy = false; render(); notice(message);
   });
+  $('#library-search').addEventListener('input', filterLibrary);
+  $('#library-category').addEventListener('change', filterLibrary);
   status(); setInterval(status, 5000);
 }

@@ -21,6 +21,7 @@ import pymysql
 
 from app.common import JsonLogger, QuietHandler, serve
 from app.demo_catalog import public_demos
+from app.incident_library import load_cases, public_cases
 from app.scenario_catalog import DEFAULT_SCENARIO_CONFIG, DISCOVERY_SCENARIOS, OPERATOR_SCENARIOS, SCENARIOS, public_scenarios
 from app.safety import lease_seconds, memory_snapshot
 
@@ -41,6 +42,8 @@ class ControlState:
         self.inventory_url = os.environ.get("INVENTORY_URL", "http://inventory-api:8081")
         self.orders_url = os.environ.get("ORDERS_URL", "http://orders-api:8080")
         self.cnfc_edge_url = os.environ.get("CNFC_EDGE_URL", "http://cnfc-edge-a:8085")
+        self.library_url = os.environ.get("LIBRARY_URL", "http://lab-incident-library:8085")
+        self.library_cases = load_cases()
         self.logger = JsonLogger("lab-control")
         self.lock = threading.RLock()
         self.active = None
@@ -267,11 +270,12 @@ class ControlState:
 
     def start(self, scenario_id: str, duration: int = 180, request_id: str | None = None) -> dict[str, Any]:
         duration = lease_seconds(duration)
-        if scenario_id not in {**SCENARIOS, **DISCOVERY_SCENARIOS, **OPERATOR_SCENARIOS}:
+        catalog = {**SCENARIOS, **DISCOVERY_SCENARIOS, **OPERATOR_SCENARIOS}
+        if scenario_id not in catalog and scenario_id not in self.library_cases:
             raise ValueError(f"Unknown scenario: {scenario_id}")
-        if ({**SCENARIOS, **DISCOVERY_SCENARIOS, **OPERATOR_SCENARIOS}[scenario_id].get("runner_only")
-                or not {**SCENARIOS, **DISCOVERY_SCENARIOS, **OPERATOR_SCENARIOS}[scenario_id].get("actions")
-                and not {**SCENARIOS, **DISCOVERY_SCENARIOS, **OPERATOR_SCENARIOS}[scenario_id].get("service_metrics_label")):
+        if (scenario_id in catalog and (catalog[scenario_id].get("runner_only")
+                or not catalog[scenario_id].get("actions")
+                and not catalog[scenario_id].get("service_metrics_label"))):
             raise ValueError("This scenario requires its guarded external runner")
         if request_id is not None and (not isinstance(request_id, str) or len(request_id) != 32
                                        or any(c not in "0123456789abcdef" for c in request_id)):
@@ -286,10 +290,13 @@ class ControlState:
                 raise ValueError("Start blocked: node MemAvailable is below 1 GiB")
             if not all(self._health(url).get("reachable") for url in (self.worker_url, self.inventory_url, self.orders_url)):
                 raise ValueError("Start blocked: wait until worker, inventory and orders are healthy")
+            if scenario_id in self.library_cases and not self._health(self.library_url).get("reachable"):
+                raise ValueError("Start blocked: incident library workload is unavailable")
             if self._persisted_run():
                 raise ValueError("A persisted Lab intervention needs recovery before another run")
-            scenario = {**SCENARIOS, **DISCOVERY_SCENARIOS, **OPERATOR_SCENARIOS}[scenario_id]
-            targets = [action["target"] for action in scenario.get("actions", [])]
+            scenario = catalog.get(scenario_id, self.library_cases.get(scenario_id))
+            targets = (["library"] if scenario_id in self.library_cases else
+                       [action["target"] for action in scenario.get("actions", [])])
             if scenario.get("service_metrics_label"):
                 targets.append("metrics-service")
             targets = list(dict.fromkeys(targets))
@@ -323,6 +330,11 @@ class ControlState:
                                       if key not in {"baseline_settings", "claim_acquired"}}}
 
     def _start(self, scenario_id: str, duration: int) -> dict[str, Any]:
+        if scenario_id in self.library_cases:
+            result = self._post_for_run(self.library_url + "/control/scenario", {
+                "mode": scenario_id, "duration_seconds": duration,
+            }, self.active["run_id"])
+            return {"ok": True, "scenario": scenario_id, "results": [{"target": "library", **result}]}
         scenario = {**SCENARIOS, **DISCOVERY_SCENARIOS, **OPERATOR_SCENARIOS}.get(scenario_id)
         if not scenario:
             raise ValueError(f"Unknown scenario: {scenario_id}")
@@ -460,6 +472,11 @@ class ControlState:
                 self._post_for_run(self.cnfc_edge_url + "/control/scenario", {"mode": "normal"}, owner)
             except (HTTPError, URLError, TimeoutError, OSError, ValueError) as exc:
                 errors.append(f"cnfc-edge: {exc}")
+        if "library" in targets:
+            try:
+                self._post_for_run(self.library_url + "/control/scenario", {"mode": "normal"}, owner)
+            except (HTTPError, URLError, TimeoutError, OSError, ValueError) as exc:
+                errors.append(f"library: {exc}")
         if not errors:
             try:
                 self._clear_run_claim(owner)
@@ -514,11 +531,18 @@ class ControlState:
             time.sleep(5)
 
     def status(self) -> dict[str, Any]:
+        library_public = {
+            key: {**item, "class": "Library", "evidence_domains": ["logs", "metrics"],
+                  "track": "library", "execution": "controller", "resource_profile": "bounded",
+                  "runner_only": False, "screenshot_available": False}
+            for key, item in public_cases(self.library_cases).items()
+        }
         return {
             "worker": self._health(self.worker_url),
             "inventory": self._health(self.inventory_url),
             "orders": self._health(self.orders_url),
-            "scenarios": public_scenarios(),
+            "library": self._health(self.library_url),
+            "scenarios": {**public_scenarios(), **library_public},
             "active": ({key: value for key, value in self.active.items()
                         if key not in {"baseline_settings", "claim_acquired"} and not key.startswith("_")}
                        if self.active else None),
@@ -541,9 +565,10 @@ HTML = r"""<!doctype html>
 button:disabled{background:#e8edef;color:#5b6870;border-color:#cbd3d7;cursor:not-allowed}button:focus-visible,select:focus-visible{outline:2px solid var(--blue);outline-offset:3px}.scenario.active{border-color:var(--green);border-left-width:4px}.actions{align-items:center;flex-wrap:wrap}select{min-height:36px;border:1px solid #aeb8be;background:#fff;color:var(--ink);padding:5px}header small{font-size:10px}.scenario-evidence{display:block;color:var(--muted);margin:-7px 0 12px;text-transform:capitalize}
 .dot{background:var(--muted)}.dot.up{background:var(--green)}.actions label{max-width:100%}select{max-width:100%}
 .track-title{font-size:18px;margin:0 0 10px}.development-track{margin-top:22px}.development-track>summary{cursor:pointer;font-weight:700;padding:10px 0;border-top:1px solid var(--line)}.development-track>summary:focus-visible{outline:2px solid var(--blue);outline-offset:3px}.track-count{color:var(--muted);font-weight:400;margin-left:6px}
+.library-tools{display:flex;gap:8px;flex-wrap:wrap;padding:5px 0 13px}.library-tools input{min-height:36px;border:1px solid #aeb8be;padding:6px 9px;flex:1;min-width:180px}.library-tools select{min-width:160px}.library-tools input:focus-visible{outline:2px solid var(--blue);outline-offset:3px}
 </style></head><body><header><strong><span>FCAPS</span>ule Lab</strong><small>Failure control</small></header><main>
 <div class="head"><div><h1>Incident scenarios</h1><p id="run-state">Checking node headroom</p></div><div class="actions"><label>Duration <select id="duration"><option value="120">2 minutes</option><option value="180" selected>3 minutes</option><option value="300">5 minutes</option></select></label><button class="secondary" id="recover">Recover all</button></div></div>
-<div id="scenario-catalog" aria-busy="true"><section aria-labelledby="demo-track-heading"><h2 class="track-title" id="demo-track-heading">Demo track</h2><div class="grid" id="demo-scenarios"></div></section><details class="development-track"><summary>Development backlog<span class="track-count" id="development-count"></span></summary><div class="grid" id="development-scenarios"></div></details></div><div class="state"><span><i class="dot" id="worker-dot"></i>Worker: <b id="worker-state">checking</b></span><span><i class="dot" id="inventory-dot"></i>Inventory: <b id="inventory-state">checking</b></span><span><i class="dot" id="orders-dot"></i>Orders: <b id="orders-state">checking</b></span><span id="notice" role="status" aria-live="polite">Loading</span></div>
+<div id="scenario-catalog" aria-busy="true"><section aria-labelledby="demo-track-heading"><h2 class="track-title" id="demo-track-heading">Demo track</h2><div class="grid" id="demo-scenarios"></div></section><details class="development-track"><summary>Development backlog<span class="track-count" id="development-count"></span></summary><div class="grid" id="development-scenarios"></div></details><details class="development-track"><summary>Incident library<span class="track-count" id="library-count"></span></summary><div class="library-tools"><input id="library-search" type="search" placeholder="Search cases" aria-label="Search library cases"><select id="library-category" aria-label="Library category"><option value="">All categories</option></select></div><div class="grid" id="library-scenarios"></div></details></div><div class="state"><span><i class="dot" id="worker-dot"></i>Worker: <b id="worker-state">checking</b></span><span><i class="dot" id="inventory-dot"></i>Inventory: <b id="inventory-state">checking</b></span><span><i class="dot" id="orders-dot"></i>Orders: <b id="orders-state">checking</b></span><span id="notice" role="status" aria-live="polite">Loading</span></div>
 </main><script src="/assets/control.js"></script></body></html>"""
 
 

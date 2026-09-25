@@ -16,7 +16,7 @@ dependencies = [
 include = ["app*", "evaluation*"]
 
 [tool.setuptools.package-data]
-app = ["*.js"]
+app = ["*.js", "library_cases/*.json"]
 
 [project.optional-dependencies]
 dev = ["PyYAML>=6,<7"]
