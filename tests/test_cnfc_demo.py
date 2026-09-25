@@ -35,7 +35,7 @@ class CnfcDemoTests(unittest.TestCase):
                     for group in document["spec"]["groups"] for item in group["rules"]
                     if item["alert"] == "LabCNFCInventoryRouteFailures")
         self.assertIn("sum by (namespace, cnfc)", rule["expr"])
-        self.assertNotIn("pod", rule["expr"])
+        self.assertIn("max by (namespace, cnfc, pod)", rule["expr"])
         self.assertNotIn("pod", rule["labels"])
         self.assertNotIn("service", rule["labels"])
         self.assertEqual(rule["for"], "15s")

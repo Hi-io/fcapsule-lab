@@ -417,6 +417,34 @@ def build_rule_test(spec: dict[str, Any]) -> dict[str, Any]:
 
     tests.extend(_counter_rule_cases(rules))
 
+    cnfc_rule = rules["LabCNFCInventoryRouteFailures"]
+    cnfc_labels = {"cnfc": "checkout-edge-east"}
+    fault_values = " ".join(str(value) for value in ([0] * 10 + [2 * step for step in range(1, 10)] + [18] * 16))
+    duplicate_labels = {**cnfc_labels, "prometheus": "monitoring/pc-worker-agent",
+                        "prometheus_replica": "prom-agent-pc-worker-agent-0"}
+    expected_cnfc = {"exp_labels": {"namespace": "fcapsule-lab", **cnfc_labels, **cnfc_rule["labels"]},
+                     "exp_annotations": cnfc_rule["annotations"]}
+    tests.append({"interval": "5s", "start_timestamp": "2023-11-14T22:13:20Z",
+                  "input_series": [
+                      _series("lab_cnfc_edge_dependency_failures_total", "cnfc-edge-a", "cnfc-edge", fault_values, cnfc_labels),
+                      _series("lab_cnfc_edge_dependency_failures_total", "cnfc-edge-a", "cnfc-edge", fault_values, duplicate_labels),
+                      _series("lab_cnfc_edge_dependency_failures_total", "cnfc-edge-b", "cnfc-edge", " ".join(["0"] * 35), cnfc_labels),
+                  ],
+                  "alert_rule_test": [
+                      {"eval_time": "0s", "alertname": "LabCNFCInventoryRouteFailures", "exp_alerts": []},
+                      {"eval_time": "100s", "alertname": "LabCNFCInventoryRouteFailures", "exp_alerts": [expected_cnfc]},
+                      {"eval_time": "160s", "alertname": "LabCNFCInventoryRouteFailures", "exp_alerts": []},
+                  ]})
+    tests.append({"interval": "5s", "start_timestamp": "2023-11-14T22:13:20Z",
+                  "input_series": [], "alert_rule_test": [
+                      {"eval_time": "100s", "alertname": "LabCNFCInventoryRouteFailures", "exp_alerts": []},
+                  ]})
+    tests.append({"interval": "5s", "start_timestamp": "2023-11-14T22:13:20Z",
+                  "input_series": [_series("lab_cnfc_edge_dependency_failures_total", "cnfc-edge-a",
+                                           "cnfc-edge", "0 10 stale", cnfc_labels)],
+                  "alert_rule_test": [{"eval_time": "100s", "alertname": "LabCNFCInventoryRouteFailures",
+                                       "exp_alerts": []}]})
+
     return {"evaluation_interval": "5s", "tests": tests}
 
 
