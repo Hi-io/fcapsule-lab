@@ -1,13 +1,12 @@
 # Scenario Operator Guide
 
-The control UI exposes 18 distinct incident scenarios. Five have been
+The control UI exposes 18 distinct incident scenarios. Six have been
 qualified for the current live demonstration: `poison-job` and
 `transaction-deadlock` (logs),
 `cpu-saturation` (performance), `response-schema-skew` (configuration), and
-`metrics-service-label-drift` (monitoring discovery). The UI keeps these in
-**Demo track** and collapses the other 12 under
-**Development backlog**. The `cnfc-route-drift` scenario is a separate CNFC-scope
-demo; its live diagnosis must be reviewed before calling it qualified. Use
+`metrics-service-label-drift` (monitoring discovery), plus `cnfc-route-drift`
+(CNFC-scoped configuration). The UI keeps these in **Demo track** and collapses
+the other 12 under **Development backlog**. Use
 [scenario validation](SCENARIO_VALIDATION.md) before
 presenting any deferred case as a successful AI investigation. Fifteen workload
 cases retain the balanced diagnostic benchmark; two monitoring cases exercise
@@ -51,6 +50,15 @@ the CNFC-scoped incident in Operations. A useful report identifies both matched
 replicas, names the failing replica, and contrasts port 8099 with the healthy
 port 8081. A generic restatement of the alert is not a pass.
 
+The 2026-09-25 live run met that criterion. Prometheus fired
+`LabCNFCInventoryRouteFailures` with `cnfc=checkout-edge-east` and
+`namespace=fcapsule-lab`, but no pod or service label. FCAPSule resolved both
+replicas, retained logs and metrics, and completed an investigation that named
+replica A's route to `inventory-api:8099`, contrasted replica B's successful
+probes to `inventory-api:8081`, and cited the configured 8081 endpoint. This is
+one observed run, not a measured success rate across repeated trials. After
+the lease expired, both replicas reported port 8081 and the alert resolved.
+
 The exporter screenshots must come from the external Prometheus Targets page during
 the fault. A graph is optional for workload cases; when attached, it must show the
 actual alert metric and affected workload/time range. Healthy preflight images, Lab
@@ -78,6 +86,7 @@ are not incident evidence.
 | `response-schema-skew` | Included: caller and dependency response-version settings disagree; bounded checkout traffic exercises the mismatch while Inventory remains fast. |
 | `metrics-service-label-drift` | Included: target discovery is lost while the selected application Pods remain healthy. |
 | `mysql-exporter-scrape-path` | Included as a runner-only case because real Prometheus screenshots and independent rollback are required. |
+| `cnfc-route-drift` | Included outside the frozen benchmark: the alert names only a CNFC, and the investigation compares its two captured replicas to localize a route override. |
 
 Audit also found a real controller defect: non-config action paths referenced an
 uninitialized settings variable. The baseline settings are now defined for every
