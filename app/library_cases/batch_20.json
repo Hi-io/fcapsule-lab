@@ -1,0 +1,115 @@
+[
+  {
+    "id": "lib-20-01",
+    "title": "Ledger close posting interruptions",
+    "category": "resources",
+    "service": "ledger-posting-api",
+    "mechanism": "resource_memory",
+    "summary": "Posting requests fail intermittently and replicas restart during the monthly close window.",
+    "precursor": "A large tenant reconciliation was scheduled alongside the usual close workload, increasing the number of account lines processed in each run.",
+    "impact": "Some ledger batches remain pending for manual replay, delaying close reports and balance confirmation for finance teams.",
+    "parameters": {
+      "container_memory_limit_mib": 768,
+      "container_memory_working_set_peak_mib": 746,
+      "oom_kills_last_30m": 4,
+      "reconciliation_lines_per_batch": 185000,
+      "replica_count": 3
+    },
+    "context": {
+      "namespace": "finance-prod",
+      "deployment": "ledger-posting-api-v4",
+      "team": "accounting-platform"
+    }
+  },
+  {
+    "id": "lib-20-02",
+    "title": "Catalog image processing delay",
+    "category": "resources",
+    "service": "catalog-image-worker",
+    "mechanism": "resource_cpu",
+    "summary": "New product images take several minutes to appear, with the oldest work items aging across multiple polling cycles.",
+    "precursor": "A spring catalog refresh introduced higher-resolution uploads and a higher daily image arrival rate than the previous release period.",
+    "impact": "Merchandising teams cannot reliably preview updated listings before scheduled promotions, and the image-processing queue misses its freshness target.",
+    "parameters": {
+      "container_cpu_limit_millicores": 500,
+      "container_cpu_usage_millicores_peak": 492,
+      "cpu_throttled_periods_ratio": 0.71,
+      "average_image_megapixels": 32,
+      "queue_oldest_age_seconds": 684
+    },
+    "context": {
+      "namespace": "commerce-prod",
+      "deployment": "catalog-image-worker-r18",
+      "queue": "catalog.image.transform.v2"
+    }
+  },
+  {
+    "id": "lib-20-03",
+    "title": "Customer search request pileup",
+    "category": "resources",
+    "service": "customer-search-api",
+    "mechanism": "thread_pool",
+    "summary": "Search requests intermittently time out while active request counts climb and completed responses flatten.",
+    "precursor": "A regional index refresh began during the morning traffic ramp, and search requests started taking longer than their normal service window.",
+    "impact": "Support agents see incomplete customer results and retry searches, increasing wait times for callers seeking account assistance.",
+    "parameters": {
+      "worker_threads_per_pod": 48,
+      "active_workers_peak": 48,
+      "request_queue_capacity": 160,
+      "request_queue_rejections_10m": 392,
+      "p95_latency_ms": 9100,
+      "request_deadline_ms": 5000
+    },
+    "context": {
+      "namespace": "care-prod",
+      "deployment": "customer-search-api-2026.09.3",
+      "index": "customer-directory-east"
+    }
+  },
+  {
+    "id": "lib-20-04",
+    "title": "Invoice event freshness regression",
+    "category": "resources",
+    "service": "invoice-event-consumer",
+    "mechanism": "queue_backlog",
+    "summary": "Invoice status updates arrive well after the corresponding billing actions, and the oldest pending events continue to age.",
+    "precursor": "A billing-cycle boundary caused a burst of invoice state changes while the consumer fleet remained at its weekday baseline size.",
+    "impact": "Customer portals show stale invoice states and collections notices can be generated from outdated account information.",
+    "parameters": {
+      "queue_depth": 48200,
+      "oldest_message_age_seconds": 2460,
+      "incoming_messages_per_second": 920,
+      "processed_messages_per_second": 610,
+      "consumer_replicas": 4,
+      "max_in_flight_per_consumer": 32
+    },
+    "context": {
+      "namespace": "billing-prod",
+      "deployment": "invoice-event-consumer-v7",
+      "queue": "billing.invoice.lifecycle.v1"
+    }
+  },
+  {
+    "id": "lib-20-05",
+    "title": "Warehouse reservation contention",
+    "category": "resources",
+    "service": "warehouse-reservation-api",
+    "mechanism": "db_locked",
+    "summary": "Reservation attempts slow down sharply during replenishment and a growing share end without a confirmed allocation.",
+    "precursor": "A replenishment reconciliation began scanning multiple high-volume locations while order traffic continued at its afternoon peak.",
+    "impact": "Checkout cannot confirm stock for some items, leaving orders awaiting allocation and increasing duplicate reservation retries.",
+    "parameters": {
+      "transaction_lock_wait_p95_ms": 7200,
+      "lock_wait_timeouts_5m": 138,
+      "concurrent_reservation_requests_peak": 340,
+      "reconciliation_batch_locations": 12000,
+      "request_timeout_ms": 6000
+    },
+    "context": {
+      "namespace": "fulfillment-prod",
+      "deployment": "warehouse-reservation-api-r31",
+      "database": "warehouse_primary",
+      "region": "ap-northeast-1"
+    }
+  }
+]
