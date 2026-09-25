@@ -1,0 +1,118 @@
+[
+  {
+    "id": "lib-09-001",
+    "title": "Partner webhook acknowledgements arrive late",
+    "category": "notifications",
+    "service": "notification-webhook-dispatcher",
+    "mechanism": "http_timeout",
+    "summary": "Webhook notifications remain pending beyond their normal delivery window.",
+    "precursor": "After a partner maintenance window, acknowledgement latency climbed for a subset of webhook destinations while dispatch volume stayed near its daily baseline.",
+    "impact": "Downstream systems receive order and account-status updates late, leaving customer-facing integrations temporarily out of sync.",
+    "parameters": {
+      "connect_timeout_ms": 800,
+      "read_timeout_ms": 2500,
+      "attempts_per_delivery": 4,
+      "observed_partner_ack_p95_ms": 6800,
+      "delivery_deadline_seconds": 45
+    },
+    "context": {
+      "namespace": "notify-prod",
+      "deployment": "notification-webhook-dispatcher-7c9d8f",
+      "destination_group": "partner-ledger-v2",
+      "region": "ap-northeast-1"
+    }
+  },
+  {
+    "id": "lib-09-002",
+    "title": "Email digest partition stops making progress",
+    "category": "notifications",
+    "service": "notification-email-worker",
+    "mechanism": "queue_poison",
+    "summary": "A narrow group of email jobs is repeatedly revisited while one partition's oldest-message age keeps increasing.",
+    "precursor": "A digest template revision was rolled out shortly before workers began cycling through the same small set of scheduled messages.",
+    "impact": "Recipients on the affected partition miss scheduled digests, and unrelated messages assigned behind those jobs are delayed.",
+    "parameters": {
+      "queue": "notification-email-v3",
+      "partition": 12,
+      "max_delivery_attempts": 8,
+      "visibility_timeout_seconds": 90,
+      "oldest_message_age_seconds": 1840
+    },
+    "context": {
+      "namespace": "notify-prod",
+      "consumer_group": "email-digest-workers",
+      "template_revision": "digest-2026.09.24.3",
+      "cluster": "core-apne1-b"
+    }
+  },
+  {
+    "id": "lib-09-003",
+    "title": "Mobile push dispatches are rejected by provider",
+    "category": "notifications",
+    "service": "notification-push-gateway",
+    "mechanism": "auth_expired",
+    "summary": "Push submissions for one mobile platform are rejected, and device alerts are arriving late or not at all.",
+    "precursor": "The platform credential was rotated during a scheduled identity maintenance, after which rejection rates rose sharply for newly submitted pushes.",
+    "impact": "Time-sensitive account and security alerts do not reach affected mobile users within the expected delivery interval.",
+    "parameters": {
+      "provider": "apns",
+      "provider_status": 403,
+      "provider_reason": "ExpiredProviderToken",
+      "token_lifetime_seconds": 3600,
+      "rejected_submission_ratio": 0.94
+    },
+    "context": {
+      "namespace": "notify-prod",
+      "deployment": "notification-push-gateway-56df74c8b9",
+      "credential_alias": "apns-prod-primary",
+      "platform": "ios"
+    }
+  },
+  {
+    "id": "lib-09-004",
+    "title": "Campaign replay produces intermittent persistence failures",
+    "category": "notifications",
+    "service": "notification-outbox-writer",
+    "mechanism": "db_unique",
+    "summary": "Campaign replay requests fail intermittently and the number of newly scheduled notifications falls below the expected total.",
+    "precursor": "A worker acknowledgement timeout caused the latest campaign segment to be replayed after part of the segment had already completed.",
+    "impact": "Some recipients are not scheduled for delivery, and campaign completion reporting remains behind until the replay is reconciled.",
+    "parameters": {
+      "sqlstate": "23505",
+      "relation": "notification_outbox",
+      "constraint": "uq_outbox_tenant_event_channel",
+      "conflict_rate_percent": 12.6,
+      "replayed_segment_size": 2400
+    },
+    "context": {
+      "namespace": "notify-prod",
+      "deployment": "notification-outbox-writer-64bb8c",
+      "database_cluster": "orders-pg-02",
+      "campaign_id": "cmp-784219"
+    }
+  },
+  {
+    "id": "lib-09-005",
+    "title": "SMS delivery slows during a verification surge",
+    "category": "notifications",
+    "service": "notification-sms-relay",
+    "mechanism": "rate_limit",
+    "summary": "SMS notifications queue up and delivery receipts arrive late during a period of elevated verification traffic.",
+    "precursor": "An account-recovery surge overlapped with routine campaign fan-out, and outbound request volume rose above its recent peak.",
+    "impact": "Some verification codes arrive after their validity window, increasing sign-in retries and support contacts.",
+    "parameters": {
+      "provider": "twilio",
+      "provider_status": 429,
+      "provider_limit_requests_per_second": 80,
+      "configured_dispatch_requests_per_second": 125,
+      "retry_after_seconds": 10,
+      "code_ttl_seconds": 300
+    },
+    "context": {
+      "namespace": "notify-prod",
+      "deployment": "notification-sms-relay-5fcb78",
+      "provider_route": "sms-primary-us",
+      "region": "us-east-1"
+    }
+  }
+]
