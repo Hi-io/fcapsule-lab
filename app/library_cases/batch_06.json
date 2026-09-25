@@ -1,0 +1,117 @@
+[
+  {
+    "id": "lib-06-catalog-session-expiry",
+    "title": "Catalog authorization sessions expire during peak reads",
+    "category": "authorization",
+    "service": "catalog-api",
+    "mechanism": "auth_expired",
+    "summary": "Catalog reads begin receiving authentication failures shortly after a traffic increase, with retries succeeding inconsistently.",
+    "precursor": "A rollout increased the number of catalog replicas while the identity provider continued issuing short-lived access tokens.",
+    "impact": "Product pages intermittently fail to load inventory and price details, increasing checkout abandonment.",
+    "parameters": {
+      "http_status": 401,
+      "identity_error": "token_expired",
+      "token_lifetime_seconds": 900,
+      "refresh_lead_seconds": 45,
+      "affected_route": "/v2/catalog/items"
+    },
+    "context": {
+      "namespace": "storefront-prod",
+      "deployment": "catalog-api-v42",
+      "identity_client": "catalog-reader",
+      "region": "ap-northeast-1"
+    }
+  },
+  {
+    "id": "lib-06-partner-callback-signature",
+    "title": "Partner callback signatures rejected after queue delay",
+    "category": "authorization",
+    "service": "webhook-relay",
+    "mechanism": "auth_signature",
+    "summary": "Partner callbacks reach the relay over healthy connections but are rejected by request verification.",
+    "precursor": "A sustained batch of delayed webhook deliveries raised callback age while the partner continued signing events at creation time.",
+    "impact": "Shipment status updates are delayed, and partner retries are accumulating faster than the relay can drain them.",
+    "parameters": {
+      "signature_header": "X-Partner-Signature",
+      "signature_algorithm": "ed25519",
+      "accepted_timestamp_age_seconds": 60,
+      "observed_timestamp_age_seconds": 117,
+      "callback_path": "/hooks/shipments"
+    },
+    "context": {
+      "namespace": "integrations-prod",
+      "deployment": "webhook-relay-v18",
+      "partner_id": "northstar-logistics",
+      "queue": "shipment-callbacks"
+    }
+  },
+  {
+    "id": "lib-06-reconciler-forbidden-patch",
+    "title": "Platform reconciler receives forbidden deployment updates",
+    "category": "authorization",
+    "service": "platform-reconciler",
+    "mechanism": "http_status",
+    "summary": "Reconciliation loops report repeated authorization denials when applying deployment changes in selected namespaces.",
+    "precursor": "A cluster access review narrowed the reconciler's namespace scope shortly before a routine rollout expanded to additional teams.",
+    "impact": "Application rollouts remain pending, leaving several customer-facing services on older revisions.",
+    "parameters": {
+      "http_status": 403,
+      "verb": "patch",
+      "resource": "deployments.apps",
+      "namespace": "billing-prod",
+      "denial_rate_percent": 100
+    },
+    "context": {
+      "namespace": "platform-system",
+      "service_account": "platform-reconciler",
+      "cluster_role": "deployment-operator",
+      "target_namespace": "billing-prod"
+    }
+  },
+  {
+    "id": "lib-06-invoice-audience-omitted",
+    "title": "Invoice dispatch requests fail at the document gateway",
+    "category": "authorization",
+    "service": "invoice-dispatcher",
+    "mechanism": "config_missing",
+    "summary": "Invoice submissions are rejected at the document gateway, and the dispatcher is retaining work for retry.",
+    "precursor": "A chart cleanup moved outbound identity settings into a shared values block before the dispatcher release.",
+    "impact": "New invoices are not delivered to customers on time, and the dispatch queue is growing.",
+    "parameters": {
+      "http_status": 401,
+      "required_setting": "DOCS_AUTH_AUDIENCE",
+      "expected_audience": "documents.internal",
+      "endpoint": "https://documents.internal/v1/invoices",
+      "queued_jobs": 684
+    },
+    "context": {
+      "namespace": "finance-prod",
+      "deployment": "invoice-dispatcher-v27",
+      "config_map": "invoice-dispatcher-runtime",
+      "queue": "invoice-delivery"
+    }
+  },
+  {
+    "id": "lib-06-provisioner-issuer-drift",
+    "title": "Tenant provisioning tokens fail identity validation",
+    "category": "authorization",
+    "service": "tenant-provisioner",
+    "mechanism": "config_invalid",
+    "summary": "Provisioning calls are rejected by the identity boundary even though the workload can reach its dependencies.",
+    "precursor": "A regional deployment promoted a values file from the staging environment during a production expansion.",
+    "impact": "New tenant workspaces are not created, delaying customer onboarding and generating support escalations.",
+    "parameters": {
+      "http_status": 401,
+      "configured_issuer": "https://identity.staging.example.net/",
+      "expected_issuer": "https://identity.example.net/",
+      "token_audience": "tenant-control",
+      "rejected_requests_per_minute": 36
+    },
+    "context": {
+      "namespace": "tenant-platform-prod",
+      "deployment": "tenant-provisioner-v11",
+      "region": "eu-west-1",
+      "identity_policy": "tenant-control-prod"
+    }
+  }
+]
