@@ -1,0 +1,117 @@
+[
+  {
+    "id": "lib-17-001",
+    "title": "Settlement closeout stalls during account rollup",
+    "category": "jobs",
+    "service": "settlement-reconciler",
+    "mechanism": "db_unique",
+    "summary": "The nightly closeout exits partway through account rollup and leaves the run incomplete.",
+    "precursor": "A late partner correction was replayed after the same settlement window had already been partially processed.",
+    "impact": "Finance dashboards remain on the prior close, and the morning payout review is delayed until reconciliation completes.",
+    "parameters": {
+      "schedule": "15 2 * * *",
+      "settlement_window": "2026-09-25",
+      "batch_size": 400,
+      "retry_limit": 3,
+      "backoff_seconds": 20
+    },
+    "context": {
+      "namespace": "payments-prod",
+      "job": "settlement-reconciler-20260926-0215",
+      "partner": "northstar-clearing",
+      "ledger_partition": "ledger-2026-09"
+    }
+  },
+  {
+    "id": "lib-17-002",
+    "title": "Catalog export misses its delivery window",
+    "category": "jobs",
+    "service": "catalog-exporter",
+    "mechanism": "http_timeout",
+    "summary": "The scheduled export repeatedly stops while publishing a completed catalog snapshot.",
+    "precursor": "The downstream merchandising endpoint began taking longer to respond during the regional inventory refresh.",
+    "impact": "Retail channels continue serving yesterday's assortment and new product changes are not visible before store opening.",
+    "parameters": {
+      "schedule": "0 */4 * * *",
+      "request_timeout_seconds": 12,
+      "attempts": 4,
+      "snapshot_rows": 185000,
+      "publish_deadline_utc": "2026-09-26T04:30:00Z"
+    },
+    "context": {
+      "namespace": "catalog-prod",
+      "job": "catalog-exporter-20260926-0400",
+      "destination": "merch-gateway",
+      "snapshot": "catalog-snap-88421"
+    }
+  },
+  {
+    "id": "lib-17-003",
+    "title": "Warehouse stock snapshot cannot reach its source",
+    "category": "jobs",
+    "service": "warehouse-snapshotter",
+    "mechanism": "dns_lookup",
+    "summary": "The inventory snapshot job aborts before collecting data from the warehouse API.",
+    "precursor": "The overnight warehouse maintenance window included a service endpoint change shortly before the snapshot schedule fired.",
+    "impact": "Available-to-promise counts are stale across fulfillment centers, increasing the risk of accepting orders for unavailable stock.",
+    "parameters": {
+      "schedule": "10 1 * * *",
+      "source_host": "warehouse-api.ops.svc.cluster.local",
+      "lookup_attempts": 5,
+      "lookup_interval_seconds": 6,
+      "snapshot_timeout_seconds": 180
+    },
+    "context": {
+      "namespace": "fulfillment-prod",
+      "job": "warehouse-snapshotter-20260926-0110",
+      "cluster": "west-2-prod",
+      "warehouse": "wh-ord-03"
+    }
+  },
+  {
+    "id": "lib-17-004",
+    "title": "Search reindex run cycles on one queued record",
+    "category": "jobs",
+    "service": "search-reindex-worker",
+    "mechanism": "queue_poison",
+    "summary": "The reindex run makes no forward progress and its worker repeatedly restarts the same segment.",
+    "precursor": "A content migration introduced an uncommon legacy record into the segment picked up by the overnight reindex.",
+    "impact": "Recent catalog edits remain missing from search results, while the backlog delays the next scheduled index refresh.",
+    "parameters": {
+      "schedule": "30 0 * * *",
+      "queue_name": "search.reindex.segments",
+      "max_attempts": 6,
+      "visibility_timeout_seconds": 90,
+      "dead_letter_queue": "search.reindex.segments.dlq"
+    },
+    "context": {
+      "namespace": "search-prod",
+      "job": "search-reindex-worker-20260926-0030",
+      "queue_partition": "segments-07",
+      "content_migration": "cms-v4-rollout-218"
+    }
+  },
+  {
+    "id": "lib-17-005",
+    "title": "Compliance digest run ends before delivery",
+    "category": "jobs",
+    "service": "compliance-digest-worker",
+    "mechanism": "auth_expired",
+    "summary": "The scheduled digest assembles its report but stops before submitting it to the delivery service.",
+    "precursor": "The identity provider rotated credentials during the weekend maintenance period, ahead of the weekly report schedule.",
+    "impact": "Compliance recipients do not receive the expected weekly digest, creating a manual review gap until delivery is restored.",
+    "parameters": {
+      "schedule": "0 6 * * 1",
+      "report_period_days": 7,
+      "token_refresh_window_seconds": 120,
+      "delivery_attempts": 3,
+      "delivery_timeout_seconds": 15
+    },
+    "context": {
+      "namespace": "governance-prod",
+      "job": "compliance-digest-worker-20260928-0600",
+      "report": "weekly-access-review",
+      "delivery_service": "secure-mailer"
+    }
+  }
+]
