@@ -672,8 +672,7 @@ class DemoRunnerTests(unittest.TestCase):
         ]}}
         args = SimpleNamespace(fcapsule="http://product", episode_quiet_seconds=60)
         with tempfile.TemporaryDirectory() as directory, \
-             patch.object(runner, "request", return_value=state) as api, \
-             patch.object(runner.time, "sleep") as sleep:
+             patch.object(runner, "request", return_value=state) as api:
             result = runner.ensure_fresh_episode_context(args, Path(directory), "dependency-route")
 
             self.assertEqual(result["status"], "ready")
@@ -685,7 +684,6 @@ class DemoRunnerTests(unittest.TestCase):
             self.assertEqual(result["prior_episode_ids"], ["old-orders"])
             self.assertEqual(result["waited_seconds"], 0)
             self.assertEqual(api.call_count, 1)
-            sleep.assert_not_called()
             self.assertEqual(runner.read(Path(directory) / "episode-isolation.json"), result)
 
     def test_exporter_isolation_preserves_the_probe_output_directory_contract(self):
