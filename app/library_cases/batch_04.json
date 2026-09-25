@@ -1,0 +1,109 @@
+[
+  {
+    "id": "lib-04-001",
+    "title": "Overlapping renewal runs leave invoice status inconsistent",
+    "category": "billing",
+    "service": "billing-renewal-worker",
+    "mechanism": "db_unique",
+    "summary": "Renewal batches report some accounts as unbilled while invoice retries remain noisy.",
+    "precursor": "A delayed scheduler run overlapped with the regional catch-up job after a short queue pause.",
+    "impact": "Monthly charges are delayed for affected accounts, and support agents see conflicting invoice status across retries.",
+    "parameters": {
+      "renewal_window": "2026-09-25T00:00:00Z/2026-09-26T00:00:00Z",
+      "retry_attempts": 4,
+      "affected_accounts": 183,
+      "statement_batch": "renewal-apac-2026-09-25"
+    },
+    "context": {
+      "namespace": "commerce-prod",
+      "deployment": "billing-renewal-worker",
+      "region": "ap-northeast-1"
+    }
+  },
+  {
+    "id": "lib-04-002",
+    "title": "Plan upgrades stall during checkout",
+    "category": "billing",
+    "service": "billing-checkout-api",
+    "mechanism": "http_timeout",
+    "summary": "Plan upgrades remain pending during checkout, with intermittent gateway warnings.",
+    "precursor": "A tax calculation service began responding more slowly in one region shortly after a plan catalog rollout.",
+    "impact": "Customers abandon some upgrades and successful requests take long enough to trigger duplicate support inquiries.",
+    "parameters": {
+      "upstream_timeout_ms": 2500,
+      "observed_p95_ms": 6120,
+      "pending_changes": 76,
+      "plan_family": "team-annual"
+    },
+    "context": {
+      "namespace": "commerce-prod",
+      "deployment": "billing-checkout-api",
+      "dependency": "tax-quote-gateway",
+      "region": "eu-west-1"
+    }
+  },
+  {
+    "id": "lib-04-003",
+    "title": "Subscription change stream stops advancing",
+    "category": "billing",
+    "service": "billing-events-consumer",
+    "mechanism": "queue_poison",
+    "summary": "Subscription-change processing is no longer advancing for a small group of accounts.",
+    "precursor": "A legacy annual-to-monthly change produced an event containing an uncommon proration adjustment during a migration window.",
+    "impact": "Proration updates and resulting invoices are delayed until the affected event sequence is recovered.",
+    "parameters": {
+      "partition": 12,
+      "consumer_group": "billing-subscription-projection-v3",
+      "blocked_events": 1,
+      "lagged_records": 248
+    },
+    "context": {
+      "namespace": "commerce-prod",
+      "topic": "subscription-change-v2",
+      "consumer": "billing-events-consumer"
+    }
+  },
+  {
+    "id": "lib-04-004",
+    "title": "Settlement exports accumulate after maintenance",
+    "category": "billing",
+    "service": "billing-settlement-exporter",
+    "mechanism": "auth_expired",
+    "summary": "Settlement exports are accumulating and the payment integration shows repeated authorization failures.",
+    "precursor": "Gateway credentials were renewed during scheduled maintenance while the exporter deployment was rolling across two worker pools.",
+    "impact": "Daily settlement files arrive late, delaying finance reconciliation and payment exception review.",
+    "parameters": {
+      "export_queue_depth": 39,
+      "first_failed_export": "2026-09-26T01:15:00Z",
+      "gateway_status": 401,
+      "retry_interval_seconds": 300
+    },
+    "context": {
+      "namespace": "commerce-prod",
+      "deployment": "billing-settlement-exporter",
+      "integration": "paygate-eu",
+      "region": "eu-central-1"
+    }
+  },
+  {
+    "id": "lib-04-005",
+    "title": "Refund adjustments fail on imported accounts",
+    "category": "billing",
+    "service": "billing-refunds-api",
+    "mechanism": "db_foreign_key",
+    "summary": "Refund adjustments for a subset of migrated accounts fail validation and remain open in the operator queue.",
+    "precursor": "A customer-account merge imported historical refund requests before all related invoice records were available in the ledger.",
+    "impact": "Affected refunds cannot be finalized, leaving customer balances unresolved and finance reconciliation incomplete.",
+    "parameters": {
+      "open_adjustments": 27,
+      "oldest_request_age_hours": 19,
+      "import_batch": "acct-merge-2026-09-24-b",
+      "refund_currency": "GBP"
+    },
+    "context": {
+      "namespace": "commerce-prod",
+      "deployment": "billing-refunds-api",
+      "ledger": "subscription-ledger-v4"
+    }
+  }
+]
