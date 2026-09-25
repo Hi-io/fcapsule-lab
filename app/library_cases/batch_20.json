@@ -68,7 +68,7 @@
   },
   {
     "id": "lib-20-04",
-    "title": "Invoice event freshness regression",
+    "title": "Billing-cycle queue backlog delays invoices",
     "category": "resources",
     "service": "invoice-event-consumer",
     "mechanism": "queue_backlog",

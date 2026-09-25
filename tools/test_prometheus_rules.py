@@ -11,11 +11,18 @@ import yaml
 
 RULE_FILE = Path("deploy/kubernetes/observability.yaml")
 COMPOSE_RULE_FILE = Path("prometheus/alerts.yml")
+LIBRARY_RULE_FILE = Path("deploy/kubernetes/incident_library.yaml")
 
 
 def load_rule_spec(root: Path | None = None) -> dict[str, Any]:
     root = root or Path(__file__).resolve().parents[1]
     documents = yaml.safe_load_all((root / RULE_FILE).read_text(encoding="utf-8"))
+    return next(item["spec"] for item in documents if item.get("kind") == "PrometheusRule")
+
+
+def load_library_rule_spec(root: Path | None = None) -> dict[str, Any]:
+    root = root or Path(__file__).resolve().parents[1]
+    documents = yaml.safe_load_all((root / LIBRARY_RULE_FILE).read_text(encoding="utf-8"))
     return next(item["spec"] for item in documents if item.get("kind") == "PrometheusRule")
 
 
@@ -417,6 +424,18 @@ def build_rule_test(spec: dict[str, Any]) -> dict[str, Any]:
 
     tests.extend(_counter_rule_cases(rules))
 
+    library_rule = _rules_by_name(load_library_rule_spec())["LabLibraryOperationFailures"]
+    library_id = {"scenario_id": "lib-01-001"}
+    tests.append(_rule_case(
+        {"LabLibraryOperationFailures": library_rule}, "LabLibraryOperationFailures", [
+            _series("lab_library_failures_total", "library-positive", "lab-incident-library",
+                    "0 5 5 5 5 5", library_id),
+            _series("lab_library_active", "library-positive", "lab-incident-library",
+                    "1 1 1 1 0 0", library_id),
+        ], pod="library-positive", service="lab-incident-library", extra_labels=library_id,
+        absent_at=("0s", "10s", "20s"), firing_at=("15s",),
+    ))
+
     cnfc_rule = rules["LabCNFCInventoryRouteFailures"]
     cnfc_labels = {"cnfc": "checkout-edge-east"}
     fault_values = " ".join(str(value) for value in ([0] * 10 + [2 * step for step in range(1, 10)] + [18] * 16))
@@ -458,16 +477,20 @@ def main() -> None:
         folder = Path(temporary)
         rule_file = folder / "rules.yml"
         external_rule_file = folder / "external-rules.yml"
+        library_rule_file = folder / "library-rules.yml"
         compose_rule_file = root / COMPOSE_RULE_FILE
         test_file = folder / "tests.yml"
         external_spec = _load_external_rule()
+        library_spec = load_library_rule_spec(root)
         rule_file.write_text(yaml.safe_dump(spec), encoding="utf-8")
         external_rule_file.write_text(yaml.safe_dump(external_spec), encoding="utf-8")
-        test = {"rule_files": [str(rule_file), str(external_rule_file), str(compose_rule_file)],
+        library_rule_file.write_text(yaml.safe_dump(library_spec), encoding="utf-8")
+        test = {"rule_files": [str(rule_file), str(external_rule_file), str(library_rule_file), str(compose_rule_file)],
                 **build_rule_test(spec)}
         test_file.write_text(yaml.safe_dump(test), encoding="utf-8")
         subprocess.run([args.promtool, "check", "rules", str(rule_file)], check=True)
         subprocess.run([args.promtool, "check", "rules", str(external_rule_file)], check=True)
+        subprocess.run([args.promtool, "check", "rules", str(library_rule_file)], check=True)
         subprocess.run([args.promtool, "check", "rules", str(compose_rule_file)], check=True)
         subprocess.run([args.promtool, "test", "rules", str(test_file)], check=True)
 

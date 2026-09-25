@@ -1,10 +1,12 @@
 import contextlib
 import io
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from app.incident_library import MECHANISMS, load_cases, public_cases
+from app.control import ControlState
 from app.library_runtime import FailureExecutor, LibraryState
+from app.scenario_catalog import public_scenarios
 
 
 class IncidentLibraryTests(unittest.TestCase):
@@ -17,7 +19,7 @@ class IncidentLibraryTests(unittest.TestCase):
         self.assertEqual(len({item["title"] for item in self.cases.values()}), 100)
         self.assertEqual(len({item["category"] for item in self.cases.values()}), 20)
         self.assertTrue({item["mechanism"] for item in self.cases.values()} <= MECHANISMS)
-        self.assertEqual(len(set(self.cases) & set(__import__("app.scenario_catalog", fromlist=["SCENARIOS"]).SCENARIOS)), 0)
+        self.assertFalse(set(self.cases) & set(public_scenarios()))
         public = public_cases(self.cases)
         self.assertNotIn("parameters", next(iter(public.values())))
         self.assertNotIn("precursor", next(iter(public.values())))
@@ -54,6 +56,26 @@ class IncidentLibraryTests(unittest.TestCase):
             self.assertIn(f'lab_library_active{{scenario_id="{case_id}"}} 0', state.metrics())
         finally:
             state.executor.close()
+
+    def test_controller_owns_library_start_and_recovery(self):
+        state = ControlState()
+        state.logger = Mock()
+        state._health = Mock(return_value={"reachable": True})
+        state._persisted_run = Mock(return_value=None)
+        state._claim_run = Mock(return_value={})
+        state._post_for_run = Mock(return_value={"run_id": "a" * 32, "ok": True})
+        state._restore_owned_fields = Mock()
+        state._clear_run_claim = Mock()
+        case_id = next(iter(self.cases))
+        with patch("app.control.memory_snapshot", return_value={
+            "node_identity_verified": True, "available_bytes": 2 * 1024 ** 3,
+        }):
+            result = state.start(case_id, 30, "a" * 32)
+        self.assertEqual(result["run"]["targets"], ["library"])
+        self.assertEqual(state._post_for_run.call_args.args[0], state.library_url + "/control/scenario")
+        self.assertEqual(state._post_for_run.call_args.args[1]["mode"], case_id)
+        self.assertTrue(state.recover(expected_run_id="a" * 32)["ok"])
+        self.assertEqual(state._post_for_run.call_args.args[1], {"mode": "normal"})
 
 
 if __name__ == "__main__":

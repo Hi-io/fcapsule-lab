@@ -6,7 +6,7 @@ areas. Library cases are not scored examples or claims about FCAPSule's diagnost
 accuracy. They are meant to broaden the conditions available for later evaluation.
 
 Each library entry describes an operator-visible symptom, a plausible precursor,
-affected service and impact. The entry selects one of 21 bounded failure mechanisms.
+affected service and impact. The entry selects one of 22 bounded failure mechanisms.
 One lightweight workload executes the selected mechanism after an operator starts a
 leased run. It performs real local operations such as SQLite writes, an HTTP request,
 DNS resolution, socket connection, queue insertion, credential validation, or bounded

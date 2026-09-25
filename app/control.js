@@ -67,10 +67,13 @@ if (typeof document !== 'undefined') {
           article.dataset.search = `${item.title} ${item.summary} ${item.service} ${item.category}`.toLowerCase();
         }
         const title = document.createElement('h2'); title.textContent = item.title;
-        const tag = document.createElement('span'); tag.className = 'tag'; tag.textContent = item.class; title.append(tag);
+        const tag = document.createElement('span'); tag.className = 'tag';
+        tag.textContent = item.track === 'library' ? item.category.replaceAll('-', ' ') : item.class;
+        title.append(tag);
         const summary = document.createElement('p'); summary.textContent = item.summary;
         const evidence = document.createElement('small'); evidence.className = 'scenario-evidence';
-        evidence.textContent = 'Evidence: ' + (item.evidence_domains || []).join(' · ');
+        evidence.textContent = item.track === 'library' ? `${item.service} · Logs and metrics` :
+          'Evidence: ' + (item.evidence_domains || []).join(' · ');
         const actions = document.createElement('div'); actions.className = 'actions';
         if (item.runner_only) {
           const label = document.createElement('span'); label.textContent = 'External screenshot runner';

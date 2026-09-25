@@ -39,6 +39,17 @@ test('the demo track contains only qualified cases across telemetry and discover
   assert.deepEqual(tracks.development.map(item => item.id), ['timeout-budget', 'schema-drift']);
 });
 
+test('exploratory library cases stay outside the demo and development tracks', () => {
+  const tracks = groupTracks(selections({ scenarios: {
+    'poison-job': { track: 'demo' },
+    'timeout-budget': { track: 'development' },
+    'lib-01-001': { track: 'library', category: 'checkout' },
+  } }));
+  assert.deepEqual(tracks.demos.map(item => item.id), ['poison-job']);
+  assert.deepEqual(tracks.development.map(item => item.id), ['timeout-budget']);
+  assert.deepEqual(tracks.library.map(item => item.id), ['lib-01-001']);
+});
+
 test('graph links select both metric names without PromQL or dropping the ceiling', () => {
   const url = new URL(sourceUrl('http://prom:9090', 'prometheus_graph'));
   assert.equal(url.pathname, '/query');

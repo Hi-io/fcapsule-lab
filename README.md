@@ -7,12 +7,10 @@ after deployment. The scenario oracle stays in this repository; FCAPSule receive
 only the observability data it would see from an ordinary workload. The Lab is not
 a runtime dependency of FCAPSule.
 
-**Demo status:** four scenarios are currently qualified for presentation: an import
-retry loop (logs), a credential-migration CPU backlog (performance), a response
-schema mismatch (configuration), and a missing metrics target caused by Service
-label drift (monitoring discovery). The other 13 UI cases remain available for
-development but are not claimed as successful AI demos. See
-[scenario validation](docs/SCENARIO_VALIDATION.md) for the evidence and known issues.
+**Demo status:** the curated Demo track and the development backlog remain distinct.
+The supplementary 100-case Incident library is exploratory and is not claimed as a
+successful AI demo. See [scenario validation](docs/SCENARIO_VALIDATION.md) for the
+recorded qualifications and known issues.
 The configuration case was qualified through the recorded runner, which owns bounded
 checkout traffic. With the default generator at zero replicas, clicking its Lab UI
 start button alone does not guarantee a Prometheus alert.
@@ -31,6 +29,7 @@ workloads:
 | `traffic-generator` | Opt-in checkout workload at 25 requests/second, capped at 12 in flight | 300m CPU / 128 MiB |
 | `lab-worker` | Background jobs and resource incidents | 500m CPU / 192 MiB (effective `-k` limit) |
 | `lab-control` | Scenario UI and recovery controller | 150m CPU / 128 MiB |
+| `lab-incident-library` | Bounded executor for the supplementary 100-case library | 400m CPU / 192 MiB |
 
 The traffic generator is stopped by default to avoid normal DNS-induced false alerts.
 The operator runner starts it only for owned `timeout-budget` and
@@ -125,8 +124,11 @@ Worker/inventory operations have their own leases; durable import jobs expire af
 five minutes even if the controller is unavailable. This is a single-node test harness,
 not a guarantee against unrelated workloads exhausting the host.
 
-The Lab control UI presents one catalog of 17 scenarios. Five qualified cases appear
-in **Demo track**; the remaining 12 are under **Development backlog**. Fifteen cases
+The Lab control UI keeps its qualified **Demo track** separate from the existing
+**Development backlog** and the new searchable **Incident library**. The library has
+100 additional cases across 20 areas; it is exploratory and has not been qualified
+as a model benchmark. See [Incident Library](docs/INCIDENT_LIBRARY.md) for the
+execution and resource bounds. Fifteen original cases
 form the balanced workload-diagnosis benchmark across logs, metrics and configuration;
 two more exercise Prometheus discovery and scrape-path failures. Being in the catalog
 means a mechanism and expected evidence are defined, not that FCAPSule has already
