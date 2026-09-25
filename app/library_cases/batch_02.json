@@ -1,0 +1,114 @@
+[
+  {
+    "id": "lib-02-001",
+    "title": "Concurrent holds disrupt high-demand SKU reservations",
+    "category": "inventory",
+    "service": "inventory-api",
+    "mechanism": "db_unique",
+    "summary": "Reservation requests for a popular SKU intermittently return conflict responses even though the operator view still shows available units.",
+    "precursor": "A flash-sale window opened and the same SKU began receiving parallel holds from several checkout replicas.",
+    "impact": "Some checkout sessions cannot secure stock on the first attempt, raising retry traffic and lowering conversion during the sale.",
+    "parameters": {
+      "sku_id": "SKU-48192",
+      "parallel_hold_requests": 64,
+      "conflict_rate_percent": 18,
+      "observation_window_seconds": 90,
+      "client_retry_limit": 2
+    },
+    "context": {
+      "namespace": "commerce-prod",
+      "cluster": "retail-west-1",
+      "deployment": "inventory-api"
+    }
+  },
+  {
+    "id": "lib-02-002",
+    "title": "New catalog items fail warehouse reservation",
+    "category": "inventory",
+    "service": "stock-reserver",
+    "mechanism": "db_foreign_key",
+    "summary": "Reservation attempts for a subset of newly listed items fail while established catalog items continue to reserve normally.",
+    "precursor": "A supplier catalog import completed shortly before the warehouse availability feed began including the new item codes.",
+    "impact": "Customers cannot complete checkout for affected items despite warehouse staff reporting on-hand stock.",
+    "parameters": {
+      "affected_sku_count": 37,
+      "feed_batch_id": "wms-2026-09-26-0315",
+      "reservation_error_rate_percent": 100,
+      "healthy_sku_error_rate_percent": 0,
+      "import_age_minutes": 11
+    },
+    "context": {
+      "namespace": "fulfillment-prod",
+      "cluster": "retail-east-2",
+      "consumer": "warehouse-feed"
+    }
+  },
+  {
+    "id": "lib-02-003",
+    "title": "Reservation traffic sees intermittent connection failures",
+    "category": "inventory",
+    "service": "reservation-gateway",
+    "mechanism": "tcp_refused",
+    "summary": "The reservation gateway records short bursts of upstream connection errors, with successful requests returning between bursts.",
+    "precursor": "A node drain rescheduled inventory read replicas across the zone during a routine maintenance window.",
+    "impact": "Availability checks and stock holds intermittently fail for shoppers routed through the affected gateway replicas.",
+    "parameters": {
+      "failed_connections_per_minute": 46,
+      "affected_gateway_replicas": 2,
+      "total_gateway_replicas": 8,
+      "retry_success_percent": 71,
+      "zone": "us-west-2b"
+    },
+    "context": {
+      "namespace": "checkout-prod",
+      "cluster": "retail-west-1",
+      "service": "reservation-gateway",
+      "maintenance_window": "mw-2026-09-26-02"
+    }
+  },
+  {
+    "id": "lib-02-004",
+    "title": "One depot stops applying replenishment updates",
+    "category": "inventory",
+    "service": "inventory-feed-worker",
+    "mechanism": "queue_poison",
+    "summary": "On-hand quantities stop advancing for one depot while feed processing and stock changes at other depots remain current.",
+    "precursor": "The overnight warehouse import started after a partner feed rollout that expanded the set of location attributes.",
+    "impact": "The affected depot advertises outdated availability, causing reservations to be rejected later or usable stock to remain hidden.",
+    "parameters": {
+      "depot_code": "DPT-044",
+      "last_applied_sequence": 887420,
+      "queue_lag_messages": 12840,
+      "other_depot_max_lag_messages": 19,
+      "feed_partition": 6
+    },
+    "context": {
+      "namespace": "warehouse-prod",
+      "cluster": "supply-central-1",
+      "queue": "wms-stock-events",
+      "consumer_group": "inventory-feed-v3"
+    }
+  },
+  {
+    "id": "lib-02-005",
+    "title": "Supplier allocation delays availability responses",
+    "category": "inventory",
+    "service": "availability-aggregator",
+    "mechanism": "http_timeout",
+    "summary": "Availability lookups for supplier-managed items exceed the response deadline and intermittently show no result, while local-stock lookups remain responsive.",
+    "precursor": "A supplier allocation batch began covering a broader daily assortment during the afternoon ordering peak.",
+    "impact": "Product pages and checkout cannot confirm availability for affected items, deferring orders until retries succeed.",
+    "parameters": {
+      "supplier_id": "SUP-208",
+      "upstream_deadline_ms": 1200,
+      "upstream_p95_ms": 1870,
+      "timeout_rate_percent": 23,
+      "local_stock_p95_ms": 84
+    },
+    "context": {
+      "namespace": "commerce-prod",
+      "cluster": "retail-east-2",
+      "dependency": "supplier-allocation-api"
+    }
+  }
+]
