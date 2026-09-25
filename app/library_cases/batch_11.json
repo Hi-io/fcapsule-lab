@@ -1,0 +1,109 @@
+[
+  {
+    "id": "lib-11-catalog-schema-rollout",
+    "title": "Catalog documents stop indexing after a feed rollout",
+    "category": "search",
+    "service": "search-indexer",
+    "mechanism": "db_schema",
+    "summary": "New catalog documents are being rejected by the indexing path, and product freshness is falling behind.",
+    "precursor": "The supplier feed began publishing the market_region facet after a catalog schema release.",
+    "impact": "Products updated in the current feed window remain absent from search until the index catches up.",
+    "parameters": {
+      "table": "search_documents",
+      "write_path": "catalog-upsert",
+      "column": "market_region",
+      "feed_batch_size": 240,
+      "schema_revision": "catalog-2026.09.24"
+    },
+    "context": {
+      "namespace": "catalog-prod",
+      "deployment": "search-indexer",
+      "index": "products-v7"
+    }
+  },
+  {
+    "id": "lib-11-ranking-budget",
+    "title": "Relevance scoring disrupts search responses",
+    "category": "search",
+    "service": "search-query-api",
+    "mechanism": "http_timeout",
+    "summary": "Requests that include relevance scoring intermittently exceed their response budget and return incomplete result sets.",
+    "precursor": "The recommendation team enabled an expanded feature set for the afternoon catalog ranking experiment.",
+    "impact": "Search latency breaches the storefront objective during scored queries, reducing completed product searches.",
+    "parameters": {
+      "dependency_service": "ranking-api",
+      "request_timeout_ms": 700,
+      "observed_p95_ms": 1140,
+      "fallback_result_limit": 20
+    },
+    "context": {
+      "namespace": "storefront-prod",
+      "route": "search-query-v4",
+      "experiment": "relevance-2026-09-b"
+    }
+  },
+  {
+    "id": "lib-11-suggestions-resolution",
+    "title": "Autocomplete becomes unavailable after traffic shift",
+    "category": "search",
+    "service": "search-suggest-api",
+    "mechanism": "dns_lookup",
+    "summary": "Autocomplete returns an availability error while full-text search remains responsive.",
+    "precursor": "Suggestions traffic began moving to a replacement component during a cluster-pool rollout.",
+    "impact": "Shoppers lose query suggestions and submit fewer refined searches, while direct search queries continue to work.",
+    "parameters": {
+      "dependency_service": "suggestion-store.search.svc.cluster.local",
+      "lookup_timeout_ms": 250,
+      "failed_lookup_rate_pct": 32,
+      "fallback": "empty_suggestions"
+    },
+    "context": {
+      "namespace": "search-prod",
+      "service": "search-suggest-api",
+      "rollout": "suggestions-20260926"
+    }
+  },
+  {
+    "id": "lib-11-catalog-event-stall",
+    "title": "A slice of catalog updates stops reaching search",
+    "category": "search",
+    "service": "catalog-event-consumer",
+    "mechanism": "queue_poison",
+    "summary": "Some catalog updates remain pending while other feed partitions continue to advance.",
+    "precursor": "A supplier started sending nested availability windows in its catalog export.",
+    "impact": "Affected products show outdated availability in search, and their pending updates do not clear with normal retries.",
+    "parameters": {
+      "topic": "catalog.documents.v3",
+      "max_delivery_attempts": 6,
+      "batch_size": 80,
+      "dead_letter_topic": "catalog.documents.dlq"
+    },
+    "context": {
+      "namespace": "catalog-prod",
+      "consumer_group": "search-indexers",
+      "partition": "12"
+    }
+  },
+  {
+    "id": "lib-11-facet-snapshot-drift",
+    "title": "Facet counts disagree with the current catalog",
+    "category": "search",
+    "service": "search-facet-api",
+    "mechanism": "cache_stale",
+    "summary": "Facet panels continue displaying counts from an earlier catalog snapshot after product records have changed.",
+    "precursor": "A bulk category correction and product reindex completed during the nightly catalog maintenance window.",
+    "impact": "Customers are steered toward outdated category and availability refinements, hiding matching products from filtered searches.",
+    "parameters": {
+      "facet_cache_ttl_seconds": 900,
+      "cache_namespace": "search-facets-v2",
+      "index_alias": "products-current",
+      "reindex_batch_id": "catalog-20260926-0200"
+    },
+    "context": {
+      "namespace": "search-prod",
+      "service": "search-facet-api",
+      "index_alias": "products-current",
+      "maintenance_window": "catalog-nightly-2026-09-26"
+    }
+  }
+]
