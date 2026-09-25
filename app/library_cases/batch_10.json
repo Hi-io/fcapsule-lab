@@ -1,0 +1,107 @@
+[
+  {
+    "id": "lib-10-001",
+    "title": "Multipart media uploads stop before availability",
+    "category": "storage",
+    "service": "media-ingest",
+    "mechanism": "http_timeout",
+    "summary": "Large media uploads remain in a pending state and do not appear in the asset browser, while smaller uploads complete normally.",
+    "precursor": "A partner began uploading high-resolution campaign footage through the resumable upload endpoint during a regional traffic peak.",
+    "impact": "Editors cannot review newly uploaded footage, and clients retrying the same uploads increase ingest traffic.",
+    "parameters": {
+      "object_size_mb": 768,
+      "completion_request_timeout_ms": 1800,
+      "upload_part_count": 48,
+      "max_completion_attempts": 3
+    },
+    "context": {
+      "namespace": "media-prod",
+      "tenant": "northstar-studio",
+      "bucket": "campaign-originals-eu1"
+    }
+  },
+  {
+    "id": "lib-10-002",
+    "title": "Tenant media cleanup leaves deleted assets visible",
+    "category": "storage",
+    "service": "media-catalog",
+    "mechanism": "db_foreign_key",
+    "summary": "Offboarded tenant assets remain listed after cleanup, and repeated cleanup attempts report failures for the same batch.",
+    "precursor": "A tenant offboarding workflow started removing catalog records while a retention worker was processing associated renditions.",
+    "impact": "Former tenant content continues to consume catalog and storage capacity, and the offboarding workflow cannot be confirmed complete.",
+    "parameters": {
+      "cleanup_batch_size": 200,
+      "retry_limit": 4,
+      "rendition_families_per_asset": 6,
+      "offboarding_age_hours": 30
+    },
+    "context": {
+      "namespace": "media-prod",
+      "tenant": "cobalt-archive",
+      "catalog_table": "media_assets"
+    }
+  },
+  {
+    "id": "lib-10-003",
+    "title": "Image rendition workers stop making progress",
+    "category": "storage",
+    "service": "image-derivative",
+    "mechanism": "queue_poison",
+    "summary": "Preview generation stops advancing beyond a small group of recent uploads, even though workers remain healthy and online.",
+    "precursor": "A studio bulk-imported a mixed set of camera originals, after which rendition jobs for later uploads began cycling through retries.",
+    "impact": "New images lack thumbnails in review screens, slowing approval and leaving editors unable to distinguish recent uploads.",
+    "parameters": {
+      "queue_name": "media-renditions-v2",
+      "max_delivery_attempts": 8,
+      "payload_size_bytes": 184320,
+      "rendition_profile": "review-1600w"
+    },
+    "context": {
+      "namespace": "media-prod",
+      "tenant": "mariner-catalog",
+      "workload": "image-derivative-7d9f6c"
+    }
+  },
+  {
+    "id": "lib-10-004",
+    "title": "Archived video downloads fail for selected recordings",
+    "category": "storage",
+    "service": "archive-gateway",
+    "mechanism": "file_missing",
+    "summary": "Download requests for a subset of older recordings fail, while their catalog entries and neighboring recordings remain accessible.",
+    "precursor": "The archive team completed a lifecycle-tier migration for recordings older than ninety days earlier in the day.",
+    "impact": "Support staff cannot retrieve affected footage for customer requests, and the archive inventory no longer matches the records shown to users.",
+    "parameters": {
+      "object_age_days": 94,
+      "download_window_hours": 6,
+      "affected_recording_count": 37,
+      "archive_tier": "cold-media-2026q3"
+    },
+    "context": {
+      "namespace": "archive-prod",
+      "tenant": "harbor-transit",
+      "bucket": "recordings-cold-eu1"
+    }
+  },
+  {
+    "id": "lib-10-005",
+    "title": "Replaced media continues serving an earlier rendition",
+    "category": "storage",
+    "service": "media-delivery",
+    "mechanism": "cache_stale",
+    "summary": "Some viewers continue to receive the prior version of a replaced image, although the asset page shows the new upload as current.",
+    "precursor": "An editor replaced approved product photography shortly before a scheduled catalog publication, and delivery traffic rose as the catalog went live.",
+    "impact": "Customers see inconsistent product imagery across sessions and storefront regions, creating review churn and risking incorrect merchandising.",
+    "parameters": {
+      "edge_ttl_seconds": 21600,
+      "replacement_age_minutes": 18,
+      "publication_regions": 12,
+      "asset_revision": "rev-42"
+    },
+    "context": {
+      "namespace": "media-prod",
+      "tenant": "kestrel-market",
+      "asset_id": "asset-prd-884193"
+    }
+  }
+]
