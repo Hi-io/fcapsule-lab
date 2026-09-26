@@ -68,9 +68,33 @@ logs, the independent alert record, one investigation JSON per model and one sco
 JSON per model. Ground truth is referenced by scenario ID but never copied into the
 model response files.
 
+## Offline Reconciliation
+
+The operator runner writes pipeline and diagnostic scores separately. Reconcile one
+retained scenario run without starting a scenario or contacting the cluster:
+
+```bash
+python tools/evaluate_recorded_run.py \
+  --run-dir local_reports/operator-demo-<UTC>/response-schema-skew/round-1
+```
+
+The report is created as `evaluation-contract.json` beside the saved run and refuses
+to overwrite an earlier report. It hashes the run, investigation, and frozen oracle;
+checks the saved assessment fingerprint; recomputes technical completion,
+observability, and diagnostic usefulness independently; and reports whether existing
+scores agree. It also snapshots expected alerts, evidence domains, findings, and
+action criteria in a dedicated section. The evaluator is fully offline: expected
+evidence is not sent to FCAPSule or included in the retained investigation.
+
+Technical completion requires a captured owned run, every pipeline check, complete
+observability, and a matching saved assessment fingerprint. Diagnostic usefulness is
+a separate lexical screening score and always requires human review. A technically
+complete run can still have a weak diagnosis; a high diagnostic score does not repair
+an incomplete or unverified run. The report is reconciliation evidence, not a general
+accuracy claim.
+
 The aggregate reports mean and median diagnostic score, tokens and case count. A
 serious report should also show per-category results, paired wins/ties, invalid
 comparisons and repeated-run dispersion. A higher score on this suite supports a
 model-selection decision for FCAPSule; it does not prove superiority outside these
 operational tasks.
-
