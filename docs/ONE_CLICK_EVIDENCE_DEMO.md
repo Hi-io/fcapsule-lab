@@ -15,7 +15,7 @@
    > This capture is from before the monitoring rollback. The target recovered
    > without restarting MySQL or the exporter, or changing labels.
 
-5. In the audio's **Evidence details**, set the observation time to when you
+5. Under **Source details (optional) > Time of observation**, enter when you
    verified recovery. This distinguishes incident-time imagery from the later
    operator observation. Request the investigation update and compare revisions.
 
