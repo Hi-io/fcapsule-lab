@@ -8,6 +8,9 @@ only the observability data it would see from an ordinary workload. The Lab is n
 a runtime dependency of FCAPSule.
 
 **Demo status:** the curated Demo track and the development backlog remain distinct.
+For a browser-only evidence demo, use **Monitoring change and recovery**:
+one Lab click, one external Prometheus screenshot and a ten-second voice note.
+See [the short walkthrough](docs/ONE_CLICK_EVIDENCE_DEMO.md). No port-forward is needed.
 The supplementary 100-case Incident library is exploratory and is not claimed as a
 successful AI demo. See [scenario validation](docs/SCENARIO_VALIDATION.md) for the
 recorded qualifications and known issues.

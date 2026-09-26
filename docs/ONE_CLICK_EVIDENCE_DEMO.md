@@ -5,8 +5,8 @@
 1. In the Lab Demo track, start **Monitoring change and recovery**. The default
    three-minute lease restores the original monitoring configuration automatically.
    No terminal, local script or port-forward is required.
-2. Open **Prometheus targets** from that scenario. Select scrape pool
-   `serviceMonitor/fcapsule-lab/fcapsule-lab-mysql/0`. Once DOWN, take **one**
+2. Open **Prometheus targets** from that scenario. The scrape pool
+   `serviceMonitor/fcapsule-lab/fcapsule-lab-mysql/0` is preselected. Once DOWN, take **one**
    screenshot including the endpoint, HTTP error and target labels.
 3. Let the Lab recover. Verify the target is UP again. In FCAPSule, open the new
    **LabExporterTargetUnavailable** incident and wait for its initial assessment.

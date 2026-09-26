@@ -5,6 +5,13 @@ const { graphUrl } = require('../tools/capture_demo.cjs');
 
 const healthy = () => ({ active: null, memory: { available_bytes: 2 * 1073741824, node_identity_verified: true }, worker: { reachable: true }, inventory: { reachable: true }, orders: { reachable: true } });
 
+test('the evidence demo opens the exact external scrape pool', () => {
+  const pool = 'serviceMonitor/fcapsule-lab/fcapsule-lab-mysql/0';
+  const url = new URL(sourceUrl('http://prometheus:9090', 'prometheus_targets', pool));
+  assert.equal(url.pathname, '/targets');
+  assert.equal(url.searchParams.get('pool'), pool);
+});
+
 test('start admission covers missing data, all services, active run and host memory', () => {
   assert.equal(canStart(healthy()), true);
   for (const value of [null, {}, { ...healthy(), active: {} }, { ...healthy(), orders: {} },

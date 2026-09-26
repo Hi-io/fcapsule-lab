@@ -20,7 +20,7 @@ function groupTracks(items) {
   };
 }
 
-function sourceUrl(base, sourceView) {
+function sourceUrl(base, sourceView, pool = '') {
   if (!['prometheus_graph', 'prometheus_targets'].includes(sourceView)) return null;
   const graph = sourceView === 'prometheus_graph';
   const url = new URL(graph ? '/query' : '/targets', base);
@@ -29,6 +29,7 @@ function sourceUrl(base, sourceView) {
     url.searchParams.set('g0.expr', '{__name__=~"inventory_mysql_client_sessions_active|inventory_mysql_server_max_connections|mysql_global_status_threads_connected|mysql_global_variables_max_connections",namespace="fcapsule-lab"}');
     url.searchParams.set('g0.tab', 'graph'); url.searchParams.set('g0.range_input', '10m');
   }
+  if (!graph && pool) url.searchParams.set('pool', pool);
   return url.href;
 }
 
@@ -85,7 +86,8 @@ if (typeof document !== 'undefined') {
           start.addEventListener('click', () => startScenario(item)); actions.append(start);
         }
         if (item.source_view) {
-          const href = sourceUrl(state.prometheus_url, item.source_view);
+          const href = sourceUrl(state.prometheus_url, item.source_view,
+            item.id === 'exporter-path-rollback' ? 'serviceMonitor/fcapsule-lab/fcapsule-lab-mysql/0' : '');
           if (href) {
             const link = document.createElement('a'); link.href = href; link.target = '_blank'; link.rel = 'noopener noreferrer';
             link.textContent = item.source_view === 'prometheus_graph' ? 'Prometheus graph' : 'Prometheus targets'; actions.append(link);
@@ -96,7 +98,7 @@ if (typeof document !== 'undefined') {
           const guide = document.createElement('details');
           const heading = document.createElement('summary'); heading.textContent = 'One screenshot + voice note';
           const steps = document.createElement('p');
-          steps.textContent = 'Open Prometheus targets. Select serviceMonitor/fcapsule-lab/fcapsule-lab-mysql/0 and capture the DOWN target with its endpoint and error. After recovery, add that image and a short voice note to the completed FCAPSule investigation.';
+          steps.textContent = 'Open Prometheus targets and capture the selected DOWN target with its endpoint and error. After recovery, add that image and a short voice note to the completed FCAPSule investigation.';
           const voice = document.createElement('p');
           voice.textContent = 'After verifying recovery: "This capture is from before the monitoring rollback. The target recovered without restarting MySQL or the exporter, or changing labels."';
           guide.append(heading, steps, voice); article.append(guide);

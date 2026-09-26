@@ -1,11 +1,14 @@
 # Scenario Operator Guide
 
-The control UI exposes 18 distinct incident scenarios. Six have been
+The control UI exposes 19 scenario entries, including a browser-controlled version
+of the existing exporter scrape-path mechanism. The original six have been
 qualified for the current live demonstration: `poison-job` and
 `transaction-deadlock` (logs),
 `cpu-saturation` (performance), `response-schema-skew` (configuration), and
 `metrics-service-label-drift` (monitoring discovery), plus `cnfc-route-drift`
-(CNFC-scoped configuration). The UI keeps these in **Demo track** and collapses
+(CNFC-scoped configuration). **Monitoring change and recovery** adds a one-click
+image-and-audio workflow; see [the walkthrough](ONE_CLICK_EVIDENCE_DEMO.md).
+The UI keeps these in **Demo track** and collapses
 the other 12 under **Development backlog**. Use
 [scenario validation](SCENARIO_VALIDATION.md) before
 presenting any deferred case as a successful AI investigation. Fifteen workload
