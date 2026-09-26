@@ -421,6 +421,13 @@ def build_rule_test(spec: dict[str, Any]) -> dict[str, Any]:
                             pod=exporter_pod, service=exporter_service, absent_at=("20s",)))
     tests.append(_rule_case(rules, "LabExporterScrapeFailed", [], pod=None,
                             service=exporter_service, absent_at=("30s",)))
+    tests.append(_rule_case(rules, "LabExporterTargetUnavailable", [exporter_up],
+                            pod=exporter_pod, service=exporter_service,
+                            absent_at=("0s", "15s", "25s"), firing_at=("20s",)))
+    tests.append(_rule_case(rules, "LabExporterTargetUnavailable", [stale_exporter_up],
+                            pod=exporter_pod, service=exporter_service, absent_at=("20s",)))
+    tests.append(_rule_case(rules, "LabExporterTargetUnavailable", [], pod=None,
+                            service=exporter_service, absent_at=("30s",)))
 
     tests.extend(_counter_rule_cases(rules))
 

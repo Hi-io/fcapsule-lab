@@ -92,6 +92,15 @@ if (typeof document !== 'undefined') {
           }
         }
         article.append(title, summary, evidence, actions);
+        if (item.id === 'exporter-path-rollback') {
+          const guide = document.createElement('details');
+          const heading = document.createElement('summary'); heading.textContent = 'One screenshot + voice note';
+          const steps = document.createElement('p');
+          steps.textContent = 'Open Prometheus targets. Select serviceMonitor/fcapsule-lab/fcapsule-lab-mysql/0 and capture the DOWN target with its endpoint and error. After recovery, add that image and a short voice note to the completed FCAPSule investigation.';
+          const voice = document.createElement('p');
+          voice.textContent = 'After verifying recovery: "This capture is from before the monitoring rollback. The target recovered without restarting MySQL or the exporter, or changing labels."';
+          guide.append(heading, steps, voice); article.append(guide);
+        }
         (item.track === 'demo' ? demos : item.track === 'library' ? library : development).append(article);
       }
       $('#demo-scenarios').replaceChildren(demos);

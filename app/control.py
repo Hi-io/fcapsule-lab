@@ -35,7 +35,8 @@ CONTROL_JOB_ID = "fcapsule.io/lab-control-job-id"
 FIELD_OWNER = "fcapsule.io/lab-control-field-owner"
 FIELD_BASELINE = "fcapsule.io/lab-control-field-baseline"
 FIELD_APPLIED = "fcapsule.io/lab-control-field-applied"
-CONTROLLED_RESOURCES = (("configmaps", "lab-scenario-config"), ("services", "lab-app-metrics"))
+CONTROLLED_RESOURCES = (("configmaps", "lab-scenario-config"), ("services", "lab-app-metrics"),
+                        ("servicemonitors", "fcapsule-lab-mysql"))
 class ControlState:
     def __init__(self) -> None:
         self.worker_url = os.environ.get("WORKER_URL", "http://lab-worker:8083")
@@ -72,8 +73,9 @@ class ControlState:
         if payload is not None:
             body = json.dumps(payload).encode("utf-8")
             headers["Content-Type"] = "application/merge-patch+json"
+        api = "apis/monitoring.coreos.com/v1" if resource == "servicemonitors" else "api/v1"
         request = Request(
-            f"https://{host}:{port}/api/v1/namespaces/{namespace}/{resource}/{name}",
+            f"https://{host}:{port}/{api}/namespaces/{namespace}/{resource}/{name}",
             data=body, method=method, headers=headers,
         )
         with urlopen(request, timeout=5, context=context) as response:
@@ -126,7 +128,7 @@ class ControlState:
         owner = current.get("metadata", {}).get("annotations", {}).get(EXTERNAL_PROBE_OWNER)
         return {"available": True, "active": bool(owner), "owner": owner}
 
-    def _claim_fields(self, resource: str, name: str, section: str, updates: dict[str, str]) -> None:
+    def _claim_fields(self, resource: str, name: str, section: str, updates: dict[str, Any]) -> None:
         current = self._kubernetes_get(resource, name)
         if current is None:
             return
@@ -144,7 +146,7 @@ class ControlState:
         for key, value in updates.items():
             if key not in baseline:
                 baseline[key] = target.get(key)
-            applied[key] = str(value)
+            applied[key] = value if section == "spec" else str(value)
         annotations.update({
             FIELD_OWNER: owner,
             FIELD_BASELINE: json.dumps(baseline, sort_keys=True, separators=(",", ":")),
@@ -156,7 +158,8 @@ class ControlState:
             metadata_patch["labels"] = {key: str(value) for key, value in updates.items()}
             patch = {"metadata": metadata_patch}
         else:
-            patch = {"metadata": metadata_patch, section: {key: str(value) for key, value in updates.items()}}
+            patch = {"metadata": metadata_patch, section: {
+                key: value if section == "spec" else str(value) for key, value in updates.items()}}
         self._kubernetes_patch(resource, name, patch)
 
     def _restore_owned_fields(self, resource: str, name: str, section: str,
@@ -275,7 +278,8 @@ class ControlState:
             raise ValueError(f"Unknown scenario: {scenario_id}")
         if (scenario_id in catalog and (catalog[scenario_id].get("runner_only")
                 or not catalog[scenario_id].get("actions")
-                and not catalog[scenario_id].get("service_metrics_label"))):
+                and not catalog[scenario_id].get("service_metrics_label")
+                and not catalog[scenario_id].get("scrape_path"))):
             raise ValueError("This scenario requires its guarded external runner")
         if request_id is not None and (not isinstance(request_id, str) or len(request_id) != 32
                                        or any(c not in "0123456789abcdef" for c in request_id)):
@@ -299,6 +303,8 @@ class ControlState:
                        [action["target"] for action in scenario.get("actions", [])])
             if scenario.get("service_metrics_label"):
                 targets.append("metrics-service")
+            if scenario.get("scrape_path"):
+                targets.append("exporter-monitor")
             targets = list(dict.fromkeys(targets))
             run = {"run_id": request_id or uuid.uuid4().hex, "scenario": scenario_id, "status": "starting",
                    "started_at": datetime.now(timezone.utc).isoformat(), "duration_seconds": duration,
@@ -349,6 +355,16 @@ class ControlState:
             "WARN", "Bounded lab intervention started", run_id=self.active["run_id"], target_count=target_count,
         )
         results = []
+        if scenario.get("scrape_path"):
+            monitor = self._kubernetes_get("servicemonitors", "fcapsule-lab-mysql")
+            endpoints = monitor.get("spec", {}).get("endpoints", []) if monitor else []
+            if len(endpoints) != 1 or endpoints[0].get("path", "/metrics") != "/metrics":
+                raise ValueError("Expected one healthy exporter endpoint at /metrics; no change applied")
+            if monitor.get("metadata", {}).get("annotations", {}).get(EXTERNAL_PROBE_OWNER):
+                raise ValueError("The external screenshot runner owns this monitor")
+            changed = [{**endpoints[0], "path": scenario["scrape_path"]}]
+            self._claim_fields("servicemonitors", "fcapsule-lab-mysql", "spec", {"endpoints": changed})
+            return {"ok": True, "scenario": scenario_id, "results": [{"target": "exporter-monitor", "status": "updated"}]}
         if scenario.get("service_metrics_label"):
             self._patch_metrics_service_label(str(scenario["service_metrics_label"]))
             self.logger.write(
@@ -423,6 +439,11 @@ class ControlState:
         owner = self.active["run_id"]
         targets = set(self.active.get("targets", []))
         baseline = self.active.get("baseline_settings", DEFAULT_SCENARIO_CONFIG)
+        if "exporter-monitor" in targets:
+            try:
+                self._restore_owned_fields("servicemonitors", "fcapsule-lab-mysql", "spec", owner)
+            except (HTTPError, URLError, TimeoutError, OSError, ValueError, json.JSONDecodeError) as exc:
+                errors.append(f"exporter monitor: {exc}")
         config_restored = True
         try:
             self._restore_owned_fields("configmaps", "lab-scenario-config", "data", owner)
@@ -566,6 +587,7 @@ button:disabled{background:#e8edef;color:#5b6870;border-color:#cbd3d7;cursor:not
 .dot{background:var(--muted)}.dot.up{background:var(--green)}.actions label{max-width:100%}select{max-width:100%}
 .track-title{font-size:18px;margin:0 0 10px}.development-track{margin-top:22px}.development-track>summary{cursor:pointer;font-weight:700;padding:10px 0;border-top:1px solid var(--line)}.development-track>summary:focus-visible{outline:2px solid var(--blue);outline-offset:3px}.track-count{color:var(--muted);font-weight:400;margin-left:6px}
 .library-tools{display:flex;gap:8px;flex-wrap:wrap;padding:5px 0 13px}.library-tools input{min-height:36px;border:1px solid #aeb8be;padding:6px 9px;flex:1;min-width:180px}.library-tools select{min-width:160px}.library-tools input:focus-visible{outline:2px solid var(--blue);outline-offset:3px}
+.scenario details{margin-top:14px;border-top:1px solid var(--line);padding-top:10px}.scenario details summary{cursor:pointer;color:var(--blue);font-weight:600}.scenario details p{min-height:0;margin:10px 0;overflow-wrap:anywhere}.scenario summary:focus-visible{outline:2px solid var(--blue);outline-offset:3px}
 </style></head><body><header><strong><span>FCAPS</span>ule Lab</strong><small>Failure control</small></header><main>
 <div class="head"><div><h1>Incident scenarios</h1><p id="run-state">Checking node headroom</p></div><div class="actions"><label>Duration <select id="duration"><option value="120">2 minutes</option><option value="180" selected>3 minutes</option><option value="300">5 minutes</option></select></label><button class="secondary" id="recover">Recover all</button></div></div>
 <div id="scenario-catalog" aria-busy="true"><section aria-labelledby="demo-track-heading"><h2 class="track-title" id="demo-track-heading">Demo track</h2><div class="grid" id="demo-scenarios"></div></section><details class="development-track"><summary>Development backlog<span class="track-count" id="development-count"></span></summary><div class="grid" id="development-scenarios"></div></details><details class="development-track"><summary>Incident library<span class="track-count" id="library-count"></span></summary><div class="library-tools"><input id="library-search" type="search" placeholder="Search cases" aria-label="Search library cases"><select id="library-category" aria-label="Library category"><option value="">All categories</option></select></div><div class="grid" id="library-scenarios"></div></details></div><div class="state"><span><i class="dot" id="worker-dot"></i>Worker: <b id="worker-state">checking</b></span><span><i class="dot" id="inventory-dot"></i>Inventory: <b id="inventory-state">checking</b></span><span><i class="dot" id="orders-dot"></i>Orders: <b id="orders-state">checking</b></span><span id="notice" role="status" aria-live="polite">Loading</span></div>

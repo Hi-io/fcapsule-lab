@@ -373,6 +373,17 @@ spec:
 
     - name: fcapsule-lab.monitoring-discovery
       rules:
+        - alert: LabExporterTargetUnavailable
+          expr: up{namespace="fcapsule-lab",service="mysql-exporter"} == 0
+          for: 15s
+          labels:
+            severity: warning
+            signal_class: discovery
+            target_service: mysql-exporter
+            target_workload: mysql-exporter
+          annotations:
+            summary: The exporter metrics target is unavailable.
+            description: Prometheus cannot collect metrics from a discovered exporter. Check monitoring and workload health independently.
         - alert: LabApplicationMetricsDiscoveryMissing
           expr: |
             absent_over_time(up{namespace="fcapsule-lab",service="orders-api"}[1m])

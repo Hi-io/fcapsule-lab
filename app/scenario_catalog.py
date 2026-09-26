@@ -152,6 +152,14 @@ DISCOVERY_SCENARIOS = {
 
 # An operator demo outside the frozen fifteen-case model-evaluation benchmark.
 OPERATOR_SCENARIOS = {
+    "exporter-path-rollback": {
+        "title": "Monitoring change and recovery", "class": "Discovery",
+        "evidence_group": "discovery", "track": "demo",
+        "summary": "A metrics endpoint fails after a monitoring change. Save a screenshot before automatic recovery.",
+        "source_view": "prometheus_targets",
+        "scrape_path": "/metrics-v2",
+        "expected_alert": "LabExporterTargetUnavailable",
+    },
     "cnfc-route-drift": {
         "title": "One CNFC replica loses its dependency route", "class": "CM",
         "evidence_group": "configuration", "track": "demo",
@@ -185,6 +193,6 @@ def public_scenarios() -> dict[str, dict[str, Any]]:
             "bounded_cpu" if key == "cpu-saturation" else
             "bounded_database_sessions" if key == "mysql-connections" else "bounded"
         )
-        scenarios[key]["screenshot_available"] = key == "mysql-exporter-scrape-path"
+        scenarios[key]["screenshot_available"] = key in {"mysql-exporter-scrape-path", "exporter-path-rollback"}
         scenarios[key]["runner_only"] = bool(item.get("runner_only"))
     return scenarios

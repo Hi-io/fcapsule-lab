@@ -213,7 +213,7 @@ class KubernetesLabTests(unittest.TestCase):
         self.assertEqual(len(SCENARIOS), 15)
         self.assertEqual(DISCOVERY_SCENARIOS["metrics-service-label-drift"]["expected_alert"], "LabApplicationMetricsDiscoveryMissing")
         catalog = public_scenarios()
-        self.assertEqual(len(catalog), 18)
+        self.assertEqual(len(catalog), 19)
         self.assertTrue(catalog["mysql-exporter-scrape-path"]["runner_only"])
         for item in catalog.values():
             self.assertNotIn("expected_alert", item)
